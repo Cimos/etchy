@@ -1,0 +1,17 @@
+[package]
+name = "etchy-cli"
+description = "etchy command-line interface — the primary surface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "etchy"
+path = "src/main.rs"
+
+[dependencies]
+etchy-core = { path = "../etchy-core" }
+# clap (derive), anstream/owo-colors, indicatif, anyhow added in Milestone 1.

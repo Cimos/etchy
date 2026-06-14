@@ -1,0 +1,11 @@
+[package]
+name = "etchy-core"
+description = "etchy core engine: parse, polygonize, boolean-diff, measure and render PCB fab data."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]

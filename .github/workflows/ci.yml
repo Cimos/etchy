@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      # Gating on fmt/clippy is enabled once a local toolchain has run `cargo fmt`
+      # and the real dependencies land (Milestone 1). Until then they're
+      # informational so the Phase-0 scaffold isn't blocked on un-runnable lints.
+      - name: rustfmt (informational)
+        run: cargo fmt --all --check
+        continue-on-error: true
+
+      - name: clippy (informational)
+        run: cargo clippy --workspace --all-targets
+        continue-on-error: true

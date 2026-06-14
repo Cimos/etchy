@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/etchy-core",
+    "crates/etchy-cli",
+    "crates/etchy-gui",
+    "crates/etchy-pdf",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Cimos/etchy"
+authors = ["Simon Maddison"]
+
+# Real dependencies (clap, i_overlay, eframe, pdfium-render, askama, serde_json,
+# rstar, petgraph, tiny-skia, …) are added per-crate as each module is built in
+# Milestone 1+. The verified choices + versions live in docs/DEVELOPER_GUIDE.md.
+# Phase-0 crates are std-only so the workspace compiles without a local toolchain.

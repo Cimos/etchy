@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# etchy keeps Cargo.lock committed (it ships binaries) — do NOT ignore it.
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build / scratch
+/dist/
+*.profraw
