@@ -1,0 +1,33 @@
+{
+  "format": "rs274x",
+  "copper_layers": 8,
+  "total_layers": 14,
+  "pads_per_layer": 3600,
+  "pad_area_mm2": 0.19635,
+  "block_pads": 100,
+  "expected_changed": {
+    "F_Cu": {
+      "kind": "added",
+      "pads": 100
+    },
+    "In1_Cu": {
+      "kind": "removed",
+      "pads": 100
+    }
+  },
+  "expected_unchanged": [
+    "In2_Cu",
+    "In3_Cu",
+    "In4_Cu",
+    "In5_Cu",
+    "In6_Cu",
+    "B_Cu",
+    "F_Mask",
+    "B_Mask",
+    "F_Silk",
+    "B_Silk",
+    "F_Paste",
+    "B_Paste"
+  ],
+  "note": "F_Cu gains a block (added); In1_Cu loses a block (removed); all other layers are byte-identical and must diff to empty."
+}

@@ -1,0 +1,5 @@
+# Generated board pair — regenerate deterministically with:
+#   python ../tools/gen_synth_board.py --out . --copper-layers 16 --grid 80
+# The generator + ground_truth.json are the tracked source of truth.
+revA/
+revB/

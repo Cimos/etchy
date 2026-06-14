@@ -73,17 +73,28 @@ fine to get end-to-end first:
 - Defer aperture macros, polarity-clear, arcs to M1 — but **fail loud** on them in
   the spike (don't silently skip — that violates the trust bar).
 
-## Test board (public KiCad demo)
+## Test board
+
+**Ready & exact-ground-truth (recommended — use this for the correctness check).**
+A deterministic generator already exists and its output was verified against the
+frozen v0.11 tool (top copper +8600px / inner_1 −8600px, every other layer empty):
 
 ```bash
-sudo apt install kicad                       # provides kicad-cli
-# pick a dense multi-layer KiCad demo (e.g. from /usr/share/kicad/demos),
+python corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 80
+# -> corpus/synthetic/{revA,revB}/ (16 copper + mask/silk/paste) + ground_truth.json
+```
+The delta is precisely known: `F_Cu` gains a 10×10 pad block (added), `In1_Cu`
+loses one (removed), every other layer is byte-identical. `ground_truth.json`
+lists the expected per-layer outcome — assert the engine reproduces it. Scale
+`--grid` up (e.g. 120) for the perf measurement. No KiCad needed.
+
+**Realistic (optional, for extra confidence).** A public KiCad demo plotted via
+`kicad-cli` (`sudo apt install kicad`):
+```bash
 kicad-cli pcb export gerbers -o revA/ <demo>.kicad_pcb
-# make revB: tweak one trace/pad in the demo, re-plot to revB/ (known delta),
+# edit one trace/pad, re-plot to revB/ for a second known-delta pair
 kicad-cli pcb export gerbers -o revB/ <demo-edited>.kicad_pcb
 ```
-Fallback for exact ground truth: synthesize a 16-layer dense-pour Gerber set with
-a programmatically-known delta (also seeds `corpus/synthetic/`).
 
 ## What to record (append below when done)
 
