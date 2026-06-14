@@ -49,7 +49,8 @@ without a local toolchain; real dependencies land per-module from Milestone 1.
 
 ## Next work
 
-`docs/ROADMAP.md` Phase 0 → M1. Immediate: **Spike 1** — prove `i_overlay` is
-correct AND fast on a real dense (8–16 layer) board (public KiCad demo, plotted
-via `kicad-cli`); then Spike 2 (Gerber/Excellon parse validation) and the
-golden-corpus harness.
+`docs/ROADMAP.md` Phase 0 → M1. Immediate: **Spike 1** — see
+[`docs/SPIKE_1.md`](docs/SPIKE_1.md) for the precise spec with docs.rs-verified
+`i_overlay` 7.0 + `gerber-parser` 0.5 APIs, success criteria, test-board steps,
+and the open decisions to resolve. Then Spike 2 (Gerber/Excellon parse
+validation) and the golden-corpus harness.
