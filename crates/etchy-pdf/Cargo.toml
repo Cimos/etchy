@@ -1,0 +1,15 @@
+[package]
+name = "etchy-pdf"
+description = "etchy schematic-PDF pixel diff (feature-gated; pulls pdfium-render). Phase-0 stub."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+etchy-core = { path = "../etchy-core" }
+# pdfium-render (static feature) + image added in Milestone 3. Kept a separate,
+# feature-gated crate so the heavy C++ PDFium dependency stays out of the default
+# geometric-diff binary.

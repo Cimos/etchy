@@ -1,0 +1,25 @@
+# cargo-deny config — enforces etchy's "permissive only, no copyleft" rule.
+# Wired into CI in Milestone 1 (once real dependencies land). Starter config;
+# tune the allow-list as the verified stack (see DEVELOPER_GUIDE) is added.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "NCSA",
+]
+# GPL / AGPL / LGPL / MPL are intentionally NOT allowed — etchy ships permissive
+# only (the reason mupdf/Poppler-based PDF crates were rejected; see DEVELOPER_GUIDE).
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]
+yanked = "deny"
