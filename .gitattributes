@@ -1,0 +1,20 @@
+# Normalize line endings to LF everywhere so Windows, WSL, and CI agree
+# (avoids CRLF churn and rustfmt/clippy line-ending noise across the move).
+* text=auto eol=lf
+
+*.rs    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.gbr   text eol=lf
+*.drl   text eol=lf
+
+# Binary assets — never touch
+*.png   binary
+*.jpg   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.a     binary
+*.lib   binary
