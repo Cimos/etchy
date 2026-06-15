@@ -78,9 +78,10 @@ proptest! {
         prop_assert_eq!(d.removed_regions(), 0, "nothing should be removed");
         prop_assert_eq!(d.added_regions(), extra.len(), "added region count != extra pads");
 
+        // Actual is an nm-quantized 64-gon; allow a small band around the ideal.
         let expected = pad_area_mm2() * extra.len() as f64 * ngon_factor();
         prop_assert!(
-            (d.added_area() - expected).abs() <= 1e-6 * (expected + 1.0),
+            (d.added_area() - expected).abs() <= 1e-3 * expected + 1e-6,
             "added area {} vs expected {}", d.added_area(), expected
         );
     }

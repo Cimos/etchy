@@ -133,8 +133,8 @@ fn committed_corpus_matches_ground_truth() {
     let expect_changed_area = pad_area * block_pads as f64 * ngon_factor();
     let tol = 0.01 * expect_changed_area;
 
-    // Build name → contours for both revs from the on-disk .gbr files.
-    let load = |dir: &Path| -> std::collections::BTreeMap<String, Contours> {
+    // Build name → geometry for both revs from the on-disk .gbr files.
+    let load = |dir: &Path| -> std::collections::BTreeMap<String, PolygonSet> {
         let mut m = std::collections::BTreeMap::new();
         for e in std::fs::read_dir(dir).unwrap().flatten() {
             let p = e.path();
