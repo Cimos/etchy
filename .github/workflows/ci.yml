@@ -30,6 +30,14 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
+      # Populate the golden corpus so the deep `committed_corpus_*` test runs
+      # (revA/revB are gitignored — regenerated on demand). Best-effort: where
+      # Python is absent the test skips gracefully and the self-contained
+      # `synthetic_*` golden tests still provide full coverage.
+      - name: Generate golden corpus (best-effort)
+        run: python corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
+        continue-on-error: true
+
       - name: Test
         run: cargo test --workspace
 

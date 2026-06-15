@@ -9,3 +9,10 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+gerber_parser = "0.5"
+gerber-types = "0.7"
+i_overlay = "7"
+serde_json = "1"
+proptest = "1"
