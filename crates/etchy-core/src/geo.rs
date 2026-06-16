@@ -36,6 +36,14 @@ pub fn quantize_mm(mm: f64) -> Result<i64, GeoError> {
     Ok(nm as i64)
 }
 
+/// Image polarity: dark adds copper, clear removes it (LPD/LPC, and macro
+/// primitive exposure). A layer's filled geometry is `dark − clear`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Polarity {
+    Dark,
+    Clear,
+}
+
 /// A point in fixed-point nanometres.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Pt {

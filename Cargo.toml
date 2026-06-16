@@ -28,5 +28,8 @@ serde_json = "1"
 # cli
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+# gui
+eframe = "0.34"
+egui = "0.34"
 # tests
 proptest = "1"

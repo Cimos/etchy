@@ -110,7 +110,7 @@ impl Board {
     }
 }
 
-/// How a layer kind pairs across the two revisions.
+/// How a layer pairs across the two revisions.
 #[derive(Debug)]
 pub enum LayerPairing<'a> {
     Both {
@@ -122,52 +122,40 @@ pub enum LayerPairing<'a> {
     OnlyNew(&'a Layer),
 }
 
-/// Fail loud if a revision contains two layers of the same kind. Pairing is one
-/// layer per kind, so a duplicate would be **silently dropped** (a missed change);
-/// we refuse it instead. `which` names the revision for the error message.
-pub fn ensure_unique_kinds(board: &Board, which: &str) -> Result<()> {
-    for (i, a) in board.layers.iter().enumerate() {
-        for b in &board.layers[i + 1..] {
-            if a.kind == b.kind {
-                return Err(EngineError::DuplicateLayerKind {
-                    which: which.to_string(),
-                    kind: format!("{:?}", a.kind),
-                    first: a.label.clone(),
-                    second: b.label.clone(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Pair layers by kind (rename-tolerant — pairing is by *kind*, not filename),
-/// in a stable stack order. Layers present in only one revision are reported as
-/// `OnlyOld`/`OnlyNew` (an added/removed layer is a legitimate revision change,
-/// not an error).
+/// Pair layers by **label** (filename), in a stable stack order. etchy diffs
+/// same-board revisions, which share filenames, so a label is the exact, unique
+/// pairing key — and unlike pairing by kind it never collapses two distinct files
+/// (e.g. several mechanical layers) into one (which would silently drop a layer).
+/// A label present in only one revision is reported `OnlyOld`/`OnlyNew` (an
+/// added/removed layer is a legitimate revision change, not an error).
 pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> {
-    let find = |b: &'a Board, k: LayerKind| b.layers.iter().find(|l| l.kind == k);
+    let find = |b: &'a Board, label: &str| b.layers.iter().find(|l| l.label == label);
 
-    // Union of kinds present in either revision.
-    let mut kinds: Vec<LayerKind> = Vec::new();
+    // Union of labels present in either revision, ordered by stack position.
+    let mut labels: Vec<&str> = Vec::new();
     for l in old.layers.iter().chain(new.layers.iter()) {
-        if !kinds.contains(&l.kind) {
-            kinds.push(l.kind);
+        if !labels.contains(&l.label.as_str()) {
+            labels.push(&l.label);
         }
     }
-    kinds.sort_by_key(|k| k.sort_key());
+    labels.sort_by_key(|&label| {
+        let kind = find(old, label)
+            .or_else(|| find(new, label))
+            .map(|l| l.kind);
+        (kind.map(|k| k.sort_key()).unwrap_or((255, 255)), label)
+    });
 
-    kinds
+    labels
         .into_iter()
-        .map(|kind| match (find(old, kind), find(new, kind)) {
+        .map(|label| match (find(old, label), find(new, label)) {
             (Some(o), Some(n)) => LayerPairing::Both {
-                kind,
+                kind: n.kind,
                 old: o,
                 new: n,
             },
             (Some(o), None) => LayerPairing::OnlyOld(o),
             (None, Some(n)) => LayerPairing::OnlyNew(n),
-            (None, None) => unreachable!("kind came from one of the boards"),
+            (None, None) => unreachable!("label came from one of the boards"),
         })
         .collect()
 }
@@ -187,8 +175,10 @@ pub fn same_board_guard(old: &Board, new: &Board) -> Result<()> {
 
     let span = |bb: [i64; 4]| (bb[2] - bb[0]).max(bb[3] - bb[1]).max(0);
     let max_span = span(ob).max(span(nb));
-    // Generous: 1 mm or 2% of the larger span, whichever is bigger.
-    let tol = (NM_PER_MM).max((max_span as f64 * 0.02) as i64);
+    // Generous on purpose: this catches *grossly* different boards (wrong files),
+    // not legitimate revision changes (a moved edge, an added tab/fiducial). 2 mm
+    // or 10% of the larger span, whichever is bigger. `--force` bypasses it.
+    let tol = (2 * NM_PER_MM).max((max_span as f64 * 0.10) as i64);
 
     for i in 0..4 {
         if (ob[i] - nb[i]).abs() > tol {
@@ -256,26 +246,28 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_kind_is_rejected() {
-        // Two layers of the same kind must fail loud (pairing would drop one).
+    fn same_kind_layers_pair_by_label() {
+        // Two layers of the same kind (e.g. several mechanical layers) must each
+        // pair by filename, never collapse onto one (which would drop a layer).
+        let mk = |label: &str| Layer {
+            kind: LayerKind::Other,
+            label: label.into(),
+            geometry: PolygonSet::new(vec![vec![vec![
+                Pt::new(0, 0),
+                Pt::new(1, 0),
+                Pt::new(1, 1),
+                Pt::new(0, 1),
+            ]]]),
+        };
+        let a = Board {
+            layers: vec![mk("M.GM1"), mk("M.GM2")],
+        };
         let b = Board {
-            layers: vec![
-                layer(LayerKind::Other, [0, 0, 1, 1]),
-                layer(LayerKind::Other, [0, 0, 1, 1]),
-            ],
+            layers: vec![mk("M.GM1"), mk("M.GM2")],
         };
-        assert!(matches!(
-            ensure_unique_kinds(&b, "old"),
-            Err(EngineError::DuplicateLayerKind { .. })
-        ));
-        // A board with distinct kinds passes.
-        let ok = Board {
-            layers: vec![
-                layer(LayerKind::TopCopper, [0, 0, 1, 1]),
-                layer(LayerKind::Other, [0, 0, 1, 1]),
-            ],
-        };
-        assert!(ensure_unique_kinds(&ok, "old").is_ok());
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|p| matches!(p, LayerPairing::Both { .. })));
     }
 
     #[test]

@@ -1,17 +1,12 @@
-//! Per-layer boolean diff (`added = B − A`, `removed = A − B`) via i_overlay's
-//! **integer** engine, plus the change magnitudes CI thresholds read.
+//! Per-layer boolean diff (`added = B − A`, `removed = A − B`) and the change
+//! magnitudes CI thresholds read. The boolean engine lives in `crate::boolean`;
+//! this module is the diff semantics + measurement on top of it.
 //!
 //! One computation feeds all three views (overlay, heatmap, magnitudes — see
-//! DEVELOPER_GUIDE "one computation, three views"). i_overlay's concrete types
-//! are confined to this module; the public result is our own [`PolygonSet`].
+//! DEVELOPER_GUIDE "one computation, three views").
 
-use i_overlay::core::fill_rule::FillRule;
-use i_overlay::core::overlay::Overlay;
-use i_overlay::core::overlay_rule::OverlayRule;
-use i_overlay::i_float::int::point::IntPoint;
-use i_overlay::i_shape::int::shape::{IntContour, IntShapes};
-
-use crate::geo::{Contour, PolygonSet, Pt, Shape};
+use crate::boolean;
+use crate::geo::PolygonSet;
 
 /// Magnitudes for one layer's change. Areas are exact integer nm² (`i128` avoids
 /// overflow on big pours); mm² is derived for humans / CI thresholds.
@@ -80,15 +75,11 @@ impl LayerDiff {
 /// Diff two filled layers: `removed = A − B`, `added = B − A`. Deterministic — a
 /// pure function of the integer input (no floating-point engine internals).
 pub fn diff_layer(a: &PolygonSet, b: &PolygonSet) -> LayerDiff {
-    let ai = to_int_contours(a);
-    let bi = to_int_contours(b);
-    let removed =
-        Overlay::<i64>::with_contours(&ai, &bi).overlay(OverlayRule::Difference, FillRule::NonZero);
-    let added =
-        Overlay::<i64>::with_contours(&bi, &ai).overlay(OverlayRule::Difference, FillRule::NonZero);
+    let ac = boolean::flatten(a);
+    let bc = boolean::flatten(b);
     LayerDiff {
-        added: from_int_shapes(added),
-        removed: from_int_shapes(removed),
+        removed: boolean::difference(&ac, &bc),
+        added: boolean::difference(&bc, &ac),
     }
 }
 
@@ -97,38 +88,10 @@ pub fn nm2_to_mm2(nm2: i128) -> f64 {
     nm2 as f64 / 1.0e12
 }
 
-// ---- i_overlay bridge (i_overlay types stay inside this module) ----
-
-fn to_int_contours(ps: &PolygonSet) -> Vec<IntContour<i64>> {
-    ps.shapes
-        .iter()
-        .flat_map(|shape| shape.iter())
-        .map(|contour| contour.iter().map(|p| IntPoint::new(p.x, p.y)).collect())
-        .collect()
-}
-
-fn from_int_shapes(shapes: IntShapes<i64>) -> PolygonSet {
-    let shapes: Vec<Shape> = shapes
-        .into_iter()
-        .map(|shape| {
-            shape
-                .into_iter()
-                .map(|contour| {
-                    contour
-                        .into_iter()
-                        .map(|p| Pt::new(p.x, p.y))
-                        .collect::<Contour>()
-                })
-                .collect::<Shape>()
-        })
-        .collect();
-    PolygonSet::new(shapes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geo::Shape;
+    use crate::geo::{Pt, Shape};
 
     fn square(x0: i64, y0: i64, s: i64) -> Shape {
         vec![vec![

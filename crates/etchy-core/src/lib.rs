@@ -7,93 +7,123 @@
 //! [`Board`], and returns a [`DiffReport`] or a typed [`EngineError`]; it never
 //! reads a file, prints, or exits — the CLI/GUI own all I/O (CLAUDE.md).
 //!
-//! This Milestone-1 increment renders **flash of circle/rect apertures**; every
-//! other feature fails loud (the trust bar). See `docs/M1_ENGINE_DESIGN.md`.
+//! The Gerber front-end resolves flashes (circle/rect/obround/polygon/macro),
+//! stroked `D01` lines and `G02/G03` arcs, `G36/G37` region fills, and `LPD/LPC`
+//! polarity. Features it cannot render faithfully fail loud (the trust bar).
+//! Excellon, and the SVG/HTML renderers, are later increments.
 
+mod boolean;
 pub mod diff;
 pub mod error;
 pub mod geo;
+pub mod geom;
 pub mod gerber;
 pub mod model;
-pub mod polygonize;
+pub mod naming;
 pub mod report;
+pub mod view;
 
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
 pub use geo::{
-    quantize_mm, Aperture, Contour, PolygonSet, Primitive, Pt, Shape, GRID_NM, NM_PER_MM,
+    quantize_mm, Aperture, Contour, Polarity, PolygonSet, Primitive, Pt, Shape, GRID_NM, NM_PER_MM,
 };
-pub use gerber::parse_gerber;
+pub use geom::CIRCLE_SEGMENTS;
+pub use gerber::resolve_layer;
 pub use model::{pair_layers, same_board_guard, Board, Layer, LayerKind, LayerPairing};
-pub use polygonize::{polygonize, CIRCLE_SEGMENTS};
+pub use naming::{classify, looks_like_gerber};
 pub use report::{DiffReport, LayerReport, LayerStatus, Totals, SCHEMA_VERSION};
+pub use view::{BoardDiff, LayerView};
 
 /// The crate version, from Cargo.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Parse + polygonize one Gerber layer's bytes into its filled geometry — the
-/// convenience the CLI calls per file.
+/// Parse + resolve one Gerber layer's bytes into its filled geometry — the
+/// convenience the CLI/GUI call per file.
 pub fn polygonize_gerber(bytes: &[u8]) -> Result<PolygonSet> {
-    polygonize(&parse_gerber(bytes)?)
+    resolve_layer(bytes)
 }
 
-/// Compare two revisions: same-board guard → pair by kind → per-layer diff →
-/// measure → assemble the report. The pure entry point the CLI and GUI both call.
+/// Compare two revisions, returning just the numeric report. The pure entry point
+/// the CLI calls; delegates to [`compare_detailed`].
 pub fn compare(old: &Board, new: &Board) -> Result<DiffReport> {
+    compare_detailed(old, new).map(|d| d.report)
+}
+
+/// Compare two revisions and return both the numeric report **and** the per-layer
+/// geometry: same-board guard → pair by label → per-layer diff → measure → assemble.
+/// The viewer/exporters call this; `compare` is the numbers-only shortcut.
+pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
     if old.layers.is_empty() && new.layers.is_empty() {
         return Err(EngineError::NoLayers);
     }
-    // Refuse ambiguous boards (two layers of one kind) — pairing would drop one.
-    model::ensure_unique_kinds(old, "old")?;
-    model::ensure_unique_kinds(new, "new")?;
     same_board_guard(old, new)?;
 
     let empty = PolygonSet::default();
     let mut reports = Vec::new();
+    let mut views = Vec::new();
     for pairing in pair_layers(old, new) {
-        let report = match pairing {
-            LayerPairing::Both { kind, old, new } => {
-                let change = diff_layer(&old.geometry, &new.geometry).measure();
-                let status = if change.is_unchanged() {
-                    LayerStatus::Unchanged
-                } else {
-                    LayerStatus::Changed
-                };
-                LayerReport::new(
-                    kind,
-                    Some(old.label.clone()),
-                    Some(new.label.clone()),
-                    status,
-                    &change,
-                )
-            }
-            // A layer present in only one revision is a removed/added layer — but
-            // only if it actually carries geometry. An empty one-sided layer must
-            // NOT flip `any_changes` (a false CI gate); it reports as Unchanged.
-            LayerPairing::OnlyOld(l) => {
-                let change = diff_layer(&l.geometry, &empty).measure();
-                let status = if change.is_unchanged() {
-                    LayerStatus::Unchanged
-                } else {
-                    LayerStatus::RemovedLayer
-                };
-                LayerReport::new(l.kind, Some(l.label.clone()), None, status, &change)
-            }
-            LayerPairing::OnlyNew(l) => {
-                let change = diff_layer(&empty, &l.geometry).measure();
-                let status = if change.is_unchanged() {
-                    LayerStatus::Unchanged
-                } else {
-                    LayerStatus::AddedLayer
-                };
-                LayerReport::new(l.kind, None, Some(l.label.clone()), status, &change)
-            }
+        // (a, b) are the (old, new) geometry for this kind; one is empty for a
+        // one-sided layer. An empty one-sided layer stays Unchanged (no false gate).
+        let (kind, label_old, label_new, a, b, default_status) = match pairing {
+            LayerPairing::Both { kind, old, new } => (
+                kind,
+                Some(old.label.clone()),
+                Some(new.label.clone()),
+                old.geometry.clone(),
+                new.geometry.clone(),
+                LayerStatus::Changed,
+            ),
+            LayerPairing::OnlyOld(l) => (
+                l.kind,
+                Some(l.label.clone()),
+                None,
+                l.geometry.clone(),
+                empty.clone(),
+                LayerStatus::RemovedLayer,
+            ),
+            LayerPairing::OnlyNew(l) => (
+                l.kind,
+                None,
+                Some(l.label.clone()),
+                empty.clone(),
+                l.geometry.clone(),
+                LayerStatus::AddedLayer,
+            ),
         };
-        reports.push(report);
+
+        let d = diff_layer(&a, &b); // removed = a−b, added = b−a
+        let change = d.measure();
+        let status = if change.is_unchanged() {
+            LayerStatus::Unchanged
+        } else {
+            default_status
+        };
+        reports.push(LayerReport::new(
+            kind,
+            label_old.clone(),
+            label_new.clone(),
+            status,
+            &change,
+        ));
+        views.push(LayerView {
+            kind,
+            label_old,
+            label_new,
+            status,
+            old: a,
+            new: b,
+            added: d.added,
+            removed: d.removed,
+            change,
+        });
     }
-    Ok(DiffReport::new(reports, Vec::new()))
+    Ok(BoardDiff {
+        report: DiffReport::new(reports, Vec::new()),
+        layers: views,
+    })
 }
 
 #[cfg(test)]

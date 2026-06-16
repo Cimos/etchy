@@ -68,12 +68,12 @@ fn unsupported_geometry_fails_loud() {
     fs::create_dir_all(&old).unwrap();
     fs::create_dir_all(&new).unwrap();
 
-    // A draw (D01 line) is not supported in this slice -> must fail loud (exit 2),
-    // never a silent or wrong-but-quiet diff.
+    // Step-and-repeat (%SR) is geometry-affecting and not yet supported -> must
+    // fail loud (exit 2), never a silent or wrong-but-quiet diff.
     write_layer(&old, "F_Cu.gbr", "");
     fs::write(
         new.join("F_Cu.gbr"),
-        format!("{HDR}{CORNERS}X10000000Y10000000D02*\nX20000000Y20000000D01*\nM02*\n"),
+        format!("{HDR}{CORNERS}%SRX2Y1I5J0*%\nX10000000Y10000000D03*\nM02*\n"),
     )
     .unwrap();
 

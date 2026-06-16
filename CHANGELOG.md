@@ -47,6 +47,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     rejection, compact-line detection, sniff robustness, empty-layer status).
   - Scope deferred to later increments: line/region/arc/macro polygonization, the
     Gerber `*`-tokenization shim, Excellon, SVG/HTML/heatmap render, the egui GUI.
+- **Full Gerber polygonizer + native GUI — diffs real production boards.** The
+  engine grew from flash-only to a complete RS-274X graphics-state machine:
+  - **Normalization shim** (`gerber::normalize`): splits compact/`*`-packed and
+    combined `Gnn…Dnn` blocks into one command per line (recovering geometry the
+    line-oriented parser would drop), drops deprecated `G70/G71/G90/G54`, fails
+    loud on `G91`.
+  - **Geometry** (`geom`): stroked `D01` lines and `G02/G03` arcs (capsule
+    Minkowski stroke; sagitta-bounded tessellation), `G36/G37` region fills
+    (even-odd normalized), circle/rect/**obround**/polygon flashes, and an
+    **aperture-macro evaluator** (circle/center-line/outline/vector-line/polygon
+    primitives, rotation, per-primitive exposure).
+  - **Polarity:** `LPD/LPC` resolved as `dark − clear` in one boolean pass per
+    layer (`boolean` module, shared with the diff). i_overlay's types no longer
+    leak past it.
+  - Layer **pairing is now by filename** (exact for same-board revisions; never
+    collapses multiple same-kind layers); the same-board guard tolerance is
+    generous (catches gross mismatches, allows revision edge changes).
+  - **Native egui GUI** (`etchy-gui <old> <new>`): changed-first layer list +
+    pan/zoom canvas (added green / removed red, base toggle, Overlay/Before/After),
+    with a WSL software-GL/X11 fallback so it launches out-of-the-box.
+  - Validated end-to-end on a real **Altium** board (MotionJigController A↔B):
+    16 layers, all features exercised; `diff(A,A)=∅`; A↔B yields a full diff.
 
 ### Notes
 - Crates are std-only at Phase 0 so the workspace builds without a local

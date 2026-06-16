@@ -44,17 +44,6 @@ pub enum EngineError {
     #[error("invalid aperture: {detail}")]
     InvalidAperture { detail: String },
 
-    /// Two or more layers in one revision map to the same [`crate::LayerKind`].
-    /// Pairing is one layer per kind, so this would silently drop a layer (a missed
-    /// change) — we refuse it. Rename/remove one, or it's a misclassification.
-    #[error("revision '{which}' has two layers of kind {kind}: '{first}' and '{second}' — ambiguous pairing (etchy pairs one layer per kind)")]
-    DuplicateLayerKind {
-        which: String,
-        kind: String,
-        first: String,
-        second: String,
-    },
-
     /// A flash/draw referenced an aperture code that was never defined.
     #[error("operation references undefined aperture D{code}")]
     UndefinedAperture { code: i32 },
