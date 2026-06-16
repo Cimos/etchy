@@ -36,6 +36,23 @@ pub fn quantize_mm(mm: f64) -> Result<i64, GeoError> {
     Ok(nm as i64)
 }
 
+/// Snap an **already-in-nm** float onto the integer grid, guarded exactly like
+/// [`quantize_mm`]: a non-finite or out-of-range value fails loud rather than
+/// silently saturating the `f64 -> i64` cast. Use for coordinates/dimensions that
+/// are computed in nm (e.g. aperture-macro primitives) and so never pass through
+/// `quantize_mm`'s mm-space guard.
+pub fn snap_nm(nm: f64) -> Result<i64, GeoError> {
+    if !nm.is_finite() {
+        return Err(GeoError::NonFiniteCoord);
+    }
+    if nm.abs() > MAX_ABS_NM {
+        return Err(GeoError::CoordOutOfRange {
+            mm: nm / NM_PER_MM as f64,
+        });
+    }
+    Ok(nm.round() as i64)
+}
+
 /// Image polarity: dark adds copper, clear removes it (LPD/LPC, and macro
 /// primitive exposure). A layer's filled geometry is `dark − clear`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +232,22 @@ mod tests {
         ));
         assert_eq!(quantize_mm(5.0), Ok(5_000_000));
         assert_eq!(quantize_mm(-0.5), Ok(-500_000));
+    }
+
+    #[test]
+    fn snap_nm_guards_range_and_finite() {
+        assert_eq!(snap_nm(5_000_000.0), Ok(5_000_000));
+        assert_eq!(snap_nm(-1.4), Ok(-1));
+        assert!(matches!(snap_nm(f64::NAN), Err(GeoError::NonFiniteCoord)));
+        assert!(matches!(
+            snap_nm(f64::INFINITY),
+            Err(GeoError::NonFiniteCoord)
+        ));
+        // > MAX_ABS_NM (1e14) must fail loud, not saturate.
+        assert!(matches!(
+            snap_nm(2.0e14),
+            Err(GeoError::CoordOutOfRange { .. })
+        ));
     }
 
     #[test]
