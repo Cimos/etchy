@@ -54,6 +54,17 @@ def main():
         rel = m.group(1)
         check((SITE / rel).exists(), f"referenced asset missing on disk: {rel}")
 
+    # Social card must exist, and og:image/twitter:image must be ABSOLUTE URLs
+    # (OGP/Twitter crawlers do not resolve relative paths — relative = broken preview).
+    check((SITE / "assets" / "brand" / "etchy-social-1280x640.png").is_file(),
+          "social card site/assets/brand/etchy-social-1280x640.png is missing")
+    for attr, label in [('property="og:image"', "og:image"), ('name="twitter:image"', "twitter:image")]:
+        m = re.search(attr + r'\s+content="([^"]+)"', html)
+        check(m is not None, f"missing meta {label}")
+        if m:
+            check(m.group(1).startswith("https://"),
+                  f"meta {label} must be an absolute https URL (got '{m.group(1)}')")
+
     # fonts.css must reference woff2 files that exist.
     fonts_css = SITE / "assets" / "fonts" / "fonts.css"
     check(fonts_css.is_file(), "site/assets/fonts/fonts.css is missing")

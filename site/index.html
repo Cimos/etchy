@@ -3,17 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>etchy — PCB visual & geometric diff</title>
+<title>etchy — PCB visual &amp; geometric diff</title>
 <meta name="description" content="etchy is a fast, trustworthy, open-source PCB visual and geometric diff tool. Point it at two fab revisions and it shows — and measures — exactly what changed.">
 <link rel="icon" href="assets/brand/etchy-favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/etchy-favicon-16.png" sizes="16x16" type="image/png">
 <link rel="icon" href="assets/brand/etchy-favicon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="assets/brand/etchy-favicon-48.png" sizes="48x48" type="image/png">
 <link rel="apple-touch-icon" href="assets/brand/etchy-app-icon-180.png">
+<!-- Absolute URLs required by OGP/Twitter card crawlers. Default GitHub Pages project URL;
+     update the base if a custom domain is chosen (see launch checklist). -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="etchy — PCB visual & geometric diff">
+<meta property="og:url" content="https://cimos.github.io/etchy/">
+<meta property="og:title" content="etchy — PCB visual &amp; geometric diff">
 <meta property="og:description" content="Point etchy at two revisions of a board's fab output. It shows — and measures — exactly what changed.">
-<meta property="og:image" content="assets/brand/etchy-social-1280x640.png">
+<meta property="og:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="assets/brand/etchy-social-1280x640.png">
+<meta name="twitter:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
 <link rel="stylesheet" href="assets/fonts/fonts.css">
 <style>
   :root{
@@ -28,7 +33,8 @@
   .copper{background:linear-gradient(135deg,var(--copper-1),var(--copper-2) 50%,var(--copper-3));-webkit-background-clip:text;background-clip:text;color:transparent}
   .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
   h1,h2,h3{font-family:"Zilla Slab",Georgia,serif;font-weight:700;letter-spacing:-.01em}
-  nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid var(--line);gap:16px}
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid var(--line);gap:16px}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
   .brand svg{width:38px;height:38px;display:block}
   .navlinks{display:flex;gap:26px;font-size:14px;color:var(--muted);flex-wrap:wrap;justify-content:flex-end}
   .navlinks a{color:var(--muted);text-decoration:none;white-space:nowrap}
@@ -78,7 +84,7 @@
 </head>
 <body>
 <div class="wrap">
-  <nav>
+  <header class="topbar">
     <div class="brand" aria-label="etchy">
       <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="etchy logo"><defs><linearGradient id="cu" gradientUnits="userSpaceOnUse" x1="20" y1="18" x2="100" y2="102"><stop offset="0" stop-color="#f6c873"/><stop offset=".5" stop-color="#e8a33d"/><stop offset="1" stop-color="#b9762a"/></linearGradient></defs><g fill="url(#cu)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g><circle cx="92" cy="86" r="9" fill="none" stroke="url(#cu)" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="url(#cu)"/></svg>
     </div>
@@ -88,7 +94,7 @@
       <a class="collapse" href="#">Docs</a>
       <a class="gh" href="#">GitHub ↗</a>
     </nav>
-  </nav>
+  </header>
 
   <main>
   <div class="hero">
@@ -117,6 +123,7 @@
   </div>
 
   <section id="what">
+    <h2 class="sr-only">What it does</h2>
     <span class="label">What it does</span>
     <div class="cards">
       <div class="card"><div class="ic copper">◳</div><h3>Visual + geometric</h3><p>Per-layer polygon boolean diff → a resolution-independent SVG overlay, a change heatmap, and measured magnitudes (changed area, region count) — all from one computation.</p></div>
