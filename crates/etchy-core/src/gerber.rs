@@ -22,7 +22,7 @@ use gerber_parser::parse;
 
 use crate::boolean;
 use crate::error::{EngineError, Result};
-use crate::geo::{quantize_mm, Contour, PolygonSet, Pt};
+use crate::geo::{quantize_mm, snap_nm, Contour, PolygonSet, Pt};
 use crate::geom;
 
 /// Parse + resolve one Gerber layer's bytes into its filled copper geometry.
@@ -356,7 +356,7 @@ impl<'a> Machine<'a> {
     fn stroke_radius_nm(&self) -> Result<f64> {
         let ap = self.current_aperture()?;
         match ap {
-            GtAperture::Circle(c) if c.hole_diameter.is_none() => Ok(self.dim(c.diameter) / 2.0),
+            GtAperture::Circle(c) if c.hole_diameter.is_none() => Ok(self.dim(c.diameter)? / 2.0),
             _ => Err(unsupported("stroking a path with a non-circle aperture")),
         }
     }
@@ -384,21 +384,21 @@ impl<'a> Machine<'a> {
                 if c.hole_diameter.is_some() {
                     return Err(unsupported("drilled (hole) circle aperture"));
                 }
-                let c = geom::ngon(ax, ay, self.dim(c.diameter) / 2.0);
+                let c = geom::ngon(ax, ay, self.dim(c.diameter)? / 2.0);
                 self.push(c, true);
             }
             GtAperture::Rectangle(r) => {
                 if r.hole_diameter.is_some() {
                     return Err(unsupported("drilled (hole) rectangle aperture"));
                 }
-                let c = geom::rect(ax, ay, self.dim(r.x), self.dim(r.y));
+                let c = geom::rect(ax, ay, self.dim(r.x)?, self.dim(r.y)?);
                 self.push(c, true);
             }
             GtAperture::Obround(r) => {
                 if r.hole_diameter.is_some() {
                     return Err(unsupported("drilled (hole) obround aperture"));
                 }
-                let c = geom::obround(ax, ay, self.dim(r.x), self.dim(r.y));
+                let c = geom::obround(ax, ay, self.dim(r.x)?, self.dim(r.y)?);
                 self.push(c, true);
             }
             GtAperture::Polygon(p) => {
@@ -411,7 +411,7 @@ impl<'a> Machine<'a> {
                 let c = polygon_ngon(
                     ax,
                     ay,
-                    self.dim(p.diameter) / 2.0,
+                    self.dim(p.diameter)? / 2.0,
                     n,
                     p.rotation.unwrap_or(0.0),
                 );
@@ -440,15 +440,15 @@ impl<'a> Machine<'a> {
                 MacroContent::Comment(_) | MacroContent::VariableDefinition(_) => {}
                 MacroContent::Circle(c) => {
                     let exp = mbool(&c.exposure)?;
-                    let d = self.dim(md(&c.diameter)?);
+                    let d = self.dim(md(&c.diameter)?)?;
                     let (cx, cy) = self.macro_pt(&c.center, c.angle.as_ref(), ax, ay)?;
                     self.push(geom::ngon(cx, cy, d / 2.0), exp);
                 }
                 MacroContent::CenterLine(l) => {
                     let exp = mbool(&l.exposure)?;
                     let (w, h) = (
-                        self.dim(md(&l.dimensions.0)?),
-                        self.dim(md(&l.dimensions.1)?),
+                        self.dim(md(&l.dimensions.0)?)?,
+                        self.dim(md(&l.dimensions.1)?)?,
                     );
                     let ang = md(&l.angle)?;
                     let (cx, cy) = self.macro_offset(&l.center, ang, ax, ay)?;
@@ -459,16 +459,16 @@ impl<'a> Machine<'a> {
                     let ang = md(&o.angle)?;
                     let mut c: Contour = Vec::with_capacity(o.points.len());
                     for (px, py) in &o.points {
-                        let (lx, ly) = (self.dim(md(px)?), self.dim(md(py)?));
+                        let (lx, ly) = (self.dim(md(px)?)?, self.dim(md(py)?)?);
                         let (rx, ry) = geom::rotate(lx, ly, ang);
-                        c.push(Pt::new((ax + rx).round() as i64, (ay + ry).round() as i64));
+                        c.push(Pt::new(snap_nm(ax + rx)?, snap_nm(ay + ry)?));
                     }
                     self.push(c, exp);
                 }
                 MacroContent::VectorLine(v) => {
                     let exp = mbool(&v.exposure)?;
                     let ang = md(&v.angle)?;
-                    let w = self.dim(md(&v.width)?);
+                    let w = self.dim(md(&v.width)?)?;
                     let (sx, sy) = self.macro_rot_pt(&v.start, ang, ax, ay)?;
                     let (ex, ey) = self.macro_rot_pt(&v.end, ang, ax, ay)?;
                     self.push(geom::stadium(sx, sy, ex, ey, w / 2.0), exp);
@@ -485,7 +485,7 @@ impl<'a> Machine<'a> {
                     let ang = md(&p.angle)?;
                     let (cx, cy) = self.macro_offset(&p.center, ang, ax, ay)?;
                     self.push(
-                        polygon_ngon(cx, cy, self.dim(md(&p.diameter)?) / 2.0, n, ang),
+                        polygon_ngon(cx, cy, self.dim(md(&p.diameter)?)? / 2.0, n, ang),
                         exp,
                     );
                 }
@@ -505,8 +505,11 @@ impl<'a> Machine<'a> {
         ax: f64,
         ay: f64,
     ) -> Result<(f64, f64)> {
-        let (lx, ly) = (self.dim(md(&center.0)?), self.dim(md(&center.1)?));
+        let (lx, ly) = (self.dim(md(&center.0)?)?, self.dim(md(&center.1)?)?);
         let (rx, ry) = geom::rotate(lx, ly, angle);
+        // Guard the absolute centre (catches a non-finite rotation/offset too).
+        snap_nm(ax + rx)?;
+        snap_nm(ay + ry)?;
         Ok((ax + rx, ay + ry))
     }
 
@@ -543,9 +546,15 @@ impl<'a> Machine<'a> {
             .ok_or(EngineError::UndefinedAperture { code })
     }
 
-    /// A document-unit dimension → nm.
-    fn dim(&self, v: f64) -> f64 {
-        v * self.nm_per_unit
+    /// A document-unit dimension → nm, **range-guarded** like [`quantize_mm`]: an
+    /// absurd/out-of-range or non-finite value fails loud instead of silently
+    /// saturating a later `f64 -> i64` cast. This is the chokepoint that keeps every
+    /// aperture- and macro-derived coordinate bounded (a macro coord is a guarded
+    /// flash point plus guarded dim-scaled offsets), so nothing downstream saturates.
+    fn dim(&self, v: f64) -> Result<f64> {
+        let nm = v * self.nm_per_unit;
+        snap_nm(nm)?;
+        Ok(nm)
     }
 
     /// Resolve modal coordinates → quantized nm point.
@@ -622,6 +631,15 @@ mod tests {
 
     fn area_mm2(g: &str) -> f64 {
         resolve_layer(g.as_bytes()).unwrap().area_mm2()
+    }
+
+    #[test]
+    fn out_of_range_dimension_fails_loud() {
+        // An absurd aperture (1e9 mm dia → 1e15 nm, past the ±1e14 nm cap) must fail
+        // loud rather than silently saturate the f64 -> i64 cast. Guards the whole
+        // dim() chokepoint that aperture- and macro-derived coordinates flow through.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1000000000*%\nD10*\nX0Y0D03*\nM02*\n";
+        assert!(resolve_layer(g.as_bytes()).is_err());
     }
 
     #[test]

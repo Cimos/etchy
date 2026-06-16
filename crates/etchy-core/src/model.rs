@@ -122,42 +122,75 @@ pub enum LayerPairing<'a> {
     OnlyNew(&'a Layer),
 }
 
-/// Pair layers by **label** (filename), in a stable stack order. etchy diffs
-/// same-board revisions, which share filenames, so a label is the exact, unique
-/// pairing key — and unlike pairing by kind it never collapses two distinct files
-/// (e.g. several mechanical layers) into one (which would silently drop a layer).
-/// A label present in only one revision is reported `OnlyOld`/`OnlyNew` (an
-/// added/removed layer is a legitimate revision change, not an error).
+/// Pair layers by **`LayerKind`** (rename-tolerant), in stable stack order. etchy
+/// diffs same-board revisions, but real fab packs embed the board name in every
+/// filename, so the *same* layer usually has different names across two revisions
+/// (`revA-F_Cu.gbr` vs `revB-F_Cu.gbr`) — pairing by name would spuriously report
+/// every layer as removed + added. Within a kind that has several layers (e.g.
+/// mechanical "other" layers), exact-filename matches pair first and the rest pair
+/// positionally by stack order, so distinct same-kind layers are never collapsed
+/// onto one. A layer with no counterpart is `OnlyOld`/`OnlyNew` (a legitimately
+/// added/removed layer, not an error).
 pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> {
-    let find = |b: &'a Board, label: &str| b.layers.iter().find(|l| l.label == label);
-
-    // Union of labels present in either revision, ordered by stack position.
-    let mut labels: Vec<&str> = Vec::new();
+    // Distinct kinds present in either revision, ordered by stack position.
+    let mut kinds: Vec<LayerKind> = Vec::new();
     for l in old.layers.iter().chain(new.layers.iter()) {
-        if !labels.contains(&l.label.as_str()) {
-            labels.push(&l.label);
+        if !kinds.contains(&l.kind) {
+            kinds.push(l.kind);
         }
     }
-    labels.sort_by_key(|&label| {
-        let kind = find(old, label)
-            .or_else(|| find(new, label))
-            .map(|l| l.kind);
-        (kind.map(|k| k.sort_key()).unwrap_or((255, 255)), label)
-    });
+    kinds.sort_by_key(|k| k.sort_key());
 
-    labels
-        .into_iter()
-        .map(|label| match (find(old, label), find(new, label)) {
-            (Some(o), Some(n)) => LayerPairing::Both {
-                kind: n.kind,
-                old: o,
-                new: n,
-            },
-            (Some(o), None) => LayerPairing::OnlyOld(o),
-            (None, Some(n)) => LayerPairing::OnlyNew(n),
-            (None, None) => unreachable!("label came from one of the boards"),
-        })
-        .collect()
+    let mut out = Vec::new();
+    for kind in kinds {
+        let olds: Vec<&Layer> = old.layers.iter().filter(|l| l.kind == kind).collect();
+        let news: Vec<&Layer> = new.layers.iter().filter(|l| l.kind == kind).collect();
+        let mut new_used = vec![false; news.len()];
+
+        // Pass 1: exact-filename matches within the kind — keeps distinct same-kind
+        // layers apart, and is simply a no-op when the names differ across revisions.
+        let mut unmatched_old: Vec<&Layer> = Vec::new();
+        for o in olds.iter().copied() {
+            match news
+                .iter()
+                .enumerate()
+                .find(|&(j, n)| !new_used[j] && n.label == o.label)
+                .map(|(j, _)| j)
+            {
+                Some(j) => {
+                    new_used[j] = true;
+                    out.push(LayerPairing::Both {
+                        kind,
+                        old: o,
+                        new: news[j],
+                    });
+                }
+                None => unmatched_old.push(o),
+            }
+        }
+
+        // Pass 2: pair the remainder positionally (rename-tolerant); report any
+        // leftover on either side as an added/removed layer.
+        let mut leftover_new = news
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| !new_used[j])
+            .map(|(_, n)| *n);
+        let mut unmatched_old = unmatched_old.into_iter();
+        loop {
+            match (unmatched_old.next(), leftover_new.next()) {
+                (Some(o), Some(n)) => out.push(LayerPairing::Both {
+                    kind,
+                    old: o,
+                    new: n,
+                }),
+                (Some(o), None) => out.push(LayerPairing::OnlyOld(o)),
+                (None, Some(n)) => out.push(LayerPairing::OnlyNew(n)),
+                (None, None) => break,
+            }
+        }
+    }
+    out
 }
 
 /// Coarse same-board plausibility check: the two revisions' whole-board union
@@ -268,6 +301,36 @@ mod tests {
         let pairs = pair_layers(&a, &b);
         assert_eq!(pairs.len(), 2);
         assert!(pairs.iter().all(|p| matches!(p, LayerPairing::Both { .. })));
+    }
+
+    #[test]
+    fn pairs_by_kind_across_renamed_files() {
+        // Real fab packs embed the board name, so the *same* layer has different
+        // filenames between revisions (revA-F_Cu.gbr vs revB-F_Cu.gbr). It must
+        // still pair by LayerKind — not report a spurious removed+added layer.
+        let mk = |label: &str| Layer {
+            kind: LayerKind::TopCopper,
+            label: label.into(),
+            geometry: PolygonSet::new(vec![vec![vec![
+                Pt::new(0, 0),
+                Pt::new(1, 0),
+                Pt::new(1, 1),
+                Pt::new(0, 1),
+            ]]]),
+        };
+        let a = Board {
+            layers: vec![mk("revA-F_Cu.gbr")],
+        };
+        let b = Board {
+            layers: vec![mk("revB-F_Cu.gbr")],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(
+            pairs.len(),
+            1,
+            "same kind, different names → one paired layer"
+        );
+        assert!(matches!(pairs[0], LayerPairing::Both { .. }));
     }
 
     #[test]
