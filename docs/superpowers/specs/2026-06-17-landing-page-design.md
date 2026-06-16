@@ -7,10 +7,17 @@
 ## Goal
 
 A single-page marketing/landing site for **etchy**, hosted on GitHub Pages,
-built and committed now so it is **launch-ready the day `Cimos/etchy` is made
-public**. The repo is private today; GitHub Pages on a free plan only publishes
+built and committed now so it is **launch-ready when `Cimos/etchy` is made
+public**. The repo stays private until etchy is genuinely user-friendly (at least
+the **Milestone 1 MVP**, likely more); GitHub Pages on a free plan only publishes
 from a public repo, so the site sits dormant in-repo and goes live with the
 public flip — site and code launch as one event.
+
+**The page describes the first public release (M1 MVP) as a working tool —
+present tense, no "in development" framing.** By the time it's public, M1 is done,
+so the old Phase-0 / "building in the open" status framing would be stale and
+would undersell. A separate "On the roadmap" section lists what's coming next as
+**direction, with no dates and no version numbers**.
 
 Tone: this is free, open-source developer tooling, not a product launch. Plain,
 descriptive copy — no slogans or growth-hacky CTAs. The design follows the
@@ -19,15 +26,35 @@ existing brand identity rather than inventing a new look.
 ## Scope
 
 **In scope**
-- One page: nav → hero → "what it does" → diff visualization → honest status → footer.
+- One page: nav → hero → "what it does" → diff visualization → **roadmap** → footer.
+- Copy describes **M1 MVP capabilities** in present tense (see First-release feature set).
 - Static HTML + CSS, **no JavaScript**, **no build step / no SSG**.
 - Self-hosted fonts and brand assets (no third-party CDN at runtime).
 - GitHub Actions workflow to deploy `/site` to GitHub Pages.
 
 **Out of scope (deferred, structure not built now)**
 - Rendered docs pages (the `docs/*.md` planning docs stay as-is).
-- A live diff demo / SVG gallery (the engine isn't usable yet — would be vaporware).
+- A live diff demo / SVG gallery (real tool output, not illustrative art).
 - Any analytics, cookies, or tracking.
+
+## First-release feature set (what the page presents as available)
+
+The first public release targets **Milestone 1 (MVP)**. Present-tense capabilities:
+- **Visual + geometric diff** of Gerber RS-274X/X2 and Excellon — per-layer
+  polygon boolean diff → SVG overlay, change heatmap, magnitudes (changed area,
+  region count).
+- **Native viewer** (egui) with overlay / before / after / split / swipe / onion
+  modes + heatmap, changed-layers-first, pan/zoom/fit.
+- **CLI** `etchy <old> <new>` with a rich terminal summary and `--json`.
+- **Outputs:** self-contained **HTML report**, standalone **SVG** overlays,
+  machine-readable **JSON**.
+- **Trustworthy:** same-board guard (fail-loud on mismatch), rename-tolerant layer
+  pairing, golden corpus + property + fuzz tests.
+
+**Roadmap section (direction only — no dates, no versions):** CI gating & PR
+comments · schematic-PDF diff · dense-board performance · static binaries +
+distroless container · docs site · stable versioned JSON schema. Tone: intent,
+not promises ("where etchy is headed", "shipped when it's ready").
 
 ## Decisions locked during brainstorming
 
@@ -37,8 +64,11 @@ existing brand identity rather than inventing a new look.
 | Nav logo | **Icon only** (the stencil-"E" mark). The lowercase "etchy" wordmark appears large in the hero instead — avoids the icon+wordmark "double-letter" stutter. |
 | Wordmark casing | **Lowercase "etchy"** per brand guidelines; matches the CLI command `etchy old/ new/`. No capital "Etchy" variant. |
 | Headline | Plain descriptive: **"PCB visual & geometric diff."** No slogan. |
-| CTAs | Two neutral buttons: **View on GitHub**, **Read the docs**. No "★ Star", no predecessor CTA. |
-| gerber-diff | Appears **only in the Status section** as the working predecessor ("need a diff right now?"), never competing with the etchy name in the hero. |
+| Hero badge | Factual capability tag **"Gerber · Excellon · same-board diff"** — no "in development" / Phase-0 status. |
+| First-release target | **M1 MVP**, presented in present tense as a working tool. |
+| Status framing | **No "building in the open" status section.** Replaced by an **"On the roadmap"** section — direction only, **no dates, no version numbers**. |
+| CTAs | Two neutral buttons: **View on GitHub**, **Read the docs**. No "★ Star". |
+| gerber-diff | Demoted to a single **footer link** (predecessor); no longer a "use it today" message anywhere. |
 | Diff art strokes | Added = solid green, removed = **solid red** (matched). Semantic dashing belongs in the real tool's output, not marketing art. |
 | Site location | **Inside `Cimos/etchy`**, in a top-level `/site` directory. |
 | Deploy | **GitHub Actions** → Pages (legacy root/`docs` source can't serve `/site`). |
@@ -55,23 +85,25 @@ From `assets/brand/` (see Assets section for the merge note):
   SVG in the nav, hero-adjacent, and footer.
 
 **Page sections (top to bottom):**
-1. **Nav** — icon-only mark left; right links (What it does · Status · Docs · GitHub).
+1. **Nav** — icon-only mark left; right links (What it does · Roadmap · Docs · GitHub).
    On phones (≤560px) only GitHub shows, to prevent horizontal overflow.
-2. **Hero** — two columns (stacks on mobile). Left: "Phase 0 · in development"
-   badge, large **etchy** wordmark, "PCB visual & geometric diff." subhead, lede
-   paragraph, two CTAs. Right: a faux terminal showing `etchy revA/ revB/` and its
-   added/removed summary + output files.
-3. **What it does** — three cards: Visual + geometric · Trustworthy · CLI/CI first.
+2. **Hero** — two columns (stacks on mobile). Left: "Gerber · Excellon · same-board
+   diff" badge, large **etchy** wordmark, "PCB visual & geometric diff." subhead,
+   lede paragraph, two CTAs. Right: a faux terminal showing `etchy revA/ revB/` and
+   its added/removed summary + output files (`report.html · overlay.svg · diff.json`).
+3. **What it does** — three cards: Visual + geometric · See it & export it (native
+   viewer modes + heatmap; HTML/SVG/JSON) · Trustworthy.
 4. **The diff, visualized** — an inline SVG of copper traces with added-green and
    removed-red segments. (Illustrative, not real tool output.)
-5. **Honest status** — two boxes: "Works today" (Phase-0 reality + predecessor)
-   and "Coming in etchy" (Rust engine targets). **The exact status wording must
-   reflect the real roadmap state at publish time** — do not claim a milestone is
-   "underway" or "complete" ahead of reality (the README's "Phase 0 — not yet
-   usable" framing is the floor). This is the same no-overclaiming bar as the tool.
-6. **Footer** — small mark, license (MIT / Apache-2.0 · © Cimos), links.
+5. **On the roadmap** — heading "Where etchy is headed." + "Direction, not promises
+   — shipped when it's ready." A grid of items (CI gating & PR comments ·
+   schematic-PDF diff · dense-board speed · static binaries + container · docs site
+   · stable JSON schema). **No dates, no version numbers**; muted/secondary visual
+   weight so it reads as intent, not commitment.
+6. **Footer** — small mark, license (MIT / Apache-2.0 · © Cimos), links incl. a
+   subtle gerber-diff (predecessor) link.
 
-The approved reference mockup is `etchy-landing-final.html` (delivered during
+The approved reference mockup is `etchy-landing-final-v2.html` (delivered during
 brainstorming). The implementation reproduces it, swapping the Google Fonts CDN
 `<link>` for self-hosted `@font-face`.
 
