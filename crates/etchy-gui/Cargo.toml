@@ -1,6 +1,6 @@
 [package]
 name = "etchy-gui"
-description = "etchy native desktop viewer (egui) — secondary surface. Phase-0 stub."
+description = "etchy native desktop viewer (egui) — secondary surface."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,4 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 etchy-core = { path = "../etchy-core" }
-# eframe/egui, egui_extras, egui-wgpu, image added in Milestone 1.
+eframe.workspace = true
+egui.workspace = true
+anyhow.workspace = true

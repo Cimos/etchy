@@ -1,18 +1,23 @@
 //! etchy — fast, trustworthy PCB visual + geometric diff (CLI; primary surface).
 //!
-//! Phase-0 scaffold: the exit-code contract + wiring. Real arg parsing (clap)
-//! and the diff pipeline land in Milestone 1 (see docs/ROADMAP.md).
+//! This binary is the **I/O shell**: it walks directories, reads files, classifies
+//! filenames → [`LayerKind`], renders output, and owns the exit-code contract. All
+//! geometry logic lives in the pure `etchy-core` engine (CLAUDE.md: core has no
+//! I/O policy). M1 slice: flash-only Gerber; unsupported features fail loud.
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// etchy's CI exit-code contract. Defined up front; variants are wired in as the
-/// pipeline lands.
-#[allow(dead_code)]
+use anyhow::{Context, Result};
+use clap::Parser;
+use etchy_core::{compare, Board, DiffReport, Layer};
+
+/// etchy's CI exit-code contract.
 #[repr(i32)]
 enum Exit {
     /// No differences found.
     NoDiff = 0,
-    /// Differences found (used by `--fail-on-diff` / CI gating).
+    /// Differences found (CI gating).
     DiffFound = 1,
     /// An error prevented a comparison.
     Error = 2,
@@ -24,17 +29,145 @@ impl From<Exit> for ExitCode {
     }
 }
 
+/// Fast, trustworthy PCB visual + geometric diff. Point it at two revisions of a
+/// board's Gerber output and it shows — and measures — exactly what changed.
+#[derive(Parser, Debug)]
+#[command(name = "etchy", version, about)]
+struct Cli {
+    /// Old revision: a directory of Gerber files.
+    old: PathBuf,
+    /// New revision: a directory of Gerber files.
+    new: PathBuf,
+    /// Emit the machine-readable JSON report to stdout instead of a summary.
+    #[arg(long)]
+    json: bool,
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("etchy {}", etchy_core::version());
-        return Exit::NoDiff.into();
+    let cli = Cli::parse();
+    match run(&cli) {
+        Ok(report) => {
+            if report.any_changes() {
+                Exit::DiffFound.into()
+            } else {
+                Exit::NoDiff.into()
+            }
+        }
+        Err(e) => {
+            // Print the full error chain to stderr; map any failure to exit 2.
+            eprintln!("etchy: error: {e:#}");
+            Exit::Error.into()
+        }
     }
-    eprintln!(
-        "etchy {} — PCB visual + geometric diff\n\
-         usage: etchy <old> <new>   (not yet implemented — Phase-0 scaffold)\n\
-         roadmap: docs/ROADMAP.md",
-        etchy_core::version()
+}
+
+fn run(cli: &Cli) -> Result<DiffReport> {
+    let old = load_board(&cli.old)
+        .with_context(|| format!("loading old revision {}", cli.old.display()))?;
+    let new = load_board(&cli.new)
+        .with_context(|| format!("loading new revision {}", cli.new.display()))?;
+
+    let report = compare(&old, &new).context("comparing revisions")?;
+
+    if cli.json {
+        println!("{}", report.to_json_pretty());
+    } else {
+        print_summary(&report);
+    }
+    Ok(report)
+}
+
+/// Walk a directory (one level), read each Gerber file, classify it, and
+/// polygonize it into a [`Layer`]. I/O + path/naming policy live here, not in core.
+fn load_board(dir: &Path) -> Result<Board> {
+    if !dir.is_dir() {
+        anyhow::bail!("{} is not a directory", dir.display());
+    }
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading directory {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    entries.sort();
+
+    let mut layers = Vec::new();
+    for path in entries {
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        if !etchy_core::looks_like_gerber(&bytes) {
+            continue; // not a Gerber layer (e.g. drill, job file) — Excellon is a later increment
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let kind = etchy_core::classify(stem, ext);
+        let label = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(stem)
+            .to_string();
+        let geometry = etchy_core::polygonize_gerber(&bytes)
+            .with_context(|| format!("processing layer {label}"))?;
+        layers.push(Layer {
+            kind,
+            label,
+            geometry,
+        });
+    }
+    Ok(Board { layers })
+}
+
+/// Human-readable summary table to stdout (changed layers first).
+fn print_summary(report: &DiffReport) {
+    println!(
+        "{:<16} {:<13} {:>12} {:>12} {:>9} {:>9}",
+        "layer", "status", "added_mm2", "removed_mm2", "+regions", "-regions"
     );
-    Exit::Error.into()
+    for l in &report.layers {
+        let name = match l.inner_index {
+            Some(n) => format!("{}{}", l.kind, n),
+            None => l.kind.to_string(),
+        };
+        println!(
+            "{:<16} {:<13} {:>12.5} {:>12.5} {:>9} {:>9}",
+            name,
+            status_str(l.status),
+            l.added_area_mm2,
+            l.removed_area_mm2,
+            l.added_regions,
+            l.removed_regions
+        );
+    }
+    let t = &report.totals;
+    println!(
+        "\n{} of {} layer(s) changed; total +{:.5} mm² / -{:.5} mm² ({}+/{}- regions)",
+        t.layers_changed,
+        t.layers_total,
+        t.added_area_mm2,
+        t.removed_area_mm2,
+        t.added_regions,
+        t.removed_regions
+    );
+    if !report.warnings.is_empty() {
+        eprintln!("\nwarnings:");
+        for w in &report.warnings {
+            eprintln!("  - {w}");
+        }
+    }
+    println!(
+        "{}",
+        if report.any_changes() {
+            "result: differences found"
+        } else {
+            "result: no differences"
+        }
+    );
+}
+
+fn status_str(s: etchy_core::LayerStatus) -> &'static str {
+    use etchy_core::LayerStatus::*;
+    match s {
+        Unchanged => "unchanged",
+        Changed => "changed",
+        AddedLayer => "added-layer",
+        RemovedLayer => "removed-layer",
+    }
 }

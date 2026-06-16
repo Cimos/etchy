@@ -15,7 +15,21 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Cimos/etchy"
 authors = ["Simon Maddison"]
 
-# Real dependencies (clap, i_overlay, eframe, pdfium-render, askama, serde_json,
-# rstar, petgraph, tiny-skia, …) are added per-crate as each module is built in
-# Milestone 1+. The verified choices + versions live in docs/DEVELOPER_GUIDE.md.
-# Phase-0 crates are std-only so the workspace compiles without a local toolchain.
+# Shared dependency versions (verified choices live in docs/DEVELOPER_GUIDE.md).
+# Real deps land per-crate as each module is built in Milestone 1+.
+[workspace.dependencies]
+# engine
+i_overlay = "7"
+gerber_parser = "0.5"
+gerber-types = "0.7"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# cli
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+# gui
+eframe = "0.34"
+egui = "0.34"
+# tests
+proptest = "1"
