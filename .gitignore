@@ -13,3 +13,6 @@ Thumbs.db
 # Build / scratch
 /dist/
 *.profraw
+
+# Claude Code local session state (settings + agent memory)
+.claude/

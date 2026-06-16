@@ -1,4 +1,8 @@
-# gerber-diff — product discovery
+# etchy — product discovery
+
+> Started life as the **gerber-diff v2** requirements interview; the rename to
+> **etchy** (broader PCB visual + geometric diff scope) was decided in Round 8–9
+> below. Kept under the new name as the historical record of that decision.
 
 Living capture of the assume-nothing requirements interview (Simon × Claude),
 the basis for `ROADMAP.md` and `DEVELOPER_GUIDE.md`. Answers are authoritative;

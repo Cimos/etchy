@@ -13,6 +13,25 @@ Each entry carries committed **expected outputs** (JSON magnitudes + SVG/heatmap
 snapshots via `insta`). Property tests (`diff(A,A)=∅`, add/remove symmetry,
 idempotence) and parser fuzzing (`cargo-fuzz`) complement the corpus.
 
+## Harness status (Phase 0 — built)
+
+The harness lives in `crates/etchy-core/tests/` and runs under `cargo test`:
+
+- `support/mod.rs` — the synthetic generator (in-Rust port of the Python tool) +
+  the proven parse→polygonize→diff→measure pipeline (Spike 1/2), shared by the
+  test binaries. It sits in `tests/` because `etchy-core` stays std-only through
+  Phase 0; when the real engine lands (M1) the tests retarget the library API.
+- `golden_corpus.rs` — exact ground-truth validation: a self-contained synthetic
+  pair (always runs in CI, no Python) **plus** validation against the on-disk
+  `synthetic/` corpus + `ground_truth.json` when present (skips gracefully if not).
+- `properties.rs` — `proptest` invariants and fuzz-lite "never panics on
+  arbitrary input" (real `cargo-fuzz` targets land in M1 against the library
+  parsers — you fuzz the parser, which moves into the lib then).
+
+CI regenerates `synthetic/` (best-effort) so the deep test runs on Linux; the
+self-contained synthetic tests guarantee coverage everywhere. A live **gerbonara
+parity** check is folded into the M1 parser bring-up.
+
 ## `synthetic/` — ready now
 
 `tools/gen_synth_board.py` deterministically emits a multi-layer RS-274X board
