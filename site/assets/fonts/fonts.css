@@ -1,4 +1,6 @@
-/* Self-hosted fonts — no third-party CDN at runtime. Both OFL-licensed (see OFL.txt). */
+/* Self-hosted fonts — no third-party CDN at runtime.
+   Zilla Slab: OFL-1.1, see OFL-ZillaSlab.txt.
+   JetBrains Mono: OFL-1.1, see OFL-JetBrainsMono.txt. */
 @font-face{
   font-family:"Zilla Slab";
   font-style:normal; font-weight:700; font-display:swap;
