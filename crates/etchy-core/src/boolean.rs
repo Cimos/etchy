@@ -6,6 +6,7 @@ use i_overlay::core::overlay::Overlay;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::i_float::int::point::IntPoint;
 use i_overlay::i_shape::int::shape::{IntContour, IntShapes};
+use i_triangle::int::triangulatable::IntTriangulatable;
 
 use crate::geo::{Contour, PolygonSet, Pt, Shape};
 
@@ -44,6 +45,34 @@ pub(crate) fn difference(subj: &[Contour], clip: &[Contour]) -> PolygonSet {
     from_int(
         Overlay::<i64>::with_contours(&s, &c).overlay(OverlayRule::Difference, FillRule::NonZero),
     )
+}
+
+/// Triangulate each shape's **outer ring** into a flat triangle list (nm), for
+/// filled rendering. Uses i_triangle's integer monotone triangulator — which
+/// adds no Steiner points for a simple polygon, so coordinates stay exact — and
+/// is concave-correct, unlike a vertex-0 fan. Holes are not yet subtracted.
+pub(crate) fn triangulate_outer(ps: &PolygonSet) -> Vec<[Pt; 3]> {
+    ps.shapes
+        .iter()
+        .filter_map(|s| s.first())
+        .flat_map(|outer| triangulate_one(outer))
+        .collect()
+}
+
+/// Triangulate a single closed ring (the outer contour) into a flat triangle
+/// list (nm). i_triangle's integer monotone triangulator: concave-correct, and
+/// adds no Steiner points for a simple polygon so coordinates stay exact.
+pub(crate) fn triangulate_one(outer: &[Pt]) -> Vec<[Pt; 3]> {
+    if outer.len() < 3 {
+        return Vec::new();
+    }
+    let contour: IntContour<i64> = outer.iter().map(|p| IntPoint::new(p.x, p.y)).collect();
+    contour
+        .triangulate()
+        .into_triangulation::<u32>()
+        .triangles()
+        .map(|[a, b, c]| [Pt::new(a.x, a.y), Pt::new(b.x, b.y), Pt::new(c.x, c.y)])
+        .collect()
 }
 
 /// Flatten a [`PolygonSet`] back to a flat contour list (outer + holes), e.g. to

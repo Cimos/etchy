@@ -1143,6 +1143,7 @@ dependencies = [
  "gerber-types",
  "gerber_parser",
  "i_overlay",
+ "i_triangle",
  "proptest",
  "serde",
  "serde_json",
@@ -1650,6 +1651,17 @@ name = "i_tree"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e9d4a992a9fe83130f41ceacceac3bb116a4355dfc9c8d6ecea4f1e4b4c6caf"
+
+[[package]]
+name = "i_triangle"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd6673ab636eaa50516648e1e1dcc94d92e76c4c97ccb234c97eccc525b46ced"
+dependencies = [
+ "i_key_sort",
+ "i_overlay",
+ "i_tree",
+]
 
 [[package]]
 name = "iana-time-zone"

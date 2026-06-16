@@ -145,6 +145,15 @@ impl PolygonSet {
         self.area_nm2() as f64 / (NM_PER_MM as f64 * NM_PER_MM as f64)
     }
 
+    /// Triangulate each shape's **outer ring** into a flat list of triangles (nm),
+    /// for filled rendering. Concave-correct — unlike egui's vertex-0 fan, which
+    /// only tiles convex polygons and throws spurious "spike" triangles across the
+    /// concave copper shapes a PCB is full of. Holes are not yet subtracted (the
+    /// hole cut is tracked as a separate increment).
+    pub fn triangulate(&self) -> Vec<[Pt; 3]> {
+        crate::boolean::triangulate_outer(self)
+    }
+
     /// Axis-aligned bounding box `[min_x, min_y, max_x, max_y]` in nm, or `None`
     /// if empty.
     pub fn bbox_nm(&self) -> Option<[i64; 4]> {
@@ -168,6 +177,14 @@ impl PolygonSet {
         }
         Some(bb)
     }
+}
+
+/// Triangulate a single closed ring (an outer contour) into a flat triangle
+/// list (nm). Concave-correct. Exposed for renderers that need per-shape control
+/// — e.g. deciding to draw a marker for sub-pixel shapes — without rebuilding a
+/// [`PolygonSet`]. Holes are not subtracted.
+pub fn triangulate_ring(outer: &[Pt]) -> Vec<[Pt; 3]> {
+    crate::boolean::triangulate_one(outer)
 }
 
 /// Twice the signed area of a ring (shoelace), accumulated in `i128` so the
@@ -249,6 +266,39 @@ mod tests {
         assert!((ps.area_mm2() - 1.0).abs() < 1e-9);
         assert_eq!(ps.region_count(), 1);
         assert_eq!(ps.bbox_nm(), Some([0, 0, s, s]));
+    }
+
+    #[test]
+    fn triangulate_concave_tiles_exactly() {
+        // An L-shape (concave hexagon, CCW). A vertex-0 fan would throw triangles
+        // outside the shape (the rendering "spikes"); a correct triangulation tiles
+        // the interior. Discriminator: the sum of *unsigned* triangle areas equals
+        // the polygon area iff the triangles stay inside and don't overlap.
+        let s = 1_000_000;
+        let l: Shape = vec![vec![
+            Pt::new(0, 0),
+            Pt::new(2 * s, 0),
+            Pt::new(2 * s, s),
+            Pt::new(s, s),
+            Pt::new(s, 2 * s),
+            Pt::new(0, 2 * s),
+        ]];
+        let ps = PolygonSet::new(vec![l]);
+        let tris = ps.triangulate();
+        assert!(!tris.is_empty(), "expected a triangulation");
+        let sum2: i128 = tris.iter().map(tri_abs_area2).sum();
+        assert_eq!(
+            sum2 / 2,
+            ps.area_nm2(),
+            "triangles must tile the polygon exactly (no spikes/overlap)"
+        );
+    }
+
+    /// Twice the unsigned area of a triangle, in nm² (i128).
+    fn tri_abs_area2(t: &[Pt; 3]) -> i128 {
+        ((t[1].x as i128 - t[0].x as i128) * (t[2].y as i128 - t[0].y as i128)
+            - (t[2].x as i128 - t[0].x as i128) * (t[1].y as i128 - t[0].y as i128))
+            .abs()
     }
 
     #[test]

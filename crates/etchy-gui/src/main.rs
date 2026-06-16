@@ -151,6 +151,12 @@ const C_ADDED: Color32 = Color32::from_rgb(40, 200, 90);
 const C_REMOVED: Color32 = Color32::from_rgb(225, 70, 70);
 const C_BASE: Color32 = Color32::from_rgb(90, 95, 105);
 
+/// A changed region smaller than this many screen pixels is drawn as one crisp
+/// marker dot instead of its (sub-pixel, aliasing) real geometry.
+const MIN_FEATURE_PX: f32 = 3.0;
+/// Radius (px) of that marker dot.
+const MARKER_R: f32 = 3.0;
+
 impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("top").show_inside(ui, |ui| {
@@ -249,39 +255,67 @@ impl ViewApp {
         // Build the shapes to draw, per mode.
         let mut shapes: Vec<Shape> = Vec::new();
         let cam = &self.cam;
-        let mut push = |set: &PolygonSet, fill: Color32, stroke: Stroke| {
+        // Render each shape as a filled mesh from our own concave-correct
+        // triangulation. We deliberately do NOT use egui's path stroke for an
+        // outline: its miter join extrudes each vertex by `normal / length_sq`,
+        // which explodes at the ~0° tips that boolean-diff crescents always have,
+        // flinging stroke vertices clear across the board (the "green lines"). The
+        // filled mesh alone shows the shape correctly and can't spike.
+        //
+        // `marker` shapes (the diff) additionally collapse to a single fixed dot
+        // when they'd be sub-pixel on screen, so changes stay visible (and don't
+        // alias into red/green speckle) when zoomed out.
+        let mut push = |set: &PolygonSet, fill: Color32, marker: bool| {
             for shape in &set.shapes {
-                // Draw the outer ring filled. Diff geometry is generally non-convex
-                // (trace fragments, region cuts), so use a tessellated path fill —
-                // not convex_polygon. (Holes are not cut in this first viewer.)
-                if let Some(outer) = shape.first() {
-                    let pts: Vec<Pos2> = outer
-                        .iter()
-                        .map(|p| world_to_screen(cam, *p, rect))
-                        .collect();
-                    if pts.len() >= 3 {
-                        shapes.push(Shape::Path(egui::epaint::PathShape {
-                            points: pts,
-                            closed: true,
-                            fill,
-                            stroke: stroke.into(),
-                        }));
+                let Some(outer) = shape.first() else { continue };
+                if outer.len() < 3 {
+                    continue;
+                }
+                if marker {
+                    let mut bb = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+                    for p in outer {
+                        bb[0] = bb[0].min(p.x);
+                        bb[1] = bb[1].min(p.y);
+                        bb[2] = bb[2].max(p.x);
+                        bb[3] = bb[3].max(p.y);
                     }
+                    let px = ((bb[2] - bb[0]).max(bb[3] - bb[1]) as f64 * cam.scale) as f32;
+                    if px < MIN_FEATURE_PX {
+                        let center = Pt::new((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2);
+                        let c = world_to_screen(cam, center, rect);
+                        shapes.push(Shape::circle_filled(c, MARKER_R, fill));
+                        continue;
+                    }
+                }
+                let mut mesh = egui::epaint::Mesh::default();
+                for tri in etchy_core::triangulate_ring(outer) {
+                    let base = mesh.vertices.len() as u32;
+                    for p in tri {
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: world_to_screen(cam, p, rect),
+                            uv: egui::epaint::WHITE_UV,
+                            color: fill,
+                        });
+                    }
+                    mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+                }
+                if !mesh.is_empty() {
+                    shapes.push(Shape::from(mesh));
                 }
             }
         };
 
         match self.mode {
-            Mode::Before => push(&layer.old, C_BASE, Stroke::new(1.0, C_BASE)),
-            Mode::After => push(&layer.new, C_BASE, Stroke::new(1.0, C_BASE)),
+            Mode::Before => push(&layer.old, C_BASE, false),
+            Mode::After => push(&layer.new, C_BASE, false),
             Mode::Overlay => {
                 if self.show_base {
-                    // Draw the unchanged base (new minus the added) faintly.
+                    // Draw the unchanged base (the new layer) faintly behind the diff.
                     let faint = Color32::from_rgba_unmultiplied(90, 95, 105, 90);
-                    push(&layer.new, faint, Stroke::NONE);
+                    push(&layer.new, faint, false);
                 }
-                push(&layer.removed, C_REMOVED, Stroke::new(1.0, C_REMOVED));
-                push(&layer.added, C_ADDED, Stroke::new(1.0, C_ADDED));
+                push(&layer.removed, C_REMOVED, true);
+                push(&layer.added, C_ADDED, true);
             }
         }
         let n = shapes.len();
