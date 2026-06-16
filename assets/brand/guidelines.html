@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; }
+  * { box-sizing: border-box; }
+  @media print { .page { page-break-after: always; break-after: page; } }
+</style>
+</helmet>
+
+<div style="background:#e7e3d9; font-family:'Zilla Slab',serif; color:#1a1f1d; padding:48px 32px 96px;">
+
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+    <linearGradient id="copper" gradientUnits="userSpaceOnUse" x1="20" y1="18" x2="100" y2="102">
+      <stop offset="0" stop-color="#f6c873"/><stop offset="0.5" stop-color="#e8a33d"/><stop offset="1" stop-color="#b9762a"/>
+    </linearGradient>
+    <symbol id="m-e" viewBox="0 0 120 120">
+      <g fill="url(#copper)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g>
+      <circle cx="92" cy="86" r="9" fill="none" stroke="url(#copper)" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="url(#copper)"/>
+    </symbol>
+    <symbol id="m-e-mono" viewBox="0 0 120 120">
+      <g fill="currentColor"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g>
+      <circle cx="92" cy="86" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="currentColor"/>
+    </symbol>
+  </defs></svg>
+
+  <!-- COVER -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#0b0f0e; border-radius:20px; padding:72px; color:#f4f1e8;">
+    <div style="display:flex; align-items:center; gap:22px;"><svg width="78" height="78"><use href="#m-e"/></svg><div style="font-size:54px; font-weight:700; letter-spacing:-1px; line-height:1;">etchy</div></div>
+    <div style="font-family:'JetBrains Mono',monospace; font-size:13px; letter-spacing:3px; text-transform:uppercase; color:#a07c3c; margin-top:40px;">Brand guidelines</div>
+    <div style="font-size:34px; font-weight:600; margin-top:8px; max-width:560px; line-height:1.2;">The stencil mark, palette, type and rules — and how to revisit them.</div>
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6f6d66; margin-top:40px;">v1.0 · gold ENIG on board · MIT / Apache-2.0</div>
+  </div>
+
+  <!-- 01 MARK -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:8px;">01 · The mark</div>
+    <h2 style="font-size:30px; font-weight:700; margin:0 0 18px;">A stencil E with a fiducial.</h2>
+    <div style="display:grid; grid-template-columns:240px 1fr; gap:36px; align-items:center;">
+      <div style="background:#0b0f0e; border-radius:16px; height:200px; display:flex; align-items:center; justify-content:center;"><svg width="120" height="120"><use href="#m-e"/></svg></div>
+      <div style="font-size:17px; line-height:1.6; color:#3a3f3c;">
+        <p style="margin:0 0 14px;">The primary mark is a <strong>stencil capital “E”</strong> with a <strong>fiducial</strong> dot, in gold ENIG copper. The E is the wordmark initial; the stencil bridge-cuts and the fiducial speak the language of PCB fabrication — what etchy operates on.</p>
+        <p style="margin:0; font-family:'JetBrains Mono',monospace; font-size:13px; color:#6f6d66;">stencil E (8 bars · 5 bridge gaps) + fiducial (pad in a clearance ring).</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 02 CONSTRUCTION -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:8px;">02 · Construction</div>
+    <h2 style="font-size:30px; font-weight:700; margin:0 0 6px;">Drawn on a 120-unit grid.</h2>
+    <p style="font-size:15px; color:#5c5a54; margin:0 0 24px; max-width:620px;">Coordinates are in the SVG <span style="font-family:'JetBrains Mono',monospace;">viewBox 0 0 120 120</span>. Edit the mark from these values.</p>
+    <div style="display:grid; grid-template-columns:1fr 320px; gap:32px; align-items:start;">
+      <div style="background:#faf8f3; border:1px solid #e4dfd2; border-radius:14px; padding:18px;">
+        <svg viewBox="0 0 120 120" style="width:100%; display:block;">
+          <g stroke="#e0dccf" stroke-width="0.5"><path d="M0 26H120M0 48H120M0 66H120M0 74H120M0 94H120M24 0V120M40 0V120M64 0V120M74 0V120"/></g>
+          <g fill="#e8a33d"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g>
+          <circle cx="92" cy="86" r="9" fill="none" stroke="#b9762a" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="#b9762a"/>
+          <g fill="#9a4f2a" font-family="monospace" font-size="4.5"><text x="13" y="23">x24</text><text x="68" y="23">x74</text><text x="93" y="105">fid 92,86</text></g>
+        </svg>
+      </div>
+      <div style="font-family:'JetBrains Mono',monospace; font-size:12.5px; line-height:1.75; color:#3a3f3c;">
+        <div style="color:#8a7a5e; margin-bottom:8px;">KEY VALUES</div>
+        <div>Spine&nbsp; x24, w16</div><div>Arms&nbsp;&nbsp; top/bot → x74</div><div>Mid arm → x64</div><div>Bar height ≈ 16</div><div>Bridge gaps ≈ 5–6</div>
+        <div style="margin-top:10px;">Fiducial cx92 cy86</div><div>· ring r9, stroke 1.8</div><div>· pad r3.6, filled</div>
+        <div style="margin-top:14px; color:#8a7a5e;">FAVICON ≤ 32px</div><div>centered E, no fid</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 03 CLEAR SPACE & SIZE -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:18px;">03 · Clear space &amp; minimum size</div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:32px;">
+      <div>
+        <h3 style="font-size:20px; font-weight:600; margin:0 0 12px;">Clear space</h3>
+        <div style="background:#0b0f0e; border-radius:14px; padding:34px; display:flex; align-items:center; justify-content:center;"><div style="border:1px dashed #5c4a2a; padding:26px; border-radius:8px;"><svg width="90" height="90"><use href="#m-e"/></svg></div></div>
+        <p style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6f6d66; margin:12px 0 0;">Keep ≥ one bar-height (~16 units) clear on all sides.</p>
+      </div>
+      <div>
+        <h3 style="font-size:20px; font-weight:600; margin:0 0 12px;">Minimum size</h3>
+        <div style="background:#0b0f0e; border-radius:14px; padding:34px; display:flex; align-items:flex-end; justify-content:center; gap:30px; height:158px;">
+          <div style="text-align:center; color:#e8a33d;"><svg width="48" height="48"><use href="#m-e-mono"/></svg><div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#6f6d66; margin-top:6px;">48 · with fid</div></div>
+          <div style="text-align:center; color:#e8a33d;"><svg width="24" height="24" viewBox="0 0 120 120"><g fill="currentColor"><rect x="35" y="26" width="16" height="17"/><rect x="35" y="48" width="16" height="21"/><rect x="35" y="74" width="16" height="20"/><rect x="35" y="26" width="26" height="16"/><rect x="66" y="26" width="19" height="16"/><rect x="35" y="52" width="40" height="14"/><rect x="35" y="78" width="26" height="16"/><rect x="66" y="78" width="19" height="16"/></g></svg><div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:#6f6d66; margin-top:6px;">16 · E only</div></div>
+        </div>
+        <p style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6f6d66; margin:12px 0 0;">Drop the fiducial below ~32px; use the centered E.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 04 COLOR -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:18px;">04 · Color</div>
+    <div style="height:64px; border-radius:12px; background:linear-gradient(100deg,#f6c873,#e8a33d 50%,#b9762a);"></div>
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6f6d66; margin:8px 0 22px;">Copper / ENIG gold gradient · #f6c873 → #e8a33d → #b9762a · primary</div>
+    <div style="display:grid; grid-template-columns:repeat(5,1fr); gap:14px; font-family:'JetBrains Mono',monospace; font-size:11px;">
+      <div><div style="height:80px; border-radius:10px; background:#0b0f0e;"></div><div style="margin-top:7px;">#0b0f0e<br><span style="color:#8a8a85;">board dark</span></div></div>
+      <div><div style="height:80px; border-radius:10px; background:#f4f1e8; border:1px solid #d6d1c4;"></div><div style="margin-top:7px;">#f4f1e8<br><span style="color:#8a8a85;">paper</span></div></div>
+      <div><div style="height:80px; border-radius:10px; background:#e8a33d;"></div><div style="margin-top:7px;">#e8a33d<br><span style="color:#8a8a85;">copper mid</span></div></div>
+      <div><div style="height:80px; border-radius:10px; background:#46d18a;"></div><div style="margin-top:7px;">#46d18a<br><span style="color:#8a8a85;">added</span></div></div>
+      <div><div style="height:80px; border-radius:10px; background:#ff5d73;"></div><div style="margin-top:7px;">#ff5d73<br><span style="color:#8a8a85;">removed</span></div></div>
+    </div>
+    <p style="font-size:14px; color:#5c5a54; margin:22px 0 0;">Copper is the brand. Green/red are reserved for diff semantics (added / removed) — never decorative.</p>
+  </div>
+
+  <!-- 05 TYPE -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:18px;">05 · Typography</div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:32px;">
+      <div style="border:1px solid #e4dfd2; border-radius:14px; padding:28px;">
+        <div style="font-size:56px; font-weight:700; letter-spacing:-1px;">etchy</div>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#6f6d66; margin-top:10px;">Wordmark — Zilla Slab 700</div>
+        <div style="font-size:13px; color:#8a8a85; margin-top:4px; font-family:'JetBrains Mono',monospace;">alt: Space Mono · Space Grotesk</div>
+      </div>
+      <div style="border:1px solid #e4dfd2; border-radius:14px; padding:28px; font-family:'JetBrains Mono',monospace;">
+        <div style="font-size:30px; font-weight:600;">$ etchy old/ new/</div>
+        <div style="font-size:12px; color:#6f6d66; margin-top:14px;">UI · code · captions — JetBrains Mono</div>
+        <div style="font-size:13px; color:#8a8a85; margin-top:4px;">400 / 500 / 600 / 700</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 06 ACCENT -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:18px;">06 · The accent dot</div>
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:24px;">
+      <div style="background:#0b0f0e; border-radius:14px; padding:30px; display:flex; align-items:center; justify-content:center; gap:18px;">
+        <svg width="64" height="64"><use href="#m-e"/></svg>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#cdd1cc;"><div style="color:#e8a33d; margin-bottom:4px;">FIDUCIAL — default</div>filled pad + clearance ring</div>
+      </div>
+      <div style="background:#0b0f0e; border-radius:14px; padding:30px; display:flex; align-items:center; justify-content:center; gap:18px;">
+        <svg width="64" height="64" viewBox="0 0 120 120"><g fill="url(#copper)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g><circle cx="92" cy="86" r="7" fill="none" stroke="url(#copper)" stroke-width="3"/></svg>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:12px; color:#cdd1cc;"><div style="color:#a07c3c; margin-bottom:4px;">VIA — alternate</div>hollow ring only</div>
+      </div>
+    </div>
+    <p style="font-size:14px; color:#5c5a54; margin:18px 0 0;">Use the <strong>fiducial</strong> as the default accent. The via (hollow ring) is a permitted alternate. Never use both, never enlarge the dot beyond the ring shown.</p>
+  </div>
+
+  <!-- 07 MISUSE -->
+  <div class="page" style="max-width:920px; margin:0 auto 36px; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:18px;">07 · Misuse</div>
+    <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:16px; font-family:'JetBrains Mono',monospace; font-size:12px; color:#3a3f3c;">
+      <div style="background:#faf8f3; border:1px solid #e4dfd2; border-radius:12px; padding:20px;"><span style="color:#ff5d73;">✗</span> Don’t recolor outside the palette</div>
+      <div style="background:#faf8f3; border:1px solid #e4dfd2; border-radius:12px; padding:20px;"><span style="color:#ff5d73;">✗</span> Don’t rotate, skew or stretch</div>
+      <div style="background:#faf8f3; border:1px solid #e4dfd2; border-radius:12px; padding:20px;"><span style="color:#ff5d73;">✗</span> Don’t add shadows, glows or bevels</div>
+      <div style="background:#faf8f3; border:1px solid #e4dfd2; border-radius:12px; padding:20px;"><span style="color:#ff5d73;">✗</span> Don’t close the stencil bridge gaps</div>
+      <div style="background:#faf8f3; border:1px solid #e4dfd2; border-radius:12px; padding:20px;"><span style="color:#ff5d73;">✗</span> Don’t crowd the clear space</div>
+      <div style="background:#faf8f3; border:1px solid #e4dfd2; border-radius:12px; padding:20px;"><span style="color:#ff5d73;">✗</span> Don’t place on low-contrast backgrounds</div>
+    </div>
+  </div>
+
+  <!-- 08 ASSETS & REGEN -->
+  <div class="page" style="max-width:920px; margin:0 auto 0; background:#fff; border-radius:20px; padding:56px; border:1px solid #d6d1c4;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:2px; text-transform:uppercase; color:#8a7a5e; font-weight:600; margin-bottom:18px;">08 · Source files &amp; regeneration</div>
+    <div style="font-family:'JetBrains Mono',monospace; font-size:13px; line-height:1.9; color:#3a3f3c;">
+      <div style="color:#8a7a5e;">EDITABLE SOURCE</div>
+      <div>Etchy Brand Assets.dc.html &nbsp;<span style="color:#8a8a85;">— full board + live tweaks (wordmark · finish)</span></div>
+      <div>Etchy Brand Guidelines.dc.html &nbsp;<span style="color:#8a8a85;">— this document</span></div>
+      <div>export/*.html &nbsp;<span style="color:#8a8a85;">— social · banner · wordmark render pages</span></div>
+      <div>assets/*.svg &nbsp;<span style="color:#8a8a85;">— vector source of truth</span></div>
+      <div style="color:#8a7a5e; margin-top:16px;">TO MODIFY THE MARK</div>
+      <div>1 · edit the 8 rects + fid in the <span style="color:#b9762a;">m-e</span> symbol (board) and assets/etchy-icon.svg</div>
+      <div>2 · keep gradient id <span style="color:#b9762a;">copper</span> as userSpaceOnUse (so flat bars render)</div>
+      <div>3 · re-export PNGs from the updated SVGs at the sizes in assets/README.md</div>
+      <div style="color:#8a7a5e; margin-top:16px;">EXPORTED OUTPUT</div>
+      <div>assets/ &nbsp;<span style="color:#8a8a85;">— SVG + PNG (favicons, app icons, social, banner, wordmark) + README</span></div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

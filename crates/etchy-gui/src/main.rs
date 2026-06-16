@@ -57,10 +57,17 @@ fn main() -> ExitCode {
     };
 
     let app = ViewApp::new(diff, label(&old_dir), label(&new_dir));
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1100.0, 760.0])
+        .with_title("etchy — PCB diff viewer");
+    // Brand app-icon (assets/brand) on the window/taskbar; ignore if it can't decode.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../../../assets/brand/png/etchy-app-icon-512.png"
+    )) {
+        viewport = viewport.with_icon(icon);
+    }
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 760.0])
-            .with_title("etchy — PCB diff viewer"),
+        viewport,
         ..Default::default()
     };
     match eframe::run_native("etchy", native_options, Box::new(|_cc| Ok(Box::new(app)))) {
@@ -147,9 +154,12 @@ impl ViewApp {
     }
 }
 
-const C_ADDED: Color32 = Color32::from_rgb(40, 200, 90);
-const C_REMOVED: Color32 = Color32::from_rgb(225, 70, 70);
+// Brand palette (assets/brand/README.md): diff accents + board-dark canvas.
+const C_ADDED: Color32 = Color32::from_rgb(0x46, 0xd1, 0x8a); // #46d18a
+const C_REMOVED: Color32 = Color32::from_rgb(0xff, 0x5d, 0x73); // #ff5d73
 const C_BASE: Color32 = Color32::from_rgb(90, 95, 105);
+/// Brand "board dark" — the canvas background.
+const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
 
 /// A changed region smaller than this many screen pixels is drawn as one crisp
 /// marker dot instead of its (sub-pixel, aliasing) real geometry.
@@ -224,7 +234,7 @@ impl ViewApp {
         let size = ui.available_size();
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
         let rect = response.rect;
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 20, 24));
+        painter.rect_filled(rect, 0.0, C_CANVAS);
 
         // Fit on first show / layer change.
         if !self.cam.fitted {

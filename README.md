@@ -1,3 +1,5 @@
+![etchy — fast, trustworthy PCB visual + geometric diff](assets/brand/png/etchy-banner-1280x320.png)
+
 # etchy
 
 > **Status: Phase 0 — scaffold.** Not yet usable. The working tool today is the
