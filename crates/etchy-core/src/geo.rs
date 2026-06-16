@@ -145,13 +145,12 @@ impl PolygonSet {
         self.area_nm2() as f64 / (NM_PER_MM as f64 * NM_PER_MM as f64)
     }
 
-    /// Triangulate each shape's **outer ring** into a flat list of triangles (nm),
-    /// for filled rendering. Concave-correct — unlike egui's vertex-0 fan, which
-    /// only tiles convex polygons and throws spurious "spike" triangles across the
-    /// concave copper shapes a PCB is full of. Holes are not yet subtracted (the
-    /// hole cut is tracked as a separate increment).
+    /// Triangulate every shape (outer ring with **holes subtracted**) into a flat
+    /// list of triangles (nm), for filled rendering. Concave-correct — unlike
+    /// egui's vertex-0 fan, which only tiles convex polygons and throws spurious
+    /// "spike" triangles across the concave copper shapes a PCB is full of.
     pub fn triangulate(&self) -> Vec<[Pt; 3]> {
-        crate::boolean::triangulate_outer(self)
+        crate::boolean::triangulate_set(self)
     }
 
     /// Axis-aligned bounding box `[min_x, min_y, max_x, max_y]` in nm, or `None`
@@ -179,12 +178,11 @@ impl PolygonSet {
     }
 }
 
-/// Triangulate a single closed ring (an outer contour) into a flat triangle
-/// list (nm). Concave-correct. Exposed for renderers that need per-shape control
-/// — e.g. deciding to draw a marker for sub-pixel shapes — without rebuilding a
-/// [`PolygonSet`]. Holes are not subtracted.
-pub fn triangulate_ring(outer: &[Pt]) -> Vec<[Pt; 3]> {
-    crate::boolean::triangulate_one(outer)
+/// Triangulate a full shape — its outer ring **with holes subtracted** — into a
+/// flat triangle list (nm). For per-shape filled rendering of annular pads and
+/// pour cut-outs without rebuilding a [`PolygonSet`]. Concave-correct.
+pub fn triangulate_shape(shape: &Shape) -> Vec<[Pt; 3]> {
+    crate::boolean::triangulate_shape(shape)
 }
 
 /// Twice the signed area of a ring (shoelace), accumulated in `i128` so the
@@ -292,6 +290,29 @@ mod tests {
             ps.area_nm2(),
             "triangles must tile the polygon exactly (no spikes/overlap)"
         );
+    }
+
+    #[test]
+    fn triangulate_shape_cuts_holes() {
+        // A square with a square hole. The hole (CW) must be excluded from the
+        // triangulation — outer-ring-only triangulation would fill it in.
+        let s = 1_000_000;
+        let h = 500_000;
+        let shape: Shape = vec![
+            vec![Pt::new(0, 0), Pt::new(s, 0), Pt::new(s, s), Pt::new(0, s)],
+            vec![
+                Pt::new(250_000, 250_000),
+                Pt::new(250_000, 250_000 + h),
+                Pt::new(250_000 + h, 250_000 + h),
+                Pt::new(250_000 + h, 250_000),
+            ],
+        ];
+        let tris = triangulate_shape(&shape);
+        let sum2: i128 = tris.iter().map(tri_abs_area2).sum();
+        // Net filled area = outer − hole; a hole-blind triangulation would equal
+        // the full outer area instead.
+        let net = PolygonSet::new(vec![shape.clone()]).area_nm2();
+        assert_eq!(sum2 / 2, net, "triangulation must exclude the hole");
     }
 
     /// Twice the unsigned area of a triangle, in nm² (i128).

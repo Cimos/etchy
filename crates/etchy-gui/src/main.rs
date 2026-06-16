@@ -298,7 +298,7 @@ impl ViewApp {
                     }
                 }
                 let mut mesh = egui::epaint::Mesh::default();
-                for tri in etchy_core::triangulate_ring(outer) {
+                for tri in etchy_core::triangulate_shape(shape) {
                     let base = mesh.vertices.len() as u32;
                     for p in tri {
                         mesh.vertices.push(egui::epaint::Vertex {

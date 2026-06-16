@@ -5,7 +5,7 @@ use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay::Overlay;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::i_float::int::point::IntPoint;
-use i_overlay::i_shape::int::shape::{IntContour, IntShapes};
+use i_overlay::i_shape::int::shape::{IntContour, IntShape, IntShapes};
 use i_triangle::int::triangulatable::IntTriangulatable;
 
 use crate::geo::{Contour, PolygonSet, Pt, Shape};
@@ -47,27 +47,29 @@ pub(crate) fn difference(subj: &[Contour], clip: &[Contour]) -> PolygonSet {
     )
 }
 
-/// Triangulate each shape's **outer ring** into a flat triangle list (nm), for
-/// filled rendering. Uses i_triangle's integer monotone triangulator — which
-/// adds no Steiner points for a simple polygon, so coordinates stay exact — and
-/// is concave-correct, unlike a vertex-0 fan. Holes are not yet subtracted.
-pub(crate) fn triangulate_outer(ps: &PolygonSet) -> Vec<[Pt; 3]> {
+/// Triangulate every shape in the set (each outer ring with its holes
+/// subtracted) into one flat triangle list (nm), for filled rendering.
+pub(crate) fn triangulate_set(ps: &PolygonSet) -> Vec<[Pt; 3]> {
     ps.shapes
         .iter()
-        .filter_map(|s| s.first())
-        .flat_map(|outer| triangulate_one(outer))
+        .flat_map(|s| triangulate_shape(s))
         .collect()
 }
 
-/// Triangulate a single closed ring (the outer contour) into a flat triangle
-/// list (nm). i_triangle's integer monotone triangulator: concave-correct, and
-/// adds no Steiner points for a simple polygon so coordinates stay exact.
-pub(crate) fn triangulate_one(outer: &[Pt]) -> Vec<[Pt; 3]> {
-    if outer.len() < 3 {
-        return Vec::new();
+/// Triangulate one shape — its outer ring with **holes subtracted** — into a flat
+/// triangle list (nm). Uses i_triangle's integer monotone triangulator over an
+/// `IntShape` (outer CCW, holes CW, NonZero fill): concave-correct, holes cut, and
+/// no Steiner points for simple polygons so coordinates stay exact.
+pub(crate) fn triangulate_shape(shape: &[Contour]) -> Vec<[Pt; 3]> {
+    match shape.first() {
+        Some(outer) if outer.len() >= 3 => {}
+        _ => return Vec::new(),
     }
-    let contour: IntContour<i64> = outer.iter().map(|p| IntPoint::new(p.x, p.y)).collect();
-    contour
+    let int_shape: IntShape<i64> = shape
+        .iter()
+        .map(|c| c.iter().map(|p| IntPoint::new(p.x, p.y)).collect())
+        .collect();
+    int_shape
         .triangulate()
         .into_triangulation::<u32>()
         .triangles()
