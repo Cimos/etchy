@@ -17,3 +17,12 @@ etchy-core = { path = "../etchy-core" }
 eframe.workspace = true
 egui.workspace = true
 anyhow.workspace = true
+
+# Web (WASM) build only — the browser entry point + canvas wiring + the bundled
+# demo board (embedded at compile time; the board itself is gitignored).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement"] }
+include_dir = "0.7"

@@ -16,3 +16,7 @@ Thumbs.db
 
 # Claude Code local session state (settings + agent memory)
 .claude/
+crates/etchy-gui/assets/demo/
+
+# trunk (wasm) build output
+crates/etchy-gui/dist/
