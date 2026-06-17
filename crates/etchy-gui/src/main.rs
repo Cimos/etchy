@@ -6,90 +6,158 @@
 //! the pure `etchy-core` engine via `compare_detailed`; this crate only does I/O
 //! and rendering. M1 scope: flash-only geometry (the engine fails loud otherwise).
 
+#[cfg(not(target_arch = "wasm32"))]
 mod loader;
-
-use std::path::PathBuf;
-use std::process::ExitCode;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
 use etchy_core::{BoardDiff, LayerView, PolygonSet, Pt};
 
-/// WSLg's GPU OpenGL path (ZINK/Vulkan-on-GL) commonly fails to initialize, and
-/// its Wayland socket can drop ("Broken pipe"). Software rendering (llvmpipe) over
-/// X11 (Xwayland) is the reliable combination, so on WSL we default to it — unless
-/// the user has already chosen otherwise. No effect off WSL or on a real desktop.
-fn configure_display_for_wsl() {
-    let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
-        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|s| {
-                let s = s.to_ascii_lowercase();
-                s.contains("microsoft") || s.contains("wsl")
-            })
-            .unwrap_or(false);
-    if !is_wsl {
-        return;
-    }
-    if std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_none() {
-        std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
-    }
-    // Prefer X11 over the flaky WSLg Wayland path when both are offered.
-    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        std::env::remove_var("WAYLAND_DISPLAY");
-    }
-}
+// ===========================================================================
+// Native entry (desktop) — diff two Gerber directories given on the CLI.
+// ===========================================================================
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    configure_display_for_wsl();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 2 {
-        eprintln!("usage: etchy-gui <old-dir> <new-dir>");
-        return ExitCode::from(2);
+    /// WSLg's GPU OpenGL path (ZINK/Vulkan-on-GL) commonly fails to initialize, and
+    /// its Wayland socket can drop ("Broken pipe"). Software rendering (llvmpipe) over
+    /// X11 (Xwayland) is the reliable combination, so on WSL we default to it.
+    fn configure_display_for_wsl() {
+        let is_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                .map(|s| {
+                    let s = s.to_ascii_lowercase();
+                    s.contains("microsoft") || s.contains("wsl")
+                })
+                .unwrap_or(false);
+        if !is_wsl {
+            return;
+        }
+        if std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_none() {
+            std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+        }
+        if std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            std::env::remove_var("WAYLAND_DISPLAY");
+        }
     }
-    let (old_dir, new_dir) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]));
 
-    let diff = match build_diff(&old_dir, &new_dir) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("etchy-gui: error: {e:#}");
+    pub fn run() -> ExitCode {
+        configure_display_for_wsl();
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.len() != 2 {
+            eprintln!("usage: etchy-gui <old-dir> <new-dir>");
             return ExitCode::from(2);
         }
-    };
-
-    let app = ViewApp::new(diff, label(&old_dir), label(&new_dir));
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1100.0, 760.0])
-        .with_title("etchy — PCB diff viewer");
-    // Brand app-icon (assets/brand) on the window/taskbar; ignore if it can't decode.
-    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!(
-        "../../../assets/brand/png/etchy-app-icon-512.png"
-    )) {
-        viewport = viewport.with_icon(icon);
-    }
-    let native_options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
-    };
-    match eframe::run_native("etchy", native_options, Box::new(|_cc| Ok(Box::new(app)))) {
-        Ok(()) => ExitCode::from(0),
-        Err(e) => {
-            eprintln!("etchy-gui: window error: {e}");
-            ExitCode::from(2)
+        let (old_dir, new_dir) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]));
+        let diff = match build_diff(&old_dir, &new_dir) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("etchy-gui: error: {e:#}");
+                return ExitCode::from(2);
+            }
+        };
+        let app = ViewApp::new(diff, label(&old_dir), label(&new_dir));
+        let mut viewport = egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 760.0])
+            .with_title("etchy — PCB diff viewer");
+        if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!(
+            "../../../assets/brand/png/etchy-app-icon-512.png"
+        )) {
+            viewport = viewport.with_icon(icon);
+        }
+        let native_options = eframe::NativeOptions {
+            viewport,
+            ..Default::default()
+        };
+        match eframe::run_native("etchy", native_options, Box::new(|_cc| Ok(Box::new(app)))) {
+            Ok(()) => ExitCode::from(0),
+            Err(e) => {
+                eprintln!("etchy-gui: window error: {e}");
+                ExitCode::from(2)
+            }
         }
     }
+
+    fn label(p: &Path) -> String {
+        p.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string()
+    }
+
+    fn build_diff(old_dir: &Path, new_dir: &Path) -> anyhow::Result<BoardDiff> {
+        let old = loader::load_board(old_dir)?;
+        let new = loader::load_board(new_dir)?;
+        Ok(etchy_core::compare_detailed(&old, &new)?)
+    }
 }
 
-fn label(p: &std::path::Path) -> String {
-    p.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("?")
-        .to_string()
+// ===========================================================================
+// Entry points
+// ===========================================================================
+#[cfg(not(target_arch = "wasm32"))]
+fn main() -> std::process::ExitCode {
+    native::run()
 }
 
-fn build_diff(old_dir: &std::path::Path, new_dir: &std::path::Path) -> anyhow::Result<BoardDiff> {
-    let old = loader::load_board(old_dir)?;
-    let new = loader::load_board(new_dir)?;
-    Ok(etchy_core::compare_detailed(&old, &new)?)
+/// The bundled demo board (gitignored, embedded at compile time). A layer that
+/// fails to parse is skipped rather than crashing the demo.
+#[cfg(target_arch = "wasm32")]
+fn board_from_files(dir: &include_dir::Dir) -> etchy_core::Board {
+    let mut files: Vec<_> = dir.files().collect();
+    files.sort_by_key(|f| f.path().to_path_buf());
+    let mut layers = Vec::new();
+    for f in files {
+        let bytes = f.contents();
+        if !etchy_core::looks_like_gerber(bytes) {
+            continue;
+        }
+        let name = f
+            .path()
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), ""));
+        if let Ok(geometry) = etchy_core::polygonize_gerber(bytes) {
+            layers.push(etchy_core::Layer {
+                kind: etchy_core::classify(stem, ext),
+                label: name.clone(),
+                geometry,
+            });
+        }
+    }
+    etchy_core::Board { layers }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn demo_diff() -> BoardDiff {
+    static OLD: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/old");
+    static NEW: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/new");
+    etchy_core::compare_detailed(&board_from_files(&OLD), &board_from_files(&NEW))
+        .expect("demo diff")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use eframe::wasm_bindgen::JsCast as _;
+    console_error_panic_hook::set_once();
+    let web_options = eframe::WebOptions::default();
+    wasm_bindgen_futures::spawn_local(async move {
+        let canvas = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("the_canvas_id"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .expect("canvas element #the_canvas_id");
+        let app = ViewApp::new(
+            demo_diff(),
+            "MotionJigController A".into(),
+            "MotionJigController B".into(),
+        );
+        eframe::WebRunner::new()
+            .start(canvas, web_options, Box::new(|_cc| Ok(Box::new(app))))
+            .await
+            .expect("failed to start eframe web runner");
+    });
 }
 
 // ---------------------------------------------------------------------------

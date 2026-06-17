@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>etchy — PCB diff viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1115; overflow: hidden; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center;
+    color: #8b93a3; font: 15px -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #loading b { color: #36d39a; }
+</style>
+</head>
+<body>
+  <div id="loading"><div><b>etchy</b> — loading…</div></div>
+  <canvas id="the_canvas_id"></canvas>
+  <link data-trunk rel="rust" data-wasm-opt="2" />
+  <script>
+    // Hide the loading splash once the canvas has painted.
+    const obs = new MutationObserver(() => {});
+    addEventListener('DOMContentLoaded', () => {
+      const tick = () => {
+        const c = document.getElementById('the_canvas_id');
+        if (c && c.width > 1) { const l = document.getElementById('loading'); if (l) l.remove(); }
+        else requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+  </script>
+</body>
+</html>
