@@ -173,6 +173,7 @@ enum Mode {
 struct Camera {
     center: [f64; 2], // world nm
     scale: f64,       // pixels per nm
+    fit_scale: f64,   // scale at last fit — the "100%" reference for zoom %
     fitted: bool,
 }
 
@@ -181,6 +182,7 @@ impl Default for Camera {
         Self {
             center: [0.0, 0.0],
             scale: 1.0,
+            fit_scale: 1.0,
             fitted: false,
         }
     }
@@ -293,6 +295,20 @@ impl eframe::App for ViewApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_canvas(ui);
         });
+
+        // Publish "what they're looking at" for the web feedback widget.
+        let layer_name = self.diff.layers[self.selected].name().to_string();
+        let mode = match self.mode {
+            Mode::Overlay => "Overlay",
+            Mode::Before => "Before",
+            Mode::After => "After",
+        };
+        let zoom_pct = if self.cam.fit_scale > 0.0 {
+            (self.cam.scale / self.cam.fit_scale * 100.0).round() as i32
+        } else {
+            100
+        };
+        publish_state(&layer_name, mode, zoom_pct);
     }
 }
 
@@ -498,7 +514,29 @@ fn fit(cam: &mut Camera, bb: [i64; 4], rect: Rect) {
     if !cam.scale.is_finite() || cam.scale <= 0.0 {
         cam.scale = 1e-6;
     }
+    cam.fit_scale = cam.scale; // "100%" reference for the zoom readout
 }
+
+/// Publish the current view (selected layer, mode, zoom %) to JS so the web
+/// feedback widget can attach "what the user was looking at" to a submission.
+/// `window.__etchyState = { layer, mode, zoomPct }`. No-op off the web.
+#[cfg(target_arch = "wasm32")]
+fn publish_state(layer: &str, mode: &str, zoom_pct: i32) {
+    use eframe::wasm_bindgen::JsValue;
+    if let Some(win) = web_sys::window() {
+        let obj = js_sys::Object::new();
+        let set = |k: &str, v: &JsValue| {
+            let _ = js_sys::Reflect::set(&obj, &JsValue::from_str(k), v);
+        };
+        set("layer", &JsValue::from_str(layer));
+        set("mode", &JsValue::from_str(mode));
+        set("zoomPct", &JsValue::from_f64(zoom_pct as f64));
+        let _ = js_sys::Reflect::set(&win, &JsValue::from_str("__etchyState"), &obj);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_state(_layer: &str, _mode: &str, _zoom_pct: i32) {}
 
 /// Union bbox of a layer's old+new geometry (so the view frames the whole board).
 fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
