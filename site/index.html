@@ -96,14 +96,19 @@
   .gui-title{margin-left:8px;color:var(--muted);font-size:12px;align-self:center}
   .gui-body{display:flex;min-height:200px}
   .gui-layers{width:128px;flex:none;border-right:1px solid var(--line);padding:10px 8px;font-size:12px;color:var(--muted)}
-  .gl{padding:6px 8px;border-radius:6px;display:flex;justify-content:space-between;gap:6px;white-space:nowrap}
+  .gui-layers{display:flex;flex-direction:column;gap:2px}
+  .gl{width:100%;text-align:left;background:none;border:0;font:inherit;font-size:12px;color:var(--muted);cursor:pointer;padding:6px 8px;border-radius:6px;display:flex;justify-content:space-between;align-items:center;gap:6px;white-space:nowrap}
+  .gl:hover{color:var(--ink)}
   .gl.active{background:rgba(232,163,61,.12);color:var(--ink)}
+  .gl-d{font-size:11px}
   .gl .add{color:var(--added)} .gl .rem{color:var(--removed)}
   .gui-canvas{flex:1;min-width:0;padding:12px;display:flex;flex-direction:column;gap:10px}
-  .gui-canvas svg{width:100%;height:auto;border-radius:8px;border:1px solid var(--line)}
+  #gd-canvas{display:block}
+  #gd-canvas svg{width:100%;height:auto;border-radius:8px;border:1px solid var(--line);display:block}
   .gui-modes{display:flex;gap:6px;flex-wrap:wrap}
-  .gui-modes span{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
-  .gui-modes span.active{background:linear-gradient(135deg,var(--copper-1),var(--copper-3));color:#1a1206;border-color:transparent;font-weight:700}
+  .gm{font:inherit;font-size:11px;color:var(--muted);background:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;cursor:pointer}
+  .gm:hover{color:var(--ink)}
+  .gm.active{background:linear-gradient(135deg,var(--copper-1),var(--copper-3));color:#1a1206;border-color:transparent;font-weight:700}
 </style>
 </head>
 <body>
@@ -150,20 +155,20 @@
       <div class="hp-view hp-gui-view">
         <div class="term-bar"><i></i><i></i><i></i><span class="gui-title">etchy — revA ▸ revB</span></div>
         <div class="gui-body">
-          <div class="gui-layers">
-            <div class="gl active">Top Copper <span><span class="add">+4</span> <span class="rem">-1</span></span></div>
-            <div class="gl">Bottom Copper</div>
-            <div class="gl">Top Silk</div>
-            <div class="gl">Drill</div>
+          <div class="gui-layers" id="gd-layers">
+            <button type="button" class="gl active" data-layer="top">Top Copper <span class="gl-d"><span class="add">+2</span> <span class="rem">-1</span></span></button>
+            <button type="button" class="gl" data-layer="bottom">Bottom Copper <span class="gl-d"><span class="add">+1</span></span></button>
+            <button type="button" class="gl" data-layer="silk">Top Silk <span class="gl-d"><span class="add">+1</span></span></button>
+            <button type="button" class="gl" data-layer="drill">Drill <span class="gl-d"><span class="rem">-2</span></span></button>
           </div>
           <div class="gui-canvas">
-            <svg viewBox="0 0 520 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diff overlay in the viewer: added traces green, removed red.">
-              <rect width="520" height="200" fill="#0e1413"/>
-              <g stroke="#33403d" stroke-width="5" fill="none" stroke-linecap="round"><path d="M40 50 H230 V120 H380"/><path d="M40 95 H180 V160 H320"/><circle cx="40" cy="50" r="8"/></g>
-              <g stroke="#46d18a" stroke-width="6" fill="none" stroke-linecap="round"><path d="M380 120 H460 V165 H490"/><circle cx="490" cy="165" r="9"/></g>
-              <g stroke="#ff5d73" stroke-width="6" fill="none" stroke-linecap="round"><path d="M180 160 H320"/></g>
-            </svg>
-            <div class="gui-modes"><span class="active">Overlay</span><span>Before</span><span>After</span><span>Split</span></div>
+            <div id="gd-canvas" role="img" aria-label="etchy viewer demo — added traces green, removed red"></div>
+            <div class="gui-modes" id="gd-modes">
+              <button type="button" class="gm active" data-mode="overlay">Overlay</button>
+              <button type="button" class="gm" data-mode="before">Before</button>
+              <button type="button" class="gm" data-mode="after">After</button>
+              <button type="button" class="gm" data-mode="split">Split</button>
+            </div>
           </div>
         </div>
       </div>
@@ -222,6 +227,7 @@
     <div><a href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">GitHub</a> · <a href="#roadmap">Roadmap</a> · <a href="https://github.com/Cimos/etchy/tree/main/docs" target="_blank" rel="noopener">Docs</a> · <a href="https://github.com/Cimos/Gerber-Diff-Tool" target="_blank" rel="noopener">gerber-diff</a></div>
   </footer>
 </div>
+<script src="gui-demo.js"></script>
 <!-- DEV-ONLY feedback widget — REMOVE (or gate) before public launch; points at localhost:8770. -->
 <script src="feedback-widget.js" data-feedback-endpoint="http://localhost:8770/submit"></script>
 </body>
