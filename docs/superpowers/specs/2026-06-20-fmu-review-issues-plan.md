@@ -18,13 +18,18 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
 - [ ] **#11** Drop the `□` glyph shown before layer names.
 - Viewer-only (`etchy-gui`); low risk, immediately visible.
 
-### G2 · Rendering gaps — features not drawn (#3, #4) — trust-critical
-- [ ] **#3** Some tracks not rendering. **#4** Missing footprints.
-- **Hypothesis:** traces/region fills not polygonized for some layers, or a layer
-  that fails to parse is *silently skipped* by the web build (`board_from_files`
-  swallows per-layer errors → a whole layer vanishes quietly).
-- **First step:** instrument a per-layer parse over the FMU pack; list what fails or
-  is skipped **loudly** (no silent misses), then fix the offending handling.
+### G2 · Rendering gaps — features not drawn (#3, #4) — **ROOT CAUSE FOUND + FIXED**
+- [x] **#3** Some tracks not rendering. **#4** Missing footprints.
+- **Root cause (confirmed):** `resolve_layer` resolved polarity as one
+  order-independent `dark − clear` set difference, but Gerber polarity is
+  **sequential** (a later `LPD` repaints over an earlier `LPC`). The FMU copper
+  layers go pour-dark → clear-anti-pads → traces-dark-again; the single pass
+  subtracted those clears from the later traces too → trace-shaped voids.
+- **Fix:** process objects in paint order as polarity **spans** — dark unions
+  copper on, clear subtracts it (gerber.rs `spans` + boolean.rs `union`). Verified:
+  new test `polarity_is_sequential_later_dark_repaints`; existing polarity/golden/
+  property tests still green; FMU GTL restored +28 mm² / +27 shapes (the erased
+  traces), confirmed by rasterizing etchy's own mesh.
 
 ### G1 · Diff accuracy — phantom / hairline diffs (#1, #5, #6) — confirmed
 - [ ] Detect a global offset / coordinate-precision mismatch between the two boards

@@ -58,7 +58,20 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
     for cmd in doc.commands() {
         m.step(cmd)?;
     }
-    Ok(boolean::difference(&m.dark, &m.clear))
+    // Sequential polarity: paint the spans in order — dark unions copper on, clear
+    // subtracts it — so a later dark span correctly repaints over an earlier clear
+    // (an order-independent dark − clear erases such repaints).
+    let mut acc: Vec<Contour> = Vec::new();
+    let mut result = PolygonSet::default();
+    for (is_dark, contours) in &m.spans {
+        result = if *is_dark {
+            boolean::union(&acc, contours)
+        } else {
+            boolean::difference(&acc, contours)
+        };
+        acc = boolean::flatten(&result);
+    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -149,8 +162,11 @@ struct Machine<'a> {
     unit_to_mm: f64,
     nm_per_unit: f64,
 
-    dark: Vec<Contour>,
-    clear: Vec<Contour>,
+    /// Objects in paint order, batched into runs of one polarity. Gerber polarity
+    /// is sequential — a later dark run repaints over an earlier clear — so these
+    /// are resolved in order (union for dark, subtract for clear), not as one
+    /// order-independent `dark − clear` pass.
+    spans: Vec<(bool, Vec<Contour>)>,
 
     cur: Pt,
     ap: Option<i32>,
@@ -174,8 +190,7 @@ impl<'a> Machine<'a> {
             macros,
             unit_to_mm,
             nm_per_unit,
-            dark: Vec::new(),
-            clear: Vec::new(),
+            spans: Vec::new(),
             cur: Pt::new(0, 0),
             ap: None,
             interp: InterpolationMode::Linear,
@@ -571,15 +586,17 @@ impl<'a> Machine<'a> {
         Ok(Pt::new(x, y))
     }
 
-    /// Add a contour with `exposure`, routed to dark/clear by the current polarity:
-    /// dark copper iff `polarity_dark == exposure`.
+    /// Append a contour in paint order. Its effective polarity is dark iff
+    /// `polarity_dark == exposure`; consecutive same-polarity contours extend the
+    /// current span so they're resolved together (see [`Machine::spans`]).
     fn push(&mut self, c: Contour, exposure: bool) {
-        if c.len() >= 3 {
-            if self.polarity_dark == exposure {
-                self.dark.push(c);
-            } else {
-                self.clear.push(c);
-            }
+        if c.len() < 3 {
+            return;
+        }
+        let is_dark = self.polarity_dark == exposure;
+        match self.spans.last_mut() {
+            Some((d, run)) if *d == is_dark => run.push(c),
+            _ => self.spans.push((is_dark, vec![c])),
         }
     }
 }
@@ -697,6 +714,24 @@ mod tests {
         let a = area_mm2(g);
         // 2×2 pad (4) minus a 1×1 clear (1) = 3 mm².
         assert!((a - 3.0).abs() < 0.01, "after clear area {a} vs 3.0");
+    }
+
+    #[test]
+    fn polarity_is_sequential_later_dark_repaints() {
+        // Gerber polarity paints in ORDER: dark pad → clear punches a hole → a
+        // later dark pad inside the hole must REPAINT (survive). A single
+        // all-dark − all-clear pass erases that later pad (it's lumped into "dark"
+        // and subtracted by the clear) — the FMU "trace-shaped voids" bug.
+        // 10×10 (100) − 4×4 clear (16) + 2×2 dark inside (4) = 88 mm².
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,10X10*%\n%ADD11R,4X4*%\n%ADD12R,2X2*%\n\
+                 D10*\nX5000000Y5000000D03*\n\
+                 %LPC*%\nD11*\nX5000000Y5000000D03*\n\
+                 %LPD*%\nD12*\nX5000000Y5000000D03*\nM02*\n";
+        let a = area_mm2(g);
+        assert!(
+            (a - 88.0).abs() < 0.05,
+            "sequential polarity area {a} vs 88.0"
+        );
     }
 
     #[test]
