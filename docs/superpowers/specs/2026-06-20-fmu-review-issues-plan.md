@@ -65,8 +65,11 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
   Excellon — still unsupported (separate).
 
 ### G7b · UI controls (#12, #13, #16)
-- [ ] **#12** Pan X/Y with Ctrl / Shift + scroll. **#13** Hotkeys (e.g. `S` toggles
-  base). **#16** Golden etchy mark/wordmark top-left (brand-theme).
+- [x] **#13** Hotkeys: `↑/↓` (or `J/K`) cycle layers · `O/B/A` switch view ·
+  `S` toggle base · `F` fit. Pure `step_in_order()` for the cycling (unit-tested),
+  egui input glue for the rest; hint line lists the keys.
+- [ ] **#12** Pan X/Y with Ctrl / Shift + scroll. **#16** Golden etchy mark/wordmark
+  top-left (brand-theme).
 
 ### G8 · Feedback-widget polish (#14)
 - [ ] Overlay/thumbnail doesn't settle while the user keeps interacting.
