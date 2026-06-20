@@ -170,11 +170,7 @@ fn main() {
             .and_then(|d| d.get_element_by_id("the_canvas_id"))
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("canvas element #the_canvas_id");
-        let app = ViewApp::new(
-            demo_diff(),
-            "demo — rev A".into(),
-            "demo — rev B".into(),
-        );
+        let app = ViewApp::new(demo_diff(), "demo — rev A".into(), "demo — rev B".into());
         eframe::WebRunner::new()
             .start(canvas, web_options, Box::new(|_cc| Ok(Box::new(app))))
             .await
@@ -244,6 +240,26 @@ impl ViewApp {
             self.cam.fitted = false; // refit on layer change
         }
     }
+
+    /// Move the selection `delta` steps through the displayed (changed-first)
+    /// order — the keyboard equivalent of clicking the next/previous layer.
+    fn step_layer(&mut self, delta: i32) {
+        self.select(step_in_order(&self.order, self.selected, delta));
+    }
+}
+
+/// Step `delta` positions through `order` from whichever entry equals `selected`,
+/// wrapping at both ends; returns the new `selected` (an index into `diff.layers`).
+/// A `selected` absent from `order` starts from the front; an empty `order` is a
+/// no-op. Pure index math, kept separate from egui so it can be unit-tested.
+fn step_in_order(order: &[usize], selected: usize, delta: i32) -> usize {
+    if order.is_empty() {
+        return selected;
+    }
+    let n = order.len() as i32;
+    let pos = order.iter().position(|&i| i == selected).unwrap_or(0) as i32;
+    let next = (pos + delta).rem_euclid(n);
+    order[next as usize]
 }
 
 // Brand palette (assets/brand/README.md): diff accents + board-dark canvas.
@@ -261,6 +277,42 @@ const MARKER_R: f32 = 3.0;
 
 impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
+        // lives in the host HTML), so these are always safe to read.
+        let (toggle_base, fit, overlay, before, after, next, prev) = ui.input(|i| {
+            use egui::Key;
+            (
+                i.key_pressed(Key::S),
+                i.key_pressed(Key::F),
+                i.key_pressed(Key::O),
+                i.key_pressed(Key::B),
+                i.key_pressed(Key::A),
+                i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
+                i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
+            )
+        });
+        if toggle_base {
+            self.show_base = !self.show_base;
+        }
+        if fit {
+            self.cam.fitted = false;
+        }
+        if overlay {
+            self.mode = Mode::Overlay;
+        }
+        if before {
+            self.mode = Mode::Before;
+        }
+        if after {
+            self.mode = Mode::After;
+        }
+        if next {
+            self.step_layer(1);
+        }
+        if prev {
+            self.step_layer(-1);
+        }
+
         egui::Panel::top("top").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("etchy");
@@ -283,7 +335,11 @@ impl eframe::App for ViewApp {
                     self.cam.fitted = false;
                 }
                 ui.separator();
-                ui.label("drag = pan · scroll = zoom");
+                ui.label("drag = pan · scroll = zoom · ↑↓ layer · O/B/A view · S base · F fit")
+                    .on_hover_text(
+                        "Keys: ↑/↓ (or J/K) cycle layers · O/B/A switch Overlay/Before/After · \
+                         S toggle base · F fit to view",
+                    );
             });
             // Trust warnings (e.g. revisions exported with mismatched units/precision).
             for w in &self.diff.report.warnings {
@@ -582,5 +638,26 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
         (Some(a), None) => Some(a),
         (None, Some(b)) => Some(b),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_in_order;
+
+    #[test]
+    fn step_in_order_wraps_both_ways() {
+        // `order` is changed-first (indices into diff.layers), e.g. [3, 0, 2, 1].
+        let order = [3usize, 0, 2, 1];
+        // forward from the selected value 3 (pos 0) -> 0 (pos 1)
+        assert_eq!(step_in_order(&order, 3, 1), 0);
+        // forward past the end wraps to the front
+        assert_eq!(step_in_order(&order, 1, 1), 3);
+        // backward past the front wraps to the back
+        assert_eq!(step_in_order(&order, 3, -1), 1);
+        // a selected value not present in order starts from the front
+        assert_eq!(step_in_order(&order, 99, 1), 0);
+        // empty order is a no-op (returns the input)
+        assert_eq!(step_in_order(&[], 5, 1), 5);
     }
 }
