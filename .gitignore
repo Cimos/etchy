@@ -20,3 +20,10 @@ crates/etchy-gui/assets/demo/
 
 # trunk (wasm) build output
 crates/etchy-gui/dist/
+
+# staged demo serve dir (built artifacts; rebuilt by deploy/setup.sh)
+deploy/.serve/
+
+# Python (deploy/ tooling)
+__pycache__/
+*.pyc

@@ -3,9 +3,15 @@
 
 Usage:  python etchy-server.py [PORT] [ROOT]
 Serves ROOT (default: this script's dir) on 0.0.0.0:PORT (default 8080).
-Feedback records are appended as one JSON object per line to feedback.jsonl,
-stamped with the server time, client IP and User-Agent. The feedback file and
-this script are never served over GET.
+Feedback records are appended as one JSON object per line, stamped with the
+server time, client IP and User-Agent. The feedback file and this script are
+never served over GET.
+
+Feedback file location (in priority order):
+  1. $ETCHY_FEEDBACK  — absolute/relative path (set by deploy/setup.sh to write
+     straight into the repo at deploy/feedback/<hostname>.jsonl so feedback is
+     preserved + collectable; the dir is created if missing).
+  2. ROOT/feedback.jsonl  — default (next to the served bundle).
 """
 import datetime
 import json
@@ -16,8 +22,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 ROOT = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(os.path.abspath(__file__))
-FEEDBACK = os.path.join(ROOT, "feedback.jsonl")
-BLOCKED = {"/feedback.jsonl", "/etchy-server.py"}
+FEEDBACK = os.environ.get("ETCHY_FEEDBACK") or os.path.join(ROOT, "feedback.jsonl")
+os.makedirs(os.path.dirname(os.path.abspath(FEEDBACK)), exist_ok=True)
+# Block serving the feedback file (by basename, wherever it lives) and this script.
+BLOCKED = {"/feedback.jsonl", "/etchy-server.py", "/" + os.path.basename(FEEDBACK)}
 _lock = threading.Lock()
 
 

@@ -35,6 +35,11 @@ diff, BOM/component diff, DRC.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — phased plan to 1.0.
 - [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) — architecture + the verified Rust crate stack.
 - [`docs/PRODUCT_DISCOVERY.md`](docs/PRODUCT_DISCOVERY.md) — the requirements interview behind every decision.
+- [`deploy/SETUP.md`](deploy/SETUP.md) — stand up the hosted web demo + feedback widget on a new machine.
+
+> ⚠ **Before making this repo public**, work through [`PRE_PUBLIC.md`](PRE_PUBLIC.md) —
+> notably, demo feedback under `deploy/feedback/` contains tester IP/UA/names that
+> must be scrubbed first.
 
 ## Workspace
 
