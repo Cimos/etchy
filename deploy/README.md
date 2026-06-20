@@ -5,6 +5,10 @@ viewer in a browser. This folder is the **page + server**, version-controlled so
 they can't be lost; the WASM/JS bundle and the demo board are build artifacts and
 are **not** committed.
 
+> **New machine?** Use the runbook + one-command setup: [`SETUP.md`](SETUP.md)
+> (`deploy/setup.sh` builds, stages, and serves). Feedback is collected in
+> [`feedback/`](feedback/); triage with `python3 deploy/collect-feedback.py`.
+
 ## Contents
 
 - `demo/index.html` — the curated page served to users. Loads the WASM with a
