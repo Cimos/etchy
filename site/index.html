@@ -80,6 +80,35 @@
     .road{grid-template-columns:1fr}
   }
   @media(max-width:560px){ .navlinks a.collapse{display:none} }
+  /* wordmark: stencil-E mark as the leading letter */
+  .wordmark{display:flex;align-items:center;gap:.03em}
+  .wm-e{height:.82em;width:auto;flex:none;position:relative;top:.015em}
+  /* hero CLI/GUI tabbed panel (CSS-only, no JS) */
+  .hpanel{position:relative;box-shadow:0 30px 60px -30px #000;border-radius:12px}
+  .hp-radio{position:absolute;width:0;height:0;opacity:0}
+  .hp-tabs{display:flex;gap:6px;padding:9px 10px;background:var(--board-2);border:1px solid var(--line);border-bottom:0;border-radius:12px 12px 0 0}
+  .hp-tab{font:600 11px/1 "JetBrains Mono",monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:6px 13px;border-radius:7px;cursor:pointer}
+  .hp-tab:hover{color:var(--ink)}
+  #hp-cli:checked ~ .hp-tabs .hp-tab[for="hp-cli"],#hp-gui:checked ~ .hp-tabs .hp-tab[for="hp-gui"]{background:rgba(232,163,61,.16);color:var(--copper-1)}
+  .hp-view{display:none;border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;background:var(--board-2);overflow:hidden;min-height:250px}
+  #hp-cli:checked ~ .hp-cli-view{display:block}
+  #hp-gui:checked ~ .hp-gui-view{display:block}
+  .gui-title{margin-left:8px;color:var(--muted);font-size:12px;align-self:center}
+  .gui-body{display:flex;min-height:200px}
+  .gui-layers{width:128px;flex:none;border-right:1px solid var(--line);padding:10px 8px;font-size:12px;color:var(--muted)}
+  .gui-layers{display:flex;flex-direction:column;gap:2px}
+  .gl{width:100%;text-align:left;background:none;border:0;font:inherit;font-size:12px;color:var(--muted);cursor:pointer;padding:6px 8px;border-radius:6px;display:flex;justify-content:space-between;align-items:center;gap:6px;white-space:nowrap}
+  .gl:hover{color:var(--ink)}
+  .gl.active{background:rgba(232,163,61,.12);color:var(--ink)}
+  .gl-d{font-size:11px}
+  .gl .add{color:var(--added)} .gl .rem{color:var(--removed)}
+  .gui-canvas{flex:1;min-width:0;padding:12px;display:flex;flex-direction:column;gap:10px}
+  #gd-canvas{display:block}
+  #gd-canvas svg{width:100%;height:auto;border-radius:8px;border:1px solid var(--line);display:block}
+  .gui-modes{display:flex;gap:6px;flex-wrap:wrap}
+  .gm{font:inherit;font-size:11px;color:var(--muted);background:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;cursor:pointer}
+  .gm:hover{color:var(--ink)}
+  .gm.active{background:linear-gradient(135deg,var(--copper-1),var(--copper-3));color:#1a1206;border-color:transparent;font-weight:700}
 </style>
 </head>
 <body>
@@ -99,25 +128,48 @@
   <main>
   <div class="hero">
     <div>
-      <span class="badge">Gerber · Excellon · same-board diff</span>
-      <div class="wordmark copper">etchy</div>
+      <div class="wordmark" role="img" aria-label="etchy"><svg class="wm-e" viewBox="22 24 54 72" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="cw" gradientUnits="userSpaceOnUse" x1="20" y1="18" x2="100" y2="102"><stop offset="0" stop-color="#f6c873"/><stop offset=".5" stop-color="#e8a33d"/><stop offset="1" stop-color="#b9762a"/></linearGradient></defs><g fill="url(#cw)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g></svg><span class="copper">tchy</span></div>
       <h1>PCB visual &amp; geometric diff.</h1>
-      <p class="lede">Point etchy at two revisions of a board's fab output. It shows — and measures — exactly what changed. Fast, trustworthy, open source, written in Rust.</p>
+      <p class="lede">Point etchy at two revisions of a board's fab output. It shows — and measures — exactly what changed. Fast, open source, written in Rust.</p>
       <div class="cta">
         <a class="btn btn-primary" href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">View on GitHub</a>
         <a class="btn btn-ghost" href="https://github.com/Cimos/etchy/tree/main/docs" target="_blank" rel="noopener">Read the docs</a>
       </div>
     </div>
-    <div class="term">
-      <div class="term-bar"><i></i><i></i><i></i></div>
-      <div class="term-body">
-        <div><span class="pr">$</span> <span class="cmd">etchy revA/ revB/</span></div>
-        <div class="out">&nbsp;</div>
-        <div class="out">resolving 16 copper layers … ok</div>
-        <div class="out">diffing geometry … done in 0.9s</div>
-        <div class="out">&nbsp;</div>
-        <div><span class="add">+ 4 regions added</span>&nbsp;&nbsp;<span class="rem">- 1 region removed</span></div>
-        <div class="out">→ report.html · overlay.svg · diff.json</div>
+    <div class="hpanel">
+      <input type="radio" name="hp" id="hp-cli" class="hp-radio" checked>
+      <input type="radio" name="hp" id="hp-gui" class="hp-radio">
+      <div class="hp-tabs"><label class="hp-tab" for="hp-cli">CLI</label><label class="hp-tab" for="hp-gui">GUI</label></div>
+      <div class="hp-view hp-cli-view">
+        <div class="term-bar"><i></i><i></i><i></i></div>
+        <div class="term-body">
+          <div><span class="pr">$</span> <span class="cmd">etchy revA/ revB/</span></div>
+          <div class="out">&nbsp;</div>
+          <div class="out">resolving 16 copper layers … ok</div>
+          <div class="out">diffing geometry … done in 0.9s</div>
+          <div class="out">&nbsp;</div>
+          <div><span class="add">+ 4 regions added</span>&nbsp;&nbsp;<span class="rem">- 1 region removed</span></div>
+          <div class="out">→ report.html · overlay.svg · diff.json</div>
+        </div>
+      </div>
+      <div class="hp-view hp-gui-view">
+        <div class="term-bar"><i></i><i></i><i></i><span class="gui-title">etchy — revA ▸ revB</span></div>
+        <div class="gui-body">
+          <div class="gui-layers" id="gd-layers">
+            <button type="button" class="gl active" data-layer="top">Top Copper <span class="gl-d"><span class="add">+2</span> <span class="rem">-1</span></span></button>
+            <button type="button" class="gl" data-layer="bottom">Bottom Copper <span class="gl-d"><span class="add">+1</span></span></button>
+            <button type="button" class="gl" data-layer="silk">Top Silk <span class="gl-d"><span class="add">+1</span></span></button>
+            <button type="button" class="gl" data-layer="drill">Drill <span class="gl-d"><span class="rem">-2</span></span></button>
+          </div>
+          <div class="gui-canvas">
+            <div id="gd-canvas" role="img" aria-label="etchy viewer demo — added traces green, removed red"></div>
+            <div class="gui-modes" id="gd-modes">
+              <button type="button" class="gm active" data-mode="overlay">Overlay</button>
+              <button type="button" class="gm" data-mode="before">Before</button>
+              <button type="button" class="gm" data-mode="after">After</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -126,9 +178,9 @@
     <h2 class="sr-only">What it does</h2>
     <span class="label">What it does</span>
     <div class="cards">
-      <div class="card"><div class="ic copper">◳</div><h3>Visual + geometric</h3><p>Per-layer polygon boolean diff → a resolution-independent SVG overlay, a change heatmap, and measured magnitudes (changed area, region count) — all from one computation.</p></div>
-      <div class="card"><div class="ic copper">⎙</div><h3>See it &amp; export it</h3><p>Native viewer with overlay / before / after / split / swipe / onion modes + heatmap. Exports a self-contained HTML report, standalone SVGs, and machine-readable JSON.</p></div>
-      <div class="card"><div class="ic copper">✓</div><h3>Trustworthy</h3><p>Same-board revisions only. Fails loud on mismatch, never a garbage diff. Golden corpus + property + fuzz tests. No silent misses.</p></div>
+      <div class="card"><div class="ic copper">◳</div><h3>See what changed</h3><p>Highlights every added and removed feature on each layer, then measures it — changed area and region count.</p></div>
+      <div class="card"><div class="ic copper">⎙</div><h3>See it &amp; export it</h3><p>Native desktop viewer with overlay, before, and after modes. Exports a self-contained HTML report, standalone SVGs, and machine-readable JSON.</p></div>
+      <div class="card"><div class="ic copper">✓</div><h3>Same-board only</h3><p>Compares two revisions of the same board on absolute coordinates — no auto-aligning. If the boards don't match, it errors instead of showing a wrong diff.</p></div>
     </div>
   </section>
 
@@ -148,7 +200,6 @@
       <g stroke="#ff5d73" stroke-width="7" fill="none" stroke-linecap="round">
         <path d="M300 220 H620"/>
       </g>
-      <text x="30" y="30" fill="#8b9491" font-family="JetBrains Mono" font-size="14">overlay.svg — top copper</text>
     </svg>
   </section>
 
@@ -156,10 +207,10 @@
     <span class="label">On the roadmap</span>
     <div class="roadmap-head">
       <h2>Where etchy is headed.</h2>
-      <span class="sub">Direction, not promises — shipped when it's ready.</span>
     </div>
     <div class="road">
       <div class="item"><h3>CI gating &amp; PR comments</h3><p>Per-layer thresholds, exit codes, and an inline visual diff posted on pull requests.</p></div>
+      <div class="item"><h3>More viewer modes</h3><p>Split view, swipe, onion-skin, and a change heatmap in the desktop viewer.</p></div>
       <div class="item"><h3>Schematic-PDF diff</h3><p>Page-by-page pixel diff of schematic PDFs, as a supported secondary mode.</p></div>
       <div class="item"><h3>Dense-board speed</h3><p>Parallel per-layer work and memory ceilings for big multi-layer boards.</p></div>
       <div class="item"><h3>Static binaries + container</h3><p>Per-OS static builds and a distroless container — no runtime to install.</p></div>
@@ -171,9 +222,10 @@
 
   <footer>
     <svg width="22" height="22" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="cf" gradientUnits="userSpaceOnUse" x1="20" y1="18" x2="100" y2="102"><stop offset="0" stop-color="#f6c873"/><stop offset=".5" stop-color="#e8a33d"/><stop offset="1" stop-color="#b9762a"/></linearGradient></defs><g fill="url(#cf)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g><circle cx="92" cy="86" r="9" fill="none" stroke="url(#cf)" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="url(#cf)"/></svg>
-    <div>MIT / Apache-2.0 · open source · © Cimos</div>
+    <div>MIT / Apache-2.0 · open source · © <a href="https://github.com/Cimos" target="_blank" rel="noopener">Cimos</a></div>
     <div><a href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">GitHub</a> · <a href="#roadmap">Roadmap</a> · <a href="https://github.com/Cimos/etchy/tree/main/docs" target="_blank" rel="noopener">Docs</a> · <a href="https://github.com/Cimos/Gerber-Diff-Tool" target="_blank" rel="noopener">gerber-diff</a></div>
   </footer>
 </div>
+<script src="gui-demo.js"></script>
 </body>
 </html>
