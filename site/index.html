@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>etchy — PCB visual &amp; geometric diff</title>
+<meta name="description" content="etchy is a fast, trustworthy, open-source PCB visual and geometric diff tool. Point it at two fab revisions and it shows — and measures — exactly what changed.">
+<link rel="icon" href="assets/brand/etchy-favicon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/brand/etchy-favicon-16.png" sizes="16x16" type="image/png">
+<link rel="icon" href="assets/brand/etchy-favicon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="assets/brand/etchy-favicon-48.png" sizes="48x48" type="image/png">
+<link rel="apple-touch-icon" href="assets/brand/etchy-app-icon-180.png">
+<!-- Absolute URLs required by OGP/Twitter card crawlers. Default GitHub Pages project URL;
+     update the base if a custom domain is chosen (see launch checklist). -->
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://cimos.github.io/etchy/">
+<meta property="og:title" content="etchy — PCB visual &amp; geometric diff">
+<meta property="og:description" content="Point etchy at two revisions of a board's fab output. It shows — and measures — exactly what changed.">
+<meta property="og:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
+<link rel="stylesheet" href="assets/fonts/fonts.css">
+<style>
+  :root{
+    --copper-1:#f6c873; --copper-2:#e8a33d; --copper-3:#b9762a;
+    --board:#0b0f0e; --board-2:#121817; --paper:#f4f1e8;
+    --added:#46d18a; --removed:#ff5d73;
+    --ink:#e7e3d6; --muted:#8b9491; --line:#23302d;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;overflow-x:hidden}
+  body{background:var(--board);color:var(--ink);font-family:"JetBrains Mono",ui-monospace,monospace;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .copper{background:linear-gradient(135deg,var(--copper-1),var(--copper-2) 50%,var(--copper-3));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  h1,h2,h3{font-family:"Zilla Slab",Georgia,serif;font-weight:700;letter-spacing:-.01em}
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:22px 0;border-bottom:1px solid var(--line);gap:16px}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .brand svg{width:38px;height:38px;display:block}
+  .navlinks{display:flex;gap:26px;font-size:14px;color:var(--muted);flex-wrap:wrap;justify-content:flex-end}
+  .navlinks a{color:var(--muted);text-decoration:none;white-space:nowrap}
+  .navlinks a:hover{color:var(--copper-1)}
+  .navlinks a.gh{color:var(--copper-1)}
+  .hero{padding:80px 0 56px;display:grid;grid-template-columns:1.05fr .95fr;gap:48px;align-items:center}
+  .badge{display:inline-flex;align-items:center;gap:8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--copper-2);border:1px solid var(--copper-3);border-radius:999px;padding:5px 12px}
+  .wordmark{font-family:"Zilla Slab";font-weight:700;font-size:76px;line-height:1;margin:22px 0 6px;letter-spacing:-.02em}
+  .hero h1{font-size:26px;font-weight:700;margin:0 0 16px;color:var(--ink)}
+  .hero p.lede{font-size:17px;color:var(--muted);max-width:46ch;margin:0 0 28px}
+  .cta{display:flex;gap:14px;flex-wrap:wrap}
+  .btn{font-family:"JetBrains Mono";font-size:14px;font-weight:500;text-decoration:none;padding:12px 20px;border-radius:8px}
+  .btn-primary{background:linear-gradient(135deg,var(--copper-1),var(--copper-3));color:#1a1206;font-weight:700}
+  .btn-ghost{border:1px solid var(--line);color:var(--ink)}
+  .btn-ghost:hover{border-color:var(--copper-3)}
+  .term{background:var(--board-2);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 30px 60px -30px #000}
+  .term-bar{display:flex;gap:7px;padding:12px 14px;border-bottom:1px solid var(--line)}
+  .term-bar i{width:11px;height:11px;border-radius:50%;background:#2c3a37;display:block}
+  .term-body{padding:18px;font-size:13.5px;overflow-x:auto}
+  .term-body .pr{color:var(--copper-2)} .term-body .cmd{color:var(--ink)} .term-body .out{color:var(--muted)}
+  .term-body .add{color:var(--added)} .term-body .rem{color:var(--removed)}
+  section{padding:56px 0;border-top:1px solid var(--line)}
+  .label{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--copper-3)}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:26px}
+  .card{background:var(--board-2);border:1px solid var(--line);border-radius:12px;padding:22px}
+  .card h3{margin:6px 0 8px;font-size:19px}
+  .card p{margin:0;color:var(--muted);font-size:14px}
+  .card .ic{font-size:22px}
+  .diffart{width:100%;height:auto;border-radius:12px;border:1px solid var(--line);background:var(--board-2)}
+  .roadmap-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin:10px 0 6px}
+  .roadmap-head h2{font-size:28px;margin:0}
+  .roadmap-head .sub{color:var(--muted);font-size:14px}
+  .road{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:24px}
+  .road .item{border:1px solid var(--line);border-left:3px solid var(--copper-3);border-radius:10px;padding:18px;background:rgba(18,24,23,.5)}
+  .road .item h3{font-size:16px;margin:0 0 6px;color:var(--copper-1);font-family:"Zilla Slab"}
+  .road .item p{margin:0;color:var(--muted);font-size:13.5px}
+  footer{padding:40px 0 60px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;align-items:center}
+  footer a{color:var(--muted);text-decoration:none} footer a:hover{color:var(--copper-1)}
+  @media(max-width:840px){
+    .hero{grid-template-columns:1fr;padding-top:52px}
+    .wordmark{font-size:60px}
+    .cards{grid-template-columns:1fr}
+    .road{grid-template-columns:1fr}
+  }
+  @media(max-width:560px){ .navlinks a.collapse{display:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar">
+    <div class="brand" aria-label="etchy">
+      <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="etchy logo"><defs><linearGradient id="cu" gradientUnits="userSpaceOnUse" x1="20" y1="18" x2="100" y2="102"><stop offset="0" stop-color="#f6c873"/><stop offset=".5" stop-color="#e8a33d"/><stop offset="1" stop-color="#b9762a"/></linearGradient></defs><g fill="url(#cu)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g><circle cx="92" cy="86" r="9" fill="none" stroke="url(#cu)" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="url(#cu)"/></svg>
+    </div>
+    <nav class="navlinks" aria-label="primary">
+      <a class="collapse" href="#what">What it does</a>
+      <a class="collapse" href="#roadmap">Roadmap</a>
+      <a class="collapse" href="https://github.com/Cimos/etchy/tree/main/docs" target="_blank" rel="noopener">Docs</a>
+      <a class="gh" href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">GitHub ↗</a>
+    </nav>
+  </header>
+
+  <main>
+  <div class="hero">
+    <div>
+      <span class="badge">Gerber · Excellon · same-board diff</span>
+      <div class="wordmark copper">etchy</div>
+      <h1>PCB visual &amp; geometric diff.</h1>
+      <p class="lede">Point etchy at two revisions of a board's fab output. It shows — and measures — exactly what changed. Fast, trustworthy, open source, written in Rust.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">View on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/Cimos/etchy/tree/main/docs" target="_blank" rel="noopener">Read the docs</a>
+      </div>
+    </div>
+    <div class="term">
+      <div class="term-bar"><i></i><i></i><i></i></div>
+      <div class="term-body">
+        <div><span class="pr">$</span> <span class="cmd">etchy revA/ revB/</span></div>
+        <div class="out">&nbsp;</div>
+        <div class="out">resolving 16 copper layers … ok</div>
+        <div class="out">diffing geometry … done in 0.9s</div>
+        <div class="out">&nbsp;</div>
+        <div><span class="add">+ 4 regions added</span>&nbsp;&nbsp;<span class="rem">- 1 region removed</span></div>
+        <div class="out">→ report.html · overlay.svg · diff.json</div>
+      </div>
+    </div>
+  </div>
+
+  <section id="what">
+    <h2 class="sr-only">What it does</h2>
+    <span class="label">What it does</span>
+    <div class="cards">
+      <div class="card"><div class="ic copper">◳</div><h3>Visual + geometric</h3><p>Per-layer polygon boolean diff → a resolution-independent SVG overlay, a change heatmap, and measured magnitudes (changed area, region count) — all from one computation.</p></div>
+      <div class="card"><div class="ic copper">⎙</div><h3>See it &amp; export it</h3><p>Native viewer with overlay / before / after / split / swipe / onion modes + heatmap. Exports a self-contained HTML report, standalone SVGs, and machine-readable JSON.</p></div>
+      <div class="card"><div class="ic copper">✓</div><h3>Trustworthy</h3><p>Same-board revisions only. Fails loud on mismatch, never a garbage diff. Golden corpus + property + fuzz tests. No silent misses.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <span class="label">The diff, visualized</span>
+    <h2 style="font-size:28px;margin:10px 0 22px">Added in <span style="color:var(--added)">green</span>, removed in <span style="color:var(--removed)">red</span>.</h2>
+    <svg class="diffart" viewBox="0 0 1000 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Example diff overlay: traces added in green, removed in red.">
+      <rect width="1000" height="280" fill="#0e1413"/>
+      <g stroke="#33403d" stroke-width="6" fill="none" stroke-linecap="round">
+        <path d="M60 60 H400 V150 H700"/><path d="M60 120 H300 V220 H620"/>
+        <path d="M120 250 H500 V90 H880"/><circle cx="880" cy="90" r="14"/>
+        <circle cx="60" cy="60" r="10"/><circle cx="700" cy="150" r="10"/>
+      </g>
+      <g stroke="#46d18a" stroke-width="7" fill="none" stroke-linecap="round">
+        <path d="M700 150 H840 V210 H940"/><circle cx="940" cy="210" r="13"/>
+      </g>
+      <g stroke="#ff5d73" stroke-width="7" fill="none" stroke-linecap="round">
+        <path d="M300 220 H620"/>
+      </g>
+      <text x="30" y="30" fill="#8b9491" font-family="JetBrains Mono" font-size="14">overlay.svg — top copper</text>
+    </svg>
+  </section>
+
+  <section id="roadmap">
+    <span class="label">On the roadmap</span>
+    <div class="roadmap-head">
+      <h2>Where etchy is headed.</h2>
+      <span class="sub">Direction, not promises — shipped when it's ready.</span>
+    </div>
+    <div class="road">
+      <div class="item"><h3>CI gating &amp; PR comments</h3><p>Per-layer thresholds, exit codes, and an inline visual diff posted on pull requests.</p></div>
+      <div class="item"><h3>Schematic-PDF diff</h3><p>Page-by-page pixel diff of schematic PDFs, as a supported secondary mode.</p></div>
+      <div class="item"><h3>Dense-board speed</h3><p>Parallel per-layer work and memory ceilings for big multi-layer boards.</p></div>
+      <div class="item"><h3>Static binaries + container</h3><p>Per-OS static builds and a distroless container — no runtime to install.</p></div>
+      <div class="item"><h3>Docs site</h3><p>Install, CLI reference, CI recipes, JSON schema, and how the diff works.</p></div>
+      <div class="item"><h3>Stable JSON schema</h3><p>A versioned, documented output contract for downstream integrations.</p></div>
+    </div>
+  </section>
+  </main>
+
+  <footer>
+    <svg width="22" height="22" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="cf" gradientUnits="userSpaceOnUse" x1="20" y1="18" x2="100" y2="102"><stop offset="0" stop-color="#f6c873"/><stop offset=".5" stop-color="#e8a33d"/><stop offset="1" stop-color="#b9762a"/></linearGradient></defs><g fill="url(#cf)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g><circle cx="92" cy="86" r="9" fill="none" stroke="url(#cf)" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="url(#cf)"/></svg>
+    <div>MIT / Apache-2.0 · open source · © Cimos</div>
+    <div><a href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">GitHub</a> · <a href="#roadmap">Roadmap</a> · <a href="https://github.com/Cimos/etchy/tree/main/docs" target="_blank" rel="noopener">Docs</a> · <a href="https://github.com/Cimos/Gerber-Diff-Tool" target="_blank" rel="noopener">gerber-diff</a></div>
+  </footer>
+</div>
+</body>
+</html>
