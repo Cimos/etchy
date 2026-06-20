@@ -31,14 +31,18 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
   property tests still green; FMU GTL restored +28 mm² / +27 shapes (the erased
   traces), confirmed by rasterizing etchy's own mesh.
 
-### G1 · Diff accuracy — phantom / hairline diffs (#1, #5, #6) — confirmed
-- [ ] Detect a global offset / coordinate-precision mismatch between the two boards
-  and **warn** ("revisions appear offset by ~N µm — diff may be registration").
-- **Root cause (confirmed via screenshots):** features are ~identical between revs
-  but ringed by a hairline red/green rim; summed over thousands of features this
-  inflates the mm² totals while being "nothing" zoomed in.
-- Detect-and-warn first; a *surfaced* sub-tolerance threshold is a possible later
-  step (never silent). Full auto-align stays a non-goal.
+### G1 · Diff accuracy — phantom / hairline diffs (#1, #5, #6) — **DONE (detect + warn)**
+- [x] Warn when the two revisions were exported with mismatched **units/precision**.
+- **Root cause (confirmed):** not a positional offset — the FMU revs were exported
+  by different Altium versions with different coordinate systems (REV4 `in@2.5`,
+  REV67 `mm@4.4`). Identical geometry quantizes onto different grids → a hairline
+  rim around every feature → inflated totals that are "nothing" zoomed in.
+- **Implemented:** `etchy_core::gerber_format` (parses `%MO`/`%FS`) +
+  `coordinate_mismatch_warning`; surfaced in `DiffReport.warnings`, attached by the
+  CLI + GUI loaders, shown in the CLI output and a GUI top-bar "heads-up:" banner.
+  Tests `gerber_format_parses_units_and_digits`, `coordinate_mismatch_warns_only_on_difference`;
+  verified live on the FMU pack. A surfaced sub-tolerance merge stays a possible
+  later step; auto-align remains a non-goal.
 
 ### G3 · Overlap visualization (#2, #8)
 - [ ] Added (green) + removed (red) overlap renders black/occluded; unchanged copper

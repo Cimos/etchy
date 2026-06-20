@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use etchy_core::{compare, Board, DiffReport, Layer};
+use etchy_core::{compare, coordinate_mismatch_warning, Board, DiffReport, GerberFormat, Layer};
 
 /// etchy's CI exit-code contract.
 #[repr(i32)]
@@ -62,12 +62,17 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<DiffReport> {
-    let old = load_board(&cli.old)
+    let (old, of) = load_board(&cli.old)
         .with_context(|| format!("loading old revision {}", cli.old.display()))?;
-    let new = load_board(&cli.new)
+    let (new, nf) = load_board(&cli.new)
         .with_context(|| format!("loading new revision {}", cli.new.display()))?;
 
-    let report = compare(&old, &new).context("comparing revisions")?;
+    let mut report = compare(&old, &new).context("comparing revisions")?;
+    if let (Some(o), Some(n)) = (of, nf) {
+        if let Some(w) = coordinate_mismatch_warning(&o, &n) {
+            report.warnings.push(w);
+        }
+    }
 
     if cli.json {
         println!("{}", report.to_json_pretty());
@@ -79,7 +84,7 @@ fn run(cli: &Cli) -> Result<DiffReport> {
 
 /// Walk a directory (one level), read each Gerber file, classify it, and
 /// polygonize it into a [`Layer`]. I/O + path/naming policy live here, not in core.
-fn load_board(dir: &Path) -> Result<Board> {
+fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
     if !dir.is_dir() {
         anyhow::bail!("{} is not a directory", dir.display());
     }
@@ -91,10 +96,14 @@ fn load_board(dir: &Path) -> Result<Board> {
     entries.sort();
 
     let mut layers = Vec::new();
+    let mut fmt = None;
     for path in entries {
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         if !etchy_core::looks_like_gerber(&bytes) {
             continue; // not a Gerber layer (e.g. drill, job file) — Excellon is a later increment
+        }
+        if fmt.is_none() {
+            fmt = etchy_core::gerber_format(&bytes).ok();
         }
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -112,7 +121,7 @@ fn load_board(dir: &Path) -> Result<Board> {
             geometry,
         });
     }
-    Ok(Board { layers })
+    Ok((Board { layers }, fmt))
 }
 
 /// Human-readable summary table to stdout (changed layers first).

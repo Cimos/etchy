@@ -74,6 +74,86 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
     Ok(result)
 }
 
+/// Coordinate units a Gerber declares via `%MO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Units {
+    Inches,
+    Millimeters,
+}
+
+/// A layer's coordinate system: units (`%MO`) + the `%FS` integer/decimal digit
+/// counts. Two revisions exported with different `GerberFormat` quantize identical
+/// geometry onto different grids, producing spurious sub-µm "rim" differences
+/// around every edge — the dominant noise when diffing same-design re-exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GerberFormat {
+    pub units: Units,
+    pub int_digits: u8,
+    pub dec_digits: u8,
+}
+
+impl GerberFormat {
+    /// Compact human form, e.g. `in@2.5` or `mm@4.4`.
+    pub fn describe(&self) -> String {
+        let u = match self.units {
+            Units::Inches => "in",
+            Units::Millimeters => "mm",
+        };
+        format!("{u}@{}.{}", self.int_digits, self.dec_digits)
+    }
+}
+
+/// Extract a layer's coordinate format (`%MO` units + `%FS` digit counts) straight
+/// from its bytes — independent of the geometry parse, so callers can compare two
+/// revisions' grids cheaply.
+pub fn gerber_format(bytes: &[u8]) -> Result<GerberFormat> {
+    let text = String::from_utf8_lossy(bytes);
+    let units = if text.contains("%MOIN") {
+        Units::Inches
+    } else if text.contains("%MOMM") {
+        Units::Millimeters
+    } else {
+        return Err(EngineError::UnitsUnresolved);
+    };
+    // %FSLAX<int><dec>Y<int><dec>*%  — digits after the first 'X' in the %FS block.
+    let fs = text
+        .find("%FS")
+        .ok_or_else(|| EngineError::Parse("missing %FS format spec".into()))?;
+    let xpos = text[fs..]
+        .find('X')
+        .ok_or_else(|| EngineError::Parse("no X in %FS".into()))?;
+    let digits: Vec<u8> = text[fs + xpos + 1..]
+        .chars()
+        .take(2)
+        .filter_map(|c| c.to_digit(10).map(|d| d as u8))
+        .collect();
+    if digits.len() != 2 {
+        return Err(EngineError::Parse("malformed %FS coordinate digits".into()));
+    }
+    Ok(GerberFormat {
+        units,
+        int_digits: digits[0],
+        dec_digits: digits[1],
+    })
+}
+
+/// If two revisions' coordinate formats differ, a human-facing warning explaining
+/// the spurious sub-µm "rim" diffs that mismatch causes; otherwise `None`.
+pub fn coordinate_mismatch_warning(old: &GerberFormat, new: &GerberFormat) -> Option<String> {
+    if old == new {
+        return None;
+    }
+    Some(format!(
+        "Revisions were exported with different coordinate systems (old {}, new {}). \
+         Identical geometry then quantizes onto different grids, so the diff shows spurious \
+         sub-µm rounding differences (\"rims\") around every feature and the changed-area \
+         totals are inflated — they may not reflect real design changes. Re-export both fab \
+         packs with the same units and coordinate format for a clean diff.",
+        old.describe(),
+        new.describe()
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Normalization: compact-line split + deprecated G-code handling (Spike 2)
 // ---------------------------------------------------------------------------
@@ -732,6 +812,38 @@ mod tests {
             (a - 88.0).abs() < 0.05,
             "sequential polarity area {a} vs 88.0"
         );
+    }
+
+    #[test]
+    fn gerber_format_parses_units_and_digits() {
+        let inch = gerber_format(b"%FSLAX25Y25*%\n%MOIN*%\nM02*\n").unwrap();
+        assert_eq!(
+            (inch.units, inch.int_digits, inch.dec_digits),
+            (Units::Inches, 2, 5)
+        );
+        let mm = gerber_format(b"%MOMM*%\n%FSLAX44Y44*%\nM02*\n").unwrap();
+        assert_eq!(
+            (mm.units, mm.int_digits, mm.dec_digits),
+            (Units::Millimeters, 4, 4)
+        );
+    }
+
+    #[test]
+    fn coordinate_mismatch_warns_only_on_difference() {
+        // The real FMU case: REV4 inches@2.5 vs REV67 mm@4.4.
+        let a = GerberFormat {
+            units: Units::Inches,
+            int_digits: 2,
+            dec_digits: 5,
+        };
+        let b = GerberFormat {
+            units: Units::Millimeters,
+            int_digits: 4,
+            dec_digits: 4,
+        };
+        assert!(coordinate_mismatch_warning(&a, &a).is_none());
+        let w = coordinate_mismatch_warning(&a, &b).expect("mismatch must warn");
+        assert!(w.contains("in@2.5") && w.contains("mm@4.4"), "warning: {w}");
     }
 
     #[test]
