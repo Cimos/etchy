@@ -82,13 +82,22 @@ mod native {
     }
 
     fn label(p: &Path) -> String {
-        p.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string()
+        p.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string()
     }
 
     fn build_diff(old_dir: &Path, new_dir: &Path) -> anyhow::Result<BoardDiff> {
-        let old = loader::load_board(old_dir)?;
-        let new = loader::load_board(new_dir)?;
-        Ok(etchy_core::compare_detailed(&old, &new)?)
+        let (old, of) = loader::load_board(old_dir)?;
+        let (new, nf) = loader::load_board(new_dir)?;
+        let mut d = etchy_core::compare_detailed(&old, &new)?;
+        if let (Some(o), Some(n)) = (of, nf) {
+            if let Some(w) = etchy_core::coordinate_mismatch_warning(&o, &n) {
+                d.report.warnings.push(w);
+            }
+        }
+        Ok(d)
     }
 }
 
@@ -103,14 +112,20 @@ fn main() -> std::process::ExitCode {
 /// The bundled demo board (gitignored, embedded at compile time). A layer that
 /// fails to parse is skipped rather than crashing the demo.
 #[cfg(target_arch = "wasm32")]
-fn board_from_files(dir: &include_dir::Dir) -> etchy_core::Board {
+fn board_from_files(
+    dir: &include_dir::Dir,
+) -> (etchy_core::Board, Option<etchy_core::GerberFormat>) {
     let mut files: Vec<_> = dir.files().collect();
     files.sort_by_key(|f| f.path().to_path_buf());
     let mut layers = Vec::new();
+    let mut fmt = None;
     for f in files {
         let bytes = f.contents();
         if !etchy_core::looks_like_gerber(bytes) {
             continue;
+        }
+        if fmt.is_none() {
+            fmt = etchy_core::gerber_format(bytes).ok();
         }
         let name = f
             .path()
@@ -126,15 +141,22 @@ fn board_from_files(dir: &include_dir::Dir) -> etchy_core::Board {
             });
         }
     }
-    etchy_core::Board { layers }
+    (etchy_core::Board { layers }, fmt)
 }
 
 #[cfg(target_arch = "wasm32")]
 fn demo_diff() -> BoardDiff {
     static OLD: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/old");
     static NEW: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/new");
-    etchy_core::compare_detailed(&board_from_files(&OLD), &board_from_files(&NEW))
-        .expect("demo diff")
+    let (old, of) = board_from_files(&OLD);
+    let (new, nf) = board_from_files(&NEW);
+    let mut d = etchy_core::compare_detailed(&old, &new).expect("demo diff");
+    if let (Some(o), Some(n)) = (of, nf) {
+        if let Some(w) = etchy_core::coordinate_mismatch_warning(&o, &n) {
+            d.report.warnings.push(w);
+        }
+    }
+    d
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -150,8 +172,8 @@ fn main() {
             .expect("canvas element #the_canvas_id");
         let app = ViewApp::new(
             demo_diff(),
-            "MotionJigController A".into(),
-            "MotionJigController B".into(),
+            "demo — rev A".into(),
+            "demo — rev B".into(),
         );
         eframe::WebRunner::new()
             .start(canvas, web_options, Box::new(|_cc| Ok(Box::new(app))))
@@ -263,6 +285,17 @@ impl eframe::App for ViewApp {
                 ui.separator();
                 ui.label("drag = pan · scroll = zoom");
             });
+            // Trust warnings (e.g. revisions exported with mismatched units/precision).
+            for w in &self.diff.report.warnings {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new("heads-up:")
+                            .strong()
+                            .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
+                    );
+                    ui.label(egui::RichText::new(w).color(Color32::from_rgb(0xd9, 0xc7, 0xa0)));
+                });
+            }
         });
 
         egui::Panel::left("layers")
@@ -276,16 +309,15 @@ impl eframe::App for ViewApp {
                     let order = self.order.clone();
                     for idx in order {
                         let l = &self.diff.layers[idx];
-                        let dot = if l.is_changed() { "●" } else { "○" };
-                        let text = format!(
-                            "{dot} {}\n   +{:.4} −{:.4} mm²  ({}+/{}−)",
-                            l.name(),
-                            l.change.added_area_mm2(),
-                            l.change.removed_area_mm2(),
-                            l.change.added_region_count,
-                            l.change.removed_region_count,
-                        );
-                        if ui.selectable_label(idx == self.selected, text).clicked() {
+                        // Just the layer name — no per-layer figures (#7) and no
+                        // status glyph (#11; ●/○ render as tofu in the web font).
+                        // Changed layers read strong, unchanged are dimmed.
+                        let label = if l.is_changed() {
+                            egui::RichText::new(l.name()).strong()
+                        } else {
+                            egui::RichText::new(l.name()).weak()
+                        };
+                        if ui.selectable_label(idx == self.selected, label).clicked() {
                             self.select(idx);
                         }
                     }
