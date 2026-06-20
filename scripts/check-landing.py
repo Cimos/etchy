@@ -36,7 +36,7 @@ def main():
 
     # Required content / sections.
     for needle, label in [
-        (">etchy<", "etchy wordmark"),
+        ('class="wordmark"', "etchy wordmark"),
         ("PCB visual", "headline 'PCB visual & geometric diff'"),
         ('id="what"', "'What it does' section"),
         ('id="roadmap"', "'On the roadmap' section"),
