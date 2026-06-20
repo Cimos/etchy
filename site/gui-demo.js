@@ -55,13 +55,6 @@
     } else if (cur.mode === "after") {
       // revB = unchanged geometry + the parts that were added
       p.push(grp(L.base, NEUTRAL, 5), grp(L.added, NEUTRAL, 5));
-    } else if (cur.mode === "split") {
-      // left half = revA, right half = revB, with a divider
-      p.push('<defs><clipPath id="gd-cl"><rect x="0" y="0" width="260" height="200"/></clipPath>' +
-             '<clipPath id="gd-cr"><rect x="260" y="0" width="260" height="200"/></clipPath></defs>');
-      p.push('<g clip-path="url(#gd-cl)">' + grp(L.base, NEUTRAL, 5) + grp(L.removed, NEUTRAL, 5) + "</g>");
-      p.push('<g clip-path="url(#gd-cr)">' + grp(L.base, NEUTRAL, 5) + grp(L.added, GREEN, 6) + "</g>");
-      p.push('<line x1="260" y1="0" x2="260" y2="200" stroke="#e8a33d" stroke-width="2" stroke-dasharray="5 5"/>');
     }
     p.push("</svg>");
     canvas.innerHTML = p.join("");
