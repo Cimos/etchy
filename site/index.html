@@ -19,6 +19,9 @@
 <meta property="og:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
+<link rel="canonical" href="https://cimos.github.io/etchy/">
+<link rel="preload" href="assets/fonts/zilla-slab-700.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="assets/fonts/fonts.css">
 <style>
   :root{
@@ -57,7 +60,7 @@
   .term-body .pr{color:var(--copper-2)} .term-body .cmd{color:var(--ink)} .term-body .out{color:var(--muted)}
   .term-body .add{color:var(--added)} .term-body .rem{color:var(--removed)}
   section{padding:56px 0;border-top:1px solid var(--line)}
-  .label{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--copper-3)}
+  .label{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--copper-2)}
   .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:26px}
   .card{background:var(--board-2);border:1px solid var(--line);border-radius:12px;padding:22px}
   .card h3{margin:6px 0 8px;font-size:19px}
@@ -109,6 +112,13 @@
   .gm{font:inherit;font-size:11px;color:var(--muted);background:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;cursor:pointer}
   .gm:hover{color:var(--ink)}
   .gm.active{background:linear-gradient(135deg,var(--copper-1),var(--copper-3));color:#1a1206;border-color:transparent;font-weight:700}
+  .badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
+  .badges img{height:20px;border-radius:4px;display:block}
+  .getgrid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:8px}
+  .getcard{background:var(--board-2);border:1px solid var(--line);border-radius:12px;padding:20px}
+  .code{background:#0e1413;border:1px solid var(--line);border-radius:8px;padding:12px 14px;font:13px/1.6 "JetBrains Mono",ui-monospace,monospace;color:var(--ink);overflow-x:auto;margin:0;white-space:pre}
+  .code .out{color:var(--muted)}
+  @media(max-width:840px){ .getgrid{grid-template-columns:1fr} }
 </style>
 </head>
 <body>
@@ -134,6 +144,11 @@
       <div class="cta">
         <a class="btn btn-primary" href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">View on GitHub</a>
         <a class="btn btn-ghost" href="https://github.com/Cimos/etchy/tree/main/docs" target="_blank" rel="noopener">Read the docs</a>
+      </div>
+      <div class="badges">
+        <img src="https://img.shields.io/github/stars/Cimos/etchy?style=flat&amp;color=e8a33d&amp;labelColor=121817" alt="GitHub stars" loading="lazy">
+        <img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-e8a33d?labelColor=121817" alt="License: MIT or Apache-2.0" loading="lazy">
+        <img src="https://img.shields.io/github/actions/workflow/status/Cimos/etchy/ci.yml?branch=main&amp;label=ci&amp;color=46d18a&amp;labelColor=121817" alt="CI status" loading="lazy">
       </div>
     </div>
     <div class="hpanel">
@@ -201,6 +216,28 @@
         <path d="M300 220 H620"/>
       </g>
     </svg>
+  </section>
+
+  <section id="get">
+    <span class="label">Get it</span>
+    <h2 style="font-size:28px;margin:10px 0 6px">Run it locally, gate it in CI.</h2>
+    <p style="color:var(--muted);font-size:14px;margin:0 0 20px;max-width:62ch">Planned for the first release — etchy ships as small static binaries and a distroless container.</p>
+    <div class="getgrid">
+      <div class="getcard">
+        <div class="label" style="margin-bottom:10px">Install &amp; run</div>
+        <pre class="code"><span class="out"># at first release</span>
+cargo install etchy
+<span class="out"># …or grab a static binary from Releases</span>
+
+etchy old/ new/   <span class="out"># → report.html · overlay.svg · diff.json</span></pre>
+      </div>
+      <div class="getcard">
+        <div class="label" style="margin-bottom:10px">Gate a PR in CI</div>
+        <pre class="code"><span class="out">- name: PCB diff</span>
+  run: etchy old/ new/ --fail-on-change</pre>
+        <p style="color:var(--muted);font-size:13px;margin:10px 0 0">Per-layer thresholds + inline PR comments are on the roadmap.</p>
+      </div>
+    </div>
   </section>
 
   <section id="roadmap">
