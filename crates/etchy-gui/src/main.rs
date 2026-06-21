@@ -286,6 +286,34 @@ fn region_screen_px(extent_nm: i64, scale: f64) -> f32 {
     (extent_nm as f64 * scale) as f32
 }
 
+/// Default base/context colour for a layer by type, so flipping layers reads by
+/// colour (copper→copper-gold, silk→cream, mask→green, paste→grey…). Added/removed
+/// stay green/red — these only colour the unchanged base. Per-review re-scope.
+fn layer_type_color(kind: etchy_core::LayerKind) -> Color32 {
+    use etchy_core::LayerKind::*;
+    match kind {
+        TopCopper | BottomCopper | InnerCopper(_) => C_COPPER,
+        TopSilk | BottomSilk => C_CREAM,
+        TopMask | BottomMask => Color32::from_rgb(0x2e, 0x7d, 0x4f), // soldermask green
+        TopPaste | BottomPaste => Color32::from_rgb(0xb4, 0xb4, 0xbe), // paste grey
+        Drill => Color32::from_rgb(0x7a, 0x8a, 0xa0),                // drill slate
+        Outline => C_COPPER,
+        Other => C_BASE,
+    }
+}
+
+/// The base colour for `kind`: a user override if set, else the type default.
+fn resolve_base_color(
+    kind: etchy_core::LayerKind,
+    overrides: &[(etchy_core::LayerKind, Color32)],
+) -> Color32 {
+    overrides
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, c)| *c)
+        .unwrap_or_else(|| layer_type_color(kind))
+}
+
 /// Pan/zoom camera in world (nm) space.
 struct Camera {
     center: [f64; 2], // world nm
@@ -318,6 +346,11 @@ struct ViewApp {
     /// brand green/red; a "Colors" popover edits them.
     col_added: Color32,
     col_removed: Color32,
+    /// Per-layer-kind base/context colour overrides (default = layer_type_color).
+    base_overrides: Vec<(etchy_core::LayerKind, Color32)>,
+    /// The Colors editor window is open. A real window (not a menu) so the nested
+    /// colour-picker popup works — a menu_button closed on the first inner click.
+    show_colors: bool,
     /// Min-area noise threshold in mm² (G9): diff regions smaller than this are
     /// dropped. 0 disables it. Always surfaced — the caption reports how many were
     /// hidden. Driven by a slider in the top bar.
@@ -359,6 +392,8 @@ impl ViewApp {
             base_level: BaseLevel::Faint,
             col_added: C_ADDED,
             col_removed: C_REMOVED,
+            base_overrides: Vec::new(),
+            show_colors: false,
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
@@ -765,20 +800,9 @@ impl eframe::App for ViewApp {
                 ui.selectable_value(&mut self.base_level, BaseLevel::Off, "off");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Faint, "faint");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Strong, "strong");
-                ui.menu_button("Colors", |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("added");
-                        ui.color_edit_button_srgba(&mut self.col_added);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("removed");
-                        ui.color_edit_button_srgba(&mut self.col_removed);
-                    });
-                    if ui.button("reset to brand").clicked() {
-                        self.col_added = C_ADDED;
-                        self.col_removed = C_REMOVED;
-                    }
-                });
+                if ui.selectable_label(self.show_colors, "Colors").clicked() {
+                    self.show_colors = !self.show_colors;
+                }
                 if self.outline.is_some() {
                     ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
                         "Show the board outline (Edge.Cuts/GKO) as a faint reference on every layer.",
@@ -845,6 +869,47 @@ impl eframe::App for ViewApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_canvas(ui);
         });
+
+        // Colors editor — a real Window (not a menu) so the nested colour-picker
+        // popup works; a menu_button closed on the first click inside it.
+        if self.show_colors {
+            let kind = self.diff.layers[self.selected].kind;
+            let mut open = true;
+            egui::Window::new("Colors")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(egui::RichText::new("Diff colours").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("added");
+                        ui.color_edit_button_srgba(&mut self.col_added);
+                        ui.label("removed");
+                        ui.color_edit_button_srgba(&mut self.col_removed);
+                    });
+                    if ui.button("reset diff to brand").clicked() {
+                        self.col_added = C_ADDED;
+                        self.col_removed = C_REMOVED;
+                    }
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!("Base colour — {}", layer_group(kind).title()))
+                            .strong(),
+                    );
+                    let mut base = resolve_base_color(kind, &self.base_overrides);
+                    if ui.color_edit_button_srgba(&mut base).changed() {
+                        if let Some(e) = self.base_overrides.iter_mut().find(|(k, _)| *k == kind) {
+                            e.1 = base;
+                        } else {
+                            self.base_overrides.push((kind, base));
+                        }
+                    }
+                    if ui.button("reset this layer's colour").clicked() {
+                        self.base_overrides.retain(|(k, _)| *k != kind);
+                    }
+                });
+            self.show_colors = open;
+        }
 
         // Publish "what they're looking at" for the web feedback widget.
         let layer_name = self.diff.layers[self.selected].name().to_string();
@@ -920,12 +985,15 @@ impl ViewApp {
         }
         let min_area_nm2 =
             self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
+        let base_color =
+            resolve_base_color(self.diff.layers[self.selected].kind, &self.base_overrides);
         let cache = self.cache.as_ref().expect("cache built above");
         let (shapes, hidden) = transform_cache(
             cache,
             &self.cam,
             rect,
             self.base_level,
+            base_color,
             self.col_added,
             self.col_removed,
             min_area_nm2,
@@ -1100,6 +1168,7 @@ fn transform_cache(
     cam: &Camera,
     rect: Rect,
     base_level: BaseLevel,
+    base_color: Color32,
     col_added: Color32,
     col_removed: Color32,
     min_area_nm2: f64,
@@ -1110,9 +1179,9 @@ fn transform_cache(
         let (mut color, is_diff) = match item.role {
             Role::Base => (
                 Color32::from_rgba_unmultiplied(
-                    C_BASE.r(),
-                    C_BASE.g(),
-                    C_BASE.b(),
+                    base_color.r(),
+                    base_color.g(),
+                    base_color.b(),
                     base_alpha(base_level),
                 ),
                 false,
@@ -1320,6 +1389,39 @@ mod tests {
     fn region_screen_px_scales_extent() {
         assert_eq!(region_screen_px(1000, 0.5), 500.0);
         assert_eq!(region_screen_px(0, 2.0), 0.0);
+    }
+
+    #[test]
+    fn layer_type_color_is_distinct_per_family() {
+        use super::{layer_type_color, C_COPPER, C_CREAM};
+        assert_eq!(layer_type_color(LayerKind::TopCopper), C_COPPER);
+        assert_eq!(layer_type_color(LayerKind::InnerCopper(2)), C_COPPER);
+        assert_eq!(layer_type_color(LayerKind::BottomSilk), C_CREAM);
+        // mask, paste, copper read as different families
+        assert_ne!(
+            layer_type_color(LayerKind::TopMask),
+            layer_type_color(LayerKind::TopCopper)
+        );
+        assert_ne!(
+            layer_type_color(LayerKind::TopPaste),
+            layer_type_color(LayerKind::TopMask)
+        );
+    }
+
+    #[test]
+    fn resolve_base_color_prefers_override() {
+        use super::{layer_type_color, resolve_base_color};
+        use egui::Color32;
+        let ovr = [(LayerKind::TopCopper, Color32::from_rgb(1, 2, 3))];
+        assert_eq!(
+            resolve_base_color(LayerKind::TopCopper, &ovr),
+            Color32::from_rgb(1, 2, 3)
+        );
+        // no override for this kind -> the type default
+        assert_eq!(
+            resolve_base_color(LayerKind::TopSilk, &ovr),
+            layer_type_color(LayerKind::TopSilk)
+        );
     }
 
     #[test]
