@@ -198,6 +198,37 @@ enum BaseLevel {
     Strong,
 }
 
+/// What a scroll gesture should do to the camera (G7b #12). Pan amounts are in
+/// screen px; Zoom is a multiplicative scale factor.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CameraAction {
+    Zoom(f64),
+    PanX(f64),
+    PanY(f64),
+    None,
+}
+
+/// Map a vertical scroll delta + modifiers to a camera action: plain wheel zooms
+/// (cursor-anchored by the caller), Ctrl pans vertically, Shift pans horizontally.
+/// Ctrl wins if both are held. Pure so the mapping is unit-testable.
+fn scroll_to_camera_action(
+    scroll_y: f32,
+    ctrl: bool,
+    shift: bool,
+    zoom_rate: f64,
+    pan_step: f64,
+) -> CameraAction {
+    if scroll_y == 0.0 {
+        CameraAction::None
+    } else if ctrl {
+        CameraAction::PanY(scroll_y as f64 * pan_step)
+    } else if shift {
+        CameraAction::PanX(scroll_y as f64 * pan_step)
+    } else {
+        CameraAction::Zoom((scroll_y as f64 * zoom_rate).exp())
+    }
+}
+
 /// Opacity (0–255) of the base layer at each level.
 fn base_alpha(level: BaseLevel) -> u8 {
     match level {
@@ -810,16 +841,23 @@ impl ViewApp {
             self.cam.center[0] -= d.x as f64 / self.cam.scale;
             self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
         }
-        // Zoom around the cursor.
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            if let Some(ptr) = response.hover_pos() {
-                let before = screen_to_world(&self.cam, ptr, rect);
-                self.cam.scale *= (scroll as f64 * 0.0015).exp();
-                let after = screen_to_world(&self.cam, ptr, rect);
-                self.cam.center[0] += before[0] - after[0];
-                self.cam.center[1] += before[1] - after[1];
+        // Plain wheel = zoom (cursor-anchored); Ctrl+wheel = pan Y; Shift+wheel = pan X (G7b #12).
+        let (scroll, ctrl, shift) =
+            ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl, i.modifiers.shift));
+        match scroll_to_camera_action(scroll, ctrl, shift, 0.0015, 1.0) {
+            CameraAction::Zoom(f) => {
+                if let Some(ptr) = response.hover_pos() {
+                    let before = screen_to_world(&self.cam, ptr, rect);
+                    self.cam.scale *= f;
+                    let after = screen_to_world(&self.cam, ptr, rect);
+                    self.cam.center[0] += before[0] - after[0];
+                    self.cam.center[1] += before[1] - after[1];
+                }
             }
+            // Screen px → world; y is flipped (matches drag panning).
+            CameraAction::PanX(dx) => self.cam.center[0] -= dx / self.cam.scale,
+            CameraAction::PanY(dy) => self.cam.center[1] += dy / self.cam.scale,
+            CameraAction::None => {}
         }
 
         // Build the shapes to draw, per mode.
@@ -1120,10 +1158,38 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 mod tests {
     use super::{
         base_alpha, cycle_base, group_layers, layer_group, outline_legend_visible,
-        pick_outline_index, short_layer_name, step_in_order, warning_phase, BaseLevel, LayerGroup,
-        WarningPhase,
+        pick_outline_index, scroll_to_camera_action, short_layer_name, step_in_order,
+        warning_phase, BaseLevel, CameraAction, LayerGroup, WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn scroll_maps_to_zoom_or_pan_by_modifier() {
+        // plain wheel = zoom
+        assert!(matches!(
+            scroll_to_camera_action(10.0, false, false, 0.0015, 1.0),
+            CameraAction::Zoom(_)
+        ));
+        // ctrl = vertical pan, shift = horizontal pan
+        assert_eq!(
+            scroll_to_camera_action(10.0, true, false, 0.0015, 2.0),
+            CameraAction::PanY(20.0)
+        );
+        assert_eq!(
+            scroll_to_camera_action(10.0, false, true, 0.0015, 2.0),
+            CameraAction::PanX(20.0)
+        );
+        // ctrl wins if both held
+        assert!(matches!(
+            scroll_to_camera_action(5.0, true, true, 0.0015, 1.0),
+            CameraAction::PanY(_)
+        ));
+        // no scroll = nothing
+        assert_eq!(
+            scroll_to_camera_action(0.0, false, false, 0.0015, 1.0),
+            CameraAction::None
+        );
+    }
 
     #[test]
     fn base_alpha_scales_with_level() {
