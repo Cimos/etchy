@@ -56,6 +56,16 @@
   footer{padding:34px 0 60px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
   footer a{color:var(--muted)}
   @media(max-width:560px){ .barnav a.hide{display:none} .lead h1{font-size:32px} }
+  /* install method tabs (CSS-only) */
+  .insttabs{margin:14px 0 8px}
+  .i-radio{position:absolute;width:0;height:0;opacity:0}
+  .i-tabs{display:flex;gap:4px;flex-wrap:wrap}
+  .i-tabs label{font-size:12.5px;color:var(--muted);border:1px solid var(--line);border-bottom:0;border-radius:7px 7px 0 0;padding:6px 14px;cursor:pointer}
+  .i-tabs label:hover{color:var(--ink)}
+  .i-panel{display:none}
+  .i-panel pre.code{border-radius:0 8px 8px 8px;margin:0}
+  #i-win:checked~.i-tabs label[for=i-win],#i-lin:checked~.i-tabs label[for=i-lin],#i-mac:checked~.i-tabs label[for=i-mac],#i-cargo:checked~.i-tabs label[for=i-cargo],#i-ctr:checked~.i-tabs label[for=i-ctr]{background:rgba(232,163,61,.16);color:var(--copper-1)}
+  #i-win:checked~.p-win,#i-lin:checked~.p-lin,#i-mac:checked~.p-mac,#i-cargo:checked~.p-cargo,#i-ctr:checked~.p-ctr{display:block}
 </style>
 </head>
 <body>
@@ -98,25 +108,30 @@
     <h2>Install <span class="soon">at first release</span></h2>
     <p>etchy ships as a single self-contained binary per OS, a Cargo crate, and a distroless container — pick your platform. (Distribution lands with the first release; the commands below are the planned form.)</p>
 
-    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Linux</h3>
-    <pre class="code"><span class="c"># static musl binary — no runtime to install</span>
+    <div class="insttabs">
+      <input type="radio" name="inst" id="i-win" class="i-radio" checked>
+      <input type="radio" name="inst" id="i-lin" class="i-radio">
+      <input type="radio" name="inst" id="i-mac" class="i-radio">
+      <input type="radio" name="inst" id="i-cargo" class="i-radio">
+      <input type="radio" name="inst" id="i-ctr" class="i-radio">
+      <div class="i-tabs">
+        <label for="i-win">Windows</label>
+        <label for="i-lin">Linux</label>
+        <label for="i-mac">macOS</label>
+        <label for="i-cargo">Cargo</label>
+        <label for="i-ctr">Container</label>
+      </div>
+      <div class="i-panel p-win"><pre class="code"><span class="c"># PowerShell — download etchy.exe, then add it to your PATH</span>
+Invoke-WebRequest https://github.com/Cimos/etchy/releases/latest/download/etchy-x86_64-pc-windows-msvc.exe -OutFile etchy.exe</pre></div>
+      <div class="i-panel p-lin"><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
 curl -L https://github.com/Cimos/etchy/releases/latest/download/etchy-x86_64-unknown-linux-musl -o etchy
-chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre>
-
-    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">macOS</h3>
-    <pre class="code"><span class="c"># Apple Silicon (use x86_64-apple-darwin on Intel)</span>
+chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre></div>
+      <div class="i-panel p-mac"><pre class="code"><span class="c"># Apple Silicon (use x86_64-apple-darwin on Intel)</span>
 curl -L https://github.com/Cimos/etchy/releases/latest/download/etchy-aarch64-apple-darwin -o etchy
-chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre>
-
-    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Windows</h3>
-    <pre class="code"><span class="c"># PowerShell — download etchy.exe, then add it to your PATH</span>
-Invoke-WebRequest https://github.com/Cimos/etchy/releases/latest/download/etchy-x86_64-pc-windows-msvc.exe -OutFile etchy.exe</pre>
-
-    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Any OS — Cargo</h3>
-    <pre class="code">cargo install etchy</pre>
-
-    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Container</h3>
-    <pre class="code">docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy /work/old /work/new</pre>
+chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre></div>
+      <div class="i-panel p-cargo"><pre class="code">cargo install etchy</pre></div>
+      <div class="i-panel p-ctr"><pre class="code">docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy /work/old /work/new</pre></div>
+    </div>
 
     <p>Build from source today: <code class="inline">git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy &amp;&amp; cargo build --release</code> → <code class="inline">target/release/etchy</code>.</p>
   </section>
