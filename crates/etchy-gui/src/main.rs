@@ -694,8 +694,11 @@ fn outline_legend_visible(show_outline: bool, outline: Option<usize>, selected: 
 const C_ADDED: Color32 = Color32::from_rgb(0x46, 0xd1, 0x8a); // #46d18a
 const C_REMOVED: Color32 = Color32::from_rgb(0xff, 0x5d, 0x73); // #ff5d73
 const C_BASE: Color32 = Color32::from_rgb(90, 95, 105);
-/// Brand "board dark" — the canvas background.
+/// Brand "board dark" — the canvas (PCB) background.
 const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
+/// Brand "surface" charcoal — panels/chrome, one step up from the board so the
+/// UI doesn't read as one flat near-black mass.
+const C_SURFACE: Color32 = Color32::from_rgb(0x14, 0x1a, 0x18); // #141a18
 /// Brand copper-gold (ENIG) accent.
 const C_COPPER: Color32 = Color32::from_rgb(0xe8, 0xa3, 0x3d); // #e8a33d
 /// Brand paper-cream text.
@@ -707,7 +710,8 @@ const C_OUTLINE_FAINT: Color32 = Color32::from_rgba_premultiplied(0x38, 0x27, 0x
 /// The etchy egui theme: board-dark panels, copper accents on selection/hover (G7c).
 fn brand_visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
-    v.panel_fill = C_CANVAS;
+    v.panel_fill = C_SURFACE; // charcoal chrome, distinct from the board-dark canvas
+    v.window_fill = C_SURFACE;
     v.override_text_color = Some(C_CREAM);
     v.hyperlink_color = C_COPPER;
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(0xe8, 0xa3, 0x3d, 70);
