@@ -215,9 +215,10 @@ struct ViewApp {
     selected: usize,   // index into diff.layers
     mode: Mode,
     show_base: bool,
-    /// Drop diff regions below the min-area threshold (noise filter, G9). Always
-    /// surfaced: the canvas caption reports how many were hidden.
-    threshold_on: bool,
+    /// Min-area noise threshold in mm² (G9): diff regions smaller than this are
+    /// dropped. 0 disables it. Always surfaced — the caption reports how many were
+    /// hidden. Driven by a slider in the top bar.
+    min_area_mm2: f64,
     /// Regions hidden by the threshold last frame, for the caption.
     last_hidden: usize,
     cam: Camera,
@@ -236,7 +237,7 @@ impl ViewApp {
             selected,
             mode: Mode::Overlay,
             show_base: false,
-            threshold_on: true,
+            min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
         }
@@ -292,7 +293,7 @@ impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
         // lives in the host HTML), so these are always safe to read.
-        let (toggle_base, fit, overlay, before, after, next, prev, toggle_thresh) = ui.input(|i| {
+        let (toggle_base, fit, overlay, before, after, next, prev) = ui.input(|i| {
             use egui::Key;
             (
                 i.key_pressed(Key::S),
@@ -302,14 +303,10 @@ impl eframe::App for ViewApp {
                 i.key_pressed(Key::A),
                 i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
                 i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
-                i.key_pressed(Key::T),
             )
         });
         if toggle_base {
             self.show_base = !self.show_base;
-        }
-        if toggle_thresh {
-            self.threshold_on = !self.threshold_on;
         }
         if fit {
             self.cam.fitted = false;
@@ -351,6 +348,16 @@ impl eframe::App for ViewApp {
                 if ui.button("Fit").clicked() {
                     self.cam.fitted = false;
                 }
+                ui.separator();
+                ui.add(
+                    egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.002)
+                        .text("noise filter (mm²)")
+                        .fixed_decimals(4),
+                )
+                .on_hover_text(
+                    "Drop diff regions smaller than this as noise; 0 = off. \
+                     The hidden count is shown in the canvas caption.",
+                );
                 ui.separator();
                 ui.label("drag = pan · scroll = zoom · ↑↓ layer · O/B/A view · S base · F fit")
                     .on_hover_text(
@@ -485,11 +492,8 @@ impl ViewApp {
                 // Diff: features drawn true-to-scale, fading to nothing as they go
                 // sub-pixel (no fixed-dot clamp), with an always-surfaced min-area
                 // noise threshold (G9).
-                let min_area_nm2 = if self.threshold_on {
-                    MIN_AREA_MM2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64
-                } else {
-                    0.0
-                };
+                let min_area_nm2 =
+                    self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
                 let mut hidden = 0usize;
                 for (set, fill) in [(&layer.removed, C_REMOVED), (&layer.added, C_ADDED)] {
                     accumulate_diff(&mut shapes, &mut hidden, set, fill, cam, rect, min_area_nm2);
@@ -519,15 +523,11 @@ impl ViewApp {
             layer.change.added_region_count,
             layer.change.removed_region_count,
         );
-        if self.mode == Mode::Overlay {
-            if self.threshold_on && self.last_hidden > 0 {
-                cap.push_str(&format!(
-                    "   ·   {} hidden < {} mm² (T to show)",
-                    self.last_hidden, MIN_AREA_MM2
-                ));
-            } else if !self.threshold_on {
-                cap.push_str("   ·   threshold off (T)");
-            }
+        if self.mode == Mode::Overlay && self.min_area_mm2 > 0.0 && self.last_hidden > 0 {
+            cap.push_str(&format!(
+                "   ·   {} hidden < {:.4} mm²",
+                self.last_hidden, self.min_area_mm2
+            ));
         }
         painter.text(
             rect.left_top() + egui::vec2(8.0, 8.0),
