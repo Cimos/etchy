@@ -1157,22 +1157,18 @@ impl ViewApp {
             // matching the smooth non-split path instead of a painter per item.
             let mut lmesh = egui::epaint::Mesh::default();
             let mut rmesh = egui::epaint::Mesh::default();
+            // Base boards honour the base-level (faint/strong dimming) — #44; the
+            // board outline (Side::Full) is drawn into BOTH halves for orientation — #45.
+            let base_col =
+                base_display_color(base_color, chrome(self.theme).canvas, self.base_level);
             for item in &cache.items {
-                let (target, mesh) = match item.side {
-                    Side::Left => (lr, &mut lmesh),
-                    Side::Right => (rr, &mut rmesh),
-                    Side::Full => continue,
-                };
-                for tri in &item.tris {
-                    let b = mesh.vertices.len() as u32;
-                    for &p in tri {
-                        mesh.vertices.push(egui::epaint::Vertex {
-                            pos: world_to_screen(&self.cam, p, target),
-                            uv: egui::epaint::WHITE_UV,
-                            color: base_color,
-                        });
+                match item.side {
+                    Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, lr, base_col),
+                    Side::Right => append_tris(&mut rmesh, &item.tris, &self.cam, rr, base_col),
+                    Side::Full => {
+                        append_tris(&mut lmesh, &item.tris, &self.cam, lr, C_OUTLINE_FAINT);
+                        append_tris(&mut rmesh, &item.tris, &self.cam, rr, C_OUTLINE_FAINT);
                     }
-                    mesh.indices.extend_from_slice(&[b, b + 1, b + 2]);
                 }
             }
             let (ln, rn) = (lmesh.vertices.len(), rmesh.vertices.len());
@@ -1189,13 +1185,15 @@ impl ViewApp {
                 ],
                 Stroke::new(1.5, C_COPPER),
             );
+            // Labels at each half's BOTTOM-left so they don't collide with the
+            // top-left per-layer caption — #48.
             for (r, txt) in [
                 (lr, format!("{} (old)", self.old_label)),
                 (rr, format!("{} (new)", self.new_label)),
             ] {
                 painter.text(
-                    r.left_top() + egui::vec2(8.0, 8.0),
-                    egui::Align2::LEFT_TOP,
+                    r.left_bottom() + egui::vec2(8.0, -8.0),
+                    egui::Align2::LEFT_BOTTOM,
                     txt,
                     egui::FontId::proportional(13.0),
                     C_COPPER,
@@ -1401,8 +1399,11 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
             push_diff_items(&mut items, &layer.added, Role::Added);
         }
         Mode::Split => {
-            push_context_items(&mut items, &layer.old, Role::Base, Side::Left);
-            push_context_items(&mut items, &layer.new, Role::Base, Side::Right);
+            // Base honours the base-level control (Off omits the boards) — #44.
+            if key.base_on {
+                push_context_items(&mut items, &layer.old, Role::Base, Side::Left);
+                push_context_items(&mut items, &layer.new, Role::Base, Side::Right);
+            }
         }
     }
     TessCache {
@@ -1477,6 +1478,28 @@ fn transform_cache(
         vec![Shape::from(mesh)]
     };
     (shapes, hidden)
+}
+
+/// Append a cached item's world triangles to `mesh`, transformed into `target` and
+/// tinted `color`. Shared by the split path (which draws into two half-rects).
+fn append_tris(
+    mesh: &mut egui::epaint::Mesh,
+    tris: &[[Pt; 3]],
+    cam: &Camera,
+    target: Rect,
+    color: Color32,
+) {
+    for tri in tris {
+        let b = mesh.vertices.len() as u32;
+        for &p in tri {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: world_to_screen(cam, p, target),
+                uv: egui::epaint::WHITE_UV,
+                color,
+            });
+        }
+        mesh.indices.extend_from_slice(&[b, b + 1, b + 2]);
+    }
 }
 
 /// Is a world bbox at all on-screen? Transforms its corners and tests the screen
