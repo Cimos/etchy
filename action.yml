@@ -1,0 +1,54 @@
+name: etchy PCB diff
+description: >-
+  Diff two revisions of a board's fab output and gate the pipeline on the result.
+  Writes a Markdown summary to the job step-summary and (optionally) a sticky PR
+  comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error.
+author: Cimos
+branding:
+  icon: layers
+  color: orange
+
+inputs:
+  old:
+    description: Directory of the OLD revision's Gerber/Excellon files.
+    required: true
+  new:
+    description: Directory of the NEW revision's Gerber/Excellon files.
+    required: true
+  fail-on-diff:
+    description: Fail the step when differences are found (exit 1). Set false to report only.
+    required: false
+    default: "true"
+  comment:
+    description: Post the Markdown summary as a sticky PR comment (needs pull-requests:write + GITHUB_TOKEN).
+    required: false
+    default: "false"
+
+outputs:
+  changed:
+    description: "true if any layer changed, else false."
+    value: ${{ steps.run.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    # Build etchy from this repo (no release binary published yet). Cargo's own
+    # cache + the toolchain are the consumer workflow's responsibility.
+    - shell: bash
+      run: cargo build --release --quiet -p etchy-cli --manifest-path "${{ github.action_path }}/Cargo.toml"
+    - id: run
+      shell: bash
+      run: |
+        set +e
+        etchy="${{ github.action_path }}/target/release/etchy"
+        md="$("$etchy" --format md "${{ inputs.old }}" "${{ inputs.new }}")"
+        code=$?
+        set -e
+        printf '%s\n' "$md" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$code" -eq 2 ]; then echo "etchy errored"; exit 2; fi
+        echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        if [ "${{ inputs.comment }}" = "true" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+          printf '%s\n' "$md" | gh pr comment "${{ github.event.pull_request.number }}" --edit-last --body-file - || \
+          printf '%s\n' "$md" | gh pr comment "${{ github.event.pull_request.number }}" --body-file -
+        fi
+        if [ "${{ inputs.fail-on-diff }}" = "true" ] && [ "$code" -eq 1 ]; then exit 1; fi

@@ -38,9 +38,20 @@ struct Cli {
     old: PathBuf,
     /// New revision: a directory of Gerber files.
     new: PathBuf,
-    /// Emit the machine-readable JSON report to stdout instead of a summary.
+    /// Output format: a terminal summary, machine-readable JSON, or GitHub
+    /// Markdown (for a CI step-summary / PR comment).
+    #[arg(long, value_enum, default_value_t = Format::Summary)]
+    format: Format,
+    /// Deprecated alias for `--format json`.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Format {
+    Summary,
+    Json,
+    Md,
 }
 
 fn main() -> ExitCode {
@@ -74,10 +85,12 @@ fn run(cli: &Cli) -> Result<DiffReport> {
         }
     }
 
-    if cli.json {
-        println!("{}", report.to_json_pretty());
-    } else {
-        print_summary(&report);
+    // `--json` is the deprecated alias for `--format json`.
+    let format = if cli.json { Format::Json } else { cli.format };
+    match format {
+        Format::Json => println!("{}", report.to_json_pretty()),
+        Format::Md => println!("{}", report.to_markdown_summary()),
+        Format::Summary => print_summary(&report),
     }
     Ok(report)
 }
