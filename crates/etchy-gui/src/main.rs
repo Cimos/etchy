@@ -71,6 +71,9 @@ mod native {
         }
         let native_options = eframe::NativeOptions {
             viewport,
+            // 4x MSAA so sub-pixel slivers (thin track/pad junctions, shared edges)
+            // cover at least one sample and don't drop out as "no copper" (#55/#47).
+            multisampling: 4,
             ..Default::default()
         };
         match eframe::run_native("etchy", native_options, Box::new(|_cc| Ok(Box::new(app)))) {
@@ -311,6 +314,17 @@ fn geom_cache_dirty(prev: Option<&GeomKey>, now: &GeomKey) -> bool {
 /// On-screen px width of a region from its cached world extent (nm) and the scale.
 fn region_screen_px(extent_nm: i64, scale: f64) -> f32 {
     (extent_nm as f64 * scale) as f32
+}
+
+/// A region's THICKNESS (nm) ≈ area / longest-dimension. Used for the LOD fade so a
+/// long-but-sub-pixel-thin diff crescent (large extent, tiny thickness) fades like
+/// the thin feature it is, instead of staying opaque and flickering when panned (#46).
+fn feature_thickness_nm(area_nm2: f64, extent_nm: i64) -> i64 {
+    if extent_nm <= 0 {
+        0
+    } else {
+        (area_nm2 / extent_nm as f64) as i64
+    }
 }
 
 /// Default base/context colour for a layer by type, so flipping layers reads by
@@ -1434,11 +1448,12 @@ fn transform_cache(
                 hidden += 1;
                 continue;
             }
-            let alpha = lod::geometry_alpha(
-                region_screen_px(item.extent_nm, cam.scale),
-                LOD_LO_PX,
-                LOD_HI_PX,
-            );
+            // Fade by on-screen THICKNESS, not extent: a long thin crescent has a
+            // large extent but is sub-pixel thick — fading by thickness stops it
+            // flickering by position when panned (#46).
+            let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
+            let alpha =
+                lod::geometry_alpha(region_screen_px(thickness, cam.scale), LOD_LO_PX, LOD_HI_PX);
             if alpha <= 0.0 {
                 continue;
             }
@@ -1679,6 +1694,17 @@ mod tests {
     fn region_screen_px_scales_extent() {
         assert_eq!(region_screen_px(1000, 0.5), 500.0);
         assert_eq!(region_screen_px(0, 2.0), 0.0);
+    }
+
+    #[test]
+    fn feature_thickness_is_area_over_extent() {
+        use super::feature_thickness_nm;
+        // 1000 x 100 rect: area 100000, extent 1000 -> thickness ~100
+        assert_eq!(feature_thickness_nm(100_000.0, 1000), 100);
+        // a long thin crescent (10000 x 10): same area, extent 10000 -> thickness ~10,
+        // so LOD treats it as THIN (it fades) rather than as a big feature by extent.
+        assert_eq!(feature_thickness_nm(100_000.0, 10_000), 10);
+        assert_eq!(feature_thickness_nm(5.0, 0), 0); // guard
     }
 
     #[test]
