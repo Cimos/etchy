@@ -33,9 +33,11 @@ runs:
   using: composite
   steps:
     # Build etchy from this repo (no release binary published yet). Cargo's own
-    # cache + the toolchain are the consumer workflow's responsibility.
+    # cache + the toolchain are the consumer workflow's responsibility. Use the
+    # runner-provided $GITHUB_ACTION_PATH env var, not a ${{ }} template, so no
+    # value is expanded into the script.
     - shell: bash
-      run: cargo build --release --quiet -p etchy-cli --manifest-path "${{ github.action_path }}/Cargo.toml"
+      run: cargo build --release --quiet -p etchy-cli --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
     - id: run
       shell: bash
       # Inputs are passed via env (NOT ${{ }} into the script) so a crafted value
