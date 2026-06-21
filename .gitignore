@@ -24,6 +24,12 @@ crates/etchy-gui/dist/
 # staged demo serve dir (built artifacts; rebuilt by deploy/setup.sh)
 deploy/.serve/
 
+# Local review feedback — may reference confidential boards; never commit.
+# (The committed m1-seed.jsonl stays tracked; it predates this rule.)
+deploy/feedback/*.jsonl
+!deploy/feedback/m1-seed.jsonl
+deploy/feedback/screenshots/
+
 # Python (deploy/ tooling)
 __pycache__/
 *.pyc
