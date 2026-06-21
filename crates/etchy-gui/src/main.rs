@@ -212,20 +212,20 @@ enum CameraAction {
     None,
 }
 
-/// Map a vertical scroll delta + modifiers to a camera action: plain wheel zooms
-/// (cursor-anchored by the caller), Ctrl pans vertically, Shift pans horizontally.
-/// Ctrl wins if both are held. Pure so the mapping is unit-testable.
+/// Map a scroll delta + modifiers to a camera action: plain wheel zooms (cursor-
+/// anchored by the caller), Ctrl pans vertically, Shift pans horizontally; Ctrl wins
+/// if both held. Drives off the LARGER-magnitude axis (not "y else x") so a Ctrl/
+/// Shift+wheel that lands on either axis still pans — the old guard discarded it when
+/// it arrived on the zeroed axis (why Ctrl-scroll did nothing). Pure → unit-testable.
 fn scroll_to_camera_action(
-    scroll_x: f32,
-    scroll_y: f32,
+    dx: f32,
+    dy: f32,
     ctrl: bool,
     shift: bool,
     zoom_rate: f64,
     pan_step: f64,
 ) -> CameraAction {
-    // Whichever axis the wheel reports — egui/the OS delivers Shift+wheel as the X
-    // axis, so we can't read only Y (the bug: Ctrl/Shift scroll did nothing).
-    let primary = if scroll_y != 0.0 { scroll_y } else { scroll_x };
+    let primary = if dy.abs() >= dx.abs() { dy } else { dx };
     if primary == 0.0 {
         CameraAction::None
     } else if ctrl {
@@ -234,6 +234,17 @@ fn scroll_to_camera_action(
         CameraAction::PanX(primary as f64 * pan_step)
     } else {
         CameraAction::Zoom((primary as f64 * zoom_rate).exp())
+    }
+}
+
+/// Normalise a raw wheel delta to a common "points" scale so a physical notch zooms
+/// the same on native (Line units, ~1/notch) and web (Point units, ~100/notch): Line
+/// scales up to ≈ a web notch; Page is viewport-relative (#56 scroll-feel parity).
+fn wheel_points(unit: egui::MouseWheelUnit, delta: egui::Vec2, viewport_h: f32) -> egui::Vec2 {
+    match unit {
+        egui::MouseWheelUnit::Point => delta,
+        egui::MouseWheelUnit::Line => delta * 100.0,
+        egui::MouseWheelUnit::Page => delta * viewport_h,
     }
 }
 
@@ -1065,6 +1076,7 @@ impl ViewApp {
         // Ctrl+wheel into its own zoom and routes Shift+wheel to the X axis, so the
         // smoothed delta misses both modifiers. Sum the raw deltas, normalised to
         // points by unit, with the modifiers carried on each event.
+        let vp_h = rect.height();
         let (raw, ctrl, shift) = ui.input(|i| {
             let mut d = egui::Vec2::ZERO;
             let (mut ctrl, mut shift) = (false, false);
@@ -1076,16 +1088,14 @@ impl ViewApp {
                     ..
                 } = ev
                 {
-                    let f = match unit {
-                        egui::MouseWheelUnit::Point => 1.0,
-                        egui::MouseWheelUnit::Line => 16.0,
-                        egui::MouseWheelUnit::Page => 400.0,
-                    };
-                    d += *delta * f;
+                    d += wheel_points(*unit, *delta, vp_h);
                     ctrl |= modifiers.ctrl;
                     shift |= modifiers.shift;
                 }
             }
+            // Clamp per-frame so a fast trackpad burst can't fling the view.
+            d.x = d.x.clamp(-200.0, 200.0);
+            d.y = d.y.clamp(-200.0, 200.0);
             (d, ctrl, shift)
         });
         match scroll_to_camera_action(raw.x, raw.y, ctrl, shift, 0.0015, 1.0) {
@@ -1283,8 +1293,22 @@ struct CachedItem {
     role: Role,
     side: Side,
     tris: Vec<[Pt; 3]>,
+    /// World bbox [minx, miny, maxx, maxy] — for off-screen culling per frame.
+    bbox: [i64; 4],
     extent_nm: i64,
     area_nm2: f64,
+}
+
+/// World bbox of a ring as [minx, miny, maxx, maxy].
+fn ring_bbox(ring: &[Pt]) -> [i64; 4] {
+    let mut bb = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+    for p in ring {
+        bb[0] = bb[0].min(p.x);
+        bb[1] = bb[1].min(p.y);
+        bb[2] = bb[2].max(p.x);
+        bb[3] = bb[3].max(p.y);
+    }
+    bb
 }
 
 /// The tessellation cache: world-space items valid for one [`GeomKey`].
@@ -1305,6 +1329,7 @@ fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role,
                 role,
                 side,
                 tris,
+                bbox: ring_bbox(outer),
                 extent_nm: 0,
                 area_nm2: 0.0,
             });
@@ -1319,13 +1344,7 @@ fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
             continue;
         }
         let area_nm2 = lod::ring_area_nm2(outer);
-        let mut bb = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
-        for p in outer {
-            bb[0] = bb[0].min(p.x);
-            bb[1] = bb[1].min(p.y);
-            bb[2] = bb[2].max(p.x);
-            bb[3] = bb[3].max(p.y);
-        }
+        let bb = ring_bbox(outer);
         let extent_nm = (bb[2] - bb[0]).max(bb[3] - bb[1]);
         let tris = etchy_core::triangulate_shape(shape);
         if !tris.is_empty() {
@@ -1333,6 +1352,7 @@ fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
                 role,
                 side: Side::Full,
                 tris,
+                bbox: bb,
                 extent_nm,
                 area_nm2,
             });
@@ -1392,9 +1412,17 @@ fn transform_cache(
     col_removed: Color32,
     min_area_nm2: f64,
 ) -> (Vec<Shape>, usize) {
-    let mut shapes = Vec::with_capacity(cache.items.len());
+    // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
+    // instead of one Mesh+Shape per region — the FMU top-copper layer was ~5.5k
+    // mesh allocations per frame; this makes it one. Off-screen items are culled
+    // before their vertices are built (cheaper when zoomed in). Items are pushed
+    // base → outline → diff, so draw order within the single mesh stays correct.
+    let mut mesh = egui::epaint::Mesh::default();
     let mut hidden = 0usize;
     for item in &cache.items {
+        if !bbox_visible(item.bbox, cam, rect) {
+            continue; // off-screen: not a threshold "hidden", just nothing to draw
+        }
         let (mut color, is_diff) = match item.role {
             Role::Base => (base_display_color(base_color, canvas, base_level), false),
             Role::Outline => (C_OUTLINE_FAINT, false),
@@ -1416,7 +1444,6 @@ fn transform_cache(
             }
             color = with_alpha(color, alpha);
         }
-        let mut mesh = egui::epaint::Mesh::default();
         for tri in &item.tris {
             let base = mesh.vertices.len() as u32;
             for &p in tri {
@@ -1428,11 +1455,34 @@ fn transform_cache(
             }
             mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
-        if !mesh.is_empty() {
-            shapes.push(Shape::from(mesh));
-        }
     }
+    let shapes = if mesh.is_empty() {
+        Vec::new()
+    } else {
+        vec![Shape::from(mesh)]
+    };
     (shapes, hidden)
+}
+
+/// Is a world bbox at all on-screen? Transforms its corners and tests the screen
+/// AABB against the canvas rect — used to cull fully-off-screen items per frame.
+fn bbox_visible(bbox: [i64; 4], cam: &Camera, rect: Rect) -> bool {
+    let corners = [
+        Pt::new(bbox[0], bbox[1]),
+        Pt::new(bbox[2], bbox[1]),
+        Pt::new(bbox[0], bbox[3]),
+        Pt::new(bbox[2], bbox[3]),
+    ];
+    let mut lo = Pos2::new(f32::INFINITY, f32::INFINITY);
+    let mut hi = Pos2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for c in corners {
+        let s = world_to_screen(cam, c, rect);
+        lo.x = lo.x.min(s.x);
+        lo.y = lo.y.min(s.y);
+        hi.x = hi.x.max(s.x);
+        hi.y = hi.y.max(s.y);
+    }
+    Rect::from_min_max(lo, hi).intersects(rect)
 }
 
 /// Scale a colour's opacity by `a` (clamped to [0,1]).
@@ -1731,6 +1781,28 @@ mod tests {
         assert_eq!(
             scroll_to_camera_action(0.0, 0.0, false, false, 0.0015, 1.0),
             CameraAction::None
+        );
+        // Ctrl+wheel that arrives on the X axis (axis-swapped) STILL pans — the bug
+        // was the old code discarding it as None because Y was zero.
+        assert_eq!(
+            scroll_to_camera_action(8.0, 0.0, true, false, 0.0015, 1.0),
+            CameraAction::PanY(8.0)
+        );
+    }
+
+    #[test]
+    fn wheel_points_normalises_native_and_web_to_a_close_notch() {
+        use super::wheel_points;
+        use egui::{vec2, MouseWheelUnit};
+        // one native notch (1 line) and one web notch (~100 points) end up close,
+        // so a physical notch zooms similarly on both surfaces.
+        let native = wheel_points(MouseWheelUnit::Line, vec2(0.0, 1.0), 800.0).y;
+        let web = wheel_points(MouseWheelUnit::Point, vec2(0.0, 100.0), 800.0).y;
+        let ratio = native / web;
+        assert!((0.8..=1.25).contains(&ratio), "ratio {ratio}");
+        assert_eq!(
+            wheel_points(MouseWheelUnit::Page, vec2(0.0, 1.0), 800.0).y,
+            800.0
         );
     }
 
