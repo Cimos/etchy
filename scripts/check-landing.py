@@ -47,7 +47,11 @@ def main():
     # Honest framing: no Phase-0 / in-development status, no dates/versions in copy.
     check("in development" not in html.lower(), "page still says 'in development'")
     check("Phase 0" not in html, "page still references 'Phase 0'")
-    check(not re.search(r"\bv\d+\.\d+", html), "page contains a version number (roadmap must be undated/unversioned)")
+    # The roadmap section must stay undated/unversioned. (Board-revision labels like
+    # "v0.0.1" in the real-example section are legitimate, so scope this to the roadmap.)
+    rm = re.search(r'id="roadmap".*?</section>', html, re.DOTALL)
+    roadmap = rm.group(0) if rm else ""
+    check(not re.search(r"\bv\d+\.\d+", roadmap), "roadmap section contains a version number (keep it undated/unversioned)")
 
     # Every locally-referenced asset must exist on disk.
     for m in re.finditer(r'(?:href|src)="((?!https?:|#|data:)[^"]+)"', html):
