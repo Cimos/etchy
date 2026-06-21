@@ -257,6 +257,79 @@ impl ViewApp {
     }
 }
 
+/// A section in the layer list (G5). Sections render in [`LayerGroup::ALL`] order;
+/// classification works for both KiCad and Altium because it keys off the engine's
+/// already-normalized [`etchy_core::LayerKind`], not raw filenames.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LayerGroup {
+    Copper,
+    Mask,
+    Silk,
+    Paste,
+    Drill,
+    Mechanical,
+    Other,
+}
+
+impl LayerGroup {
+    /// Fixed top-to-bottom section order.
+    const ALL: [LayerGroup; 7] = [
+        LayerGroup::Copper,
+        LayerGroup::Mask,
+        LayerGroup::Silk,
+        LayerGroup::Paste,
+        LayerGroup::Drill,
+        LayerGroup::Mechanical,
+        LayerGroup::Other,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            LayerGroup::Copper => "Copper",
+            LayerGroup::Mask => "Soldermask",
+            LayerGroup::Silk => "Silkscreen",
+            LayerGroup::Paste => "Paste",
+            LayerGroup::Drill => "Drill",
+            LayerGroup::Mechanical => "Mechanical",
+            LayerGroup::Other => "Other",
+        }
+    }
+}
+
+/// Which section a layer kind belongs to.
+fn layer_group(kind: etchy_core::LayerKind) -> LayerGroup {
+    use etchy_core::LayerKind::*;
+    match kind {
+        TopCopper | BottomCopper | InnerCopper(_) => LayerGroup::Copper,
+        TopMask | BottomMask => LayerGroup::Mask,
+        TopSilk | BottomSilk => LayerGroup::Silk,
+        TopPaste | BottomPaste => LayerGroup::Paste,
+        Drill => LayerGroup::Drill,
+        Outline => LayerGroup::Mechanical,
+        Other => LayerGroup::Other,
+    }
+}
+
+/// Bucket layer indices into sections in [`LayerGroup::ALL`] order, preserving the
+/// incoming (changed-first) order within each section. Empty sections are omitted.
+/// `group_of` maps an index to its section, so this is testable without a `Board`.
+fn group_layers(
+    order: &[usize],
+    group_of: impl Fn(usize) -> LayerGroup,
+) -> Vec<(LayerGroup, Vec<usize>)> {
+    LayerGroup::ALL
+        .iter()
+        .filter_map(|&g| {
+            let idxs: Vec<usize> = order
+                .iter()
+                .copied()
+                .filter(|&i| group_of(i) == g)
+                .collect();
+            (!idxs.is_empty()).then_some((g, idxs))
+        })
+        .collect()
+}
+
 /// Step `delta` positions through `order` from whichever entry equals `selected`,
 /// wrapping at both ends; returns the new `selected` (an index into `diff.layers`).
 /// A `selected` absent from `order` starts from the front; an empty `order` is a
@@ -386,19 +459,30 @@ impl eframe::App for ViewApp {
                 ui.label(egui::RichText::new("changed first").weak().small());
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let order = self.order.clone();
-                    for idx in order {
-                        let l = &self.diff.layers[idx];
-                        // Just the layer name — no per-layer figures (#7) and no
-                        // status glyph (#11; ●/○ render as tofu in the web font).
-                        // Changed layers read strong, unchanged are dimmed.
-                        let label = if l.is_changed() {
-                            egui::RichText::new(l.name()).strong()
-                        } else {
-                            egui::RichText::new(l.name()).weak()
-                        };
-                        if ui.selectable_label(idx == self.selected, label).clicked() {
-                            self.select(idx);
+                    // Group into sections (copper / mask / silk / …) in fixed order,
+                    // changed-first within each (G5).
+                    let groups =
+                        group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
+                    for (group, idxs) in groups {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(group.title())
+                                .small()
+                                .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
+                        );
+                        for idx in idxs {
+                            let l = &self.diff.layers[idx];
+                            // Just the layer name — no per-layer figures (#7) and no
+                            // status glyph (#11; ●/○ render as tofu in the web font).
+                            // Changed layers read strong, unchanged are dimmed.
+                            let label = if l.is_changed() {
+                                egui::RichText::new(l.name()).strong()
+                            } else {
+                                egui::RichText::new(l.name()).weak()
+                            };
+                            if ui.selectable_label(idx == self.selected, label).clicked() {
+                                self.select(idx);
+                            }
                         }
                     }
                 });
@@ -717,7 +801,43 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 
 #[cfg(test)]
 mod tests {
-    use super::step_in_order;
+    use super::{group_layers, layer_group, step_in_order, LayerGroup};
+    use etchy_core::LayerKind;
+
+    #[test]
+    fn layer_group_maps_kinds_to_sections() {
+        assert_eq!(layer_group(LayerKind::TopCopper), LayerGroup::Copper);
+        assert_eq!(layer_group(LayerKind::InnerCopper(2)), LayerGroup::Copper);
+        assert_eq!(layer_group(LayerKind::BottomMask), LayerGroup::Mask);
+        assert_eq!(layer_group(LayerKind::TopSilk), LayerGroup::Silk);
+        assert_eq!(layer_group(LayerKind::BottomPaste), LayerGroup::Paste);
+        assert_eq!(layer_group(LayerKind::Drill), LayerGroup::Drill);
+        assert_eq!(layer_group(LayerKind::Outline), LayerGroup::Mechanical);
+        assert_eq!(layer_group(LayerKind::Other), LayerGroup::Other);
+    }
+
+    #[test]
+    fn group_layers_sections_in_order_preserving_input_order() {
+        // index -> group; `order` is changed-first.
+        let groups_by_idx = [
+            LayerGroup::Copper,
+            LayerGroup::Silk,
+            LayerGroup::Copper,
+            LayerGroup::Drill,
+        ];
+        let order = [2usize, 0, 1, 3]; // changed-first
+        let out = group_layers(&order, |i| groups_by_idx[i]);
+        // Fixed section order (Copper before Silk before Drill); within Copper the
+        // incoming order [2, 0] is preserved; empty sections are omitted.
+        assert_eq!(
+            out,
+            vec![
+                (LayerGroup::Copper, vec![2, 0]),
+                (LayerGroup::Silk, vec![1]),
+                (LayerGroup::Drill, vec![3]),
+            ]
+        );
+    }
 
     #[test]
     fn step_in_order_wraps_both_ways() {
