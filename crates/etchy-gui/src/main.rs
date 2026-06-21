@@ -226,6 +226,11 @@ struct ViewApp {
     themed: bool,
     /// Logo texture, decoded + uploaded on first frame (G7c).
     logo: Option<egui::TextureHandle>,
+    /// Trust warning is expanded (G1b). Auto-hide is time-derived; this records
+    /// only explicit user intent (chip click expands, overlay dismiss collapses).
+    warning_expanded: bool,
+    /// `ctx.input().time` when the warning was first shown / last re-expanded.
+    warning_shown_at: Option<f64>,
 }
 
 impl ViewApp {
@@ -246,6 +251,8 @@ impl ViewApp {
             cam: Camera::default(),
             themed: false,
             logo: None,
+            warning_expanded: true,
+            warning_shown_at: None,
         }
     }
 
@@ -267,6 +274,65 @@ impl ViewApp {
         #[cfg(target_arch = "wasm32")]
         let _ = ctx;
         self.logo.clone()
+    }
+
+    /// Trust-warning affordance (G1b): a fixed-height copper chip. While expanded
+    /// it drops the full warning text as a floating overlay (so toggling never
+    /// reflows the canvas); it auto-collapses to the chip after AUTO_HIDE_SECS, and
+    /// clicking the chip re-expands. Always present when there are warnings — never
+    /// silently gone.
+    fn warnings_ui(&mut self, ui: &mut egui::Ui, now: f64) {
+        if self.diff.report.warnings.is_empty() {
+            return;
+        }
+        if self.warning_shown_at.is_none() {
+            self.warning_shown_at = Some(now);
+        }
+        let phase = warning_phase(
+            now,
+            self.warning_shown_at,
+            self.warning_expanded,
+            AUTO_HIDE_SECS,
+        );
+        let n = self.diff.report.warnings.len();
+        let chip = ui
+            .small_button(
+                egui::RichText::new(format!("heads-up · {n}"))
+                    .strong()
+                    .color(C_COPPER),
+            )
+            .on_hover_text(self.diff.report.warnings[0].as_str());
+        if chip.clicked() {
+            self.warning_expanded = true;
+            self.warning_shown_at = Some(now);
+        }
+        if matches!(phase, WarningPhase::Expanded | WarningPhase::Counting) {
+            let pos = chip.rect.left_bottom() + egui::vec2(0.0, 4.0);
+            egui::Area::new(egui::Id::new("etchy-warning-overlay"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::default()
+                        .fill(C_CANVAS)
+                        .stroke(Stroke::new(1.0, C_COPPER))
+                        .inner_margin(8.0)
+                        .corner_radius(4.0)
+                        .show(ui, |ui| {
+                            ui.set_max_width(560.0);
+                            for w in &self.diff.report.warnings {
+                                ui.label(egui::RichText::new("heads-up:").strong().color(C_COPPER));
+                                ui.label(egui::RichText::new(w).color(C_CREAM));
+                            }
+                            if ui.small_button("dismiss").clicked() {
+                                self.warning_expanded = false;
+                            }
+                        });
+                });
+            if phase == WarningPhase::Counting {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
     }
 
     fn select(&mut self, idx: usize) {
@@ -383,6 +449,45 @@ fn step_in_order(order: &[usize], selected: usize, delta: i32) -> usize {
     let pos = order.iter().position(|&i| i == selected).unwrap_or(0) as i32;
     let next = (pos + delta).rem_euclid(n);
     order[next as usize]
+}
+
+/// Seconds the trust warning stays expanded before auto-collapsing to a chip (G1b).
+const AUTO_HIDE_SECS: f64 = 6.0;
+
+/// Display state of the trust-warning affordance (G1b).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WarningPhase {
+    /// Collapsed to a clickable chip (user dismissed it, or it auto-hid).
+    Chip,
+    /// Expanded and counting down to auto-hide (egui must keep repainting).
+    Counting,
+    /// Expanded; not yet stamped with a shown-at time.
+    Expanded,
+}
+
+/// Which phase the warning is in, from the current time, when it was first shown,
+/// and whether the user has it expanded. Pure so the timing is unit-testable; the
+/// egui shell just reads `i.time` and renders chip-or-overlay. Auto-hide is derived
+/// purely from elapsed time, so `expanded` only records explicit user intent.
+fn warning_phase(
+    now: f64,
+    shown_at: Option<f64>,
+    expanded: bool,
+    auto_hide_secs: f64,
+) -> WarningPhase {
+    if !expanded {
+        return WarningPhase::Chip;
+    }
+    match shown_at {
+        None => WarningPhase::Expanded,
+        Some(t) => {
+            if now - t >= auto_hide_secs {
+                WarningPhase::Chip
+            } else {
+                WarningPhase::Counting
+            }
+        }
+    }
 }
 
 // Brand palette (assets/brand/README.md): diff accents + board-dark canvas.
@@ -536,17 +641,9 @@ impl eframe::App for ViewApp {
                 );
             });
             ui.add_space(2.0);
-            // Trust warnings (e.g. revisions exported with mismatched units/precision).
-            for w in &self.diff.report.warnings {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        egui::RichText::new("heads-up:")
-                            .strong()
-                            .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
-                    );
-                    ui.label(egui::RichText::new(w).color(Color32::from_rgb(0xd9, 0xc7, 0xa0)));
-                });
-            }
+            // Trust warnings (e.g. mismatched units/precision) — auto-hiding chip (G1b).
+            let now = ui.ctx().input(|i| i.time);
+            self.warnings_ui(ui, now);
         });
 
         egui::Panel::left("layers")
@@ -900,8 +997,50 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_layers, layer_group, short_layer_name, step_in_order, LayerGroup};
+    use super::{
+        group_layers, layer_group, short_layer_name, step_in_order, warning_phase, LayerGroup,
+        WarningPhase,
+    };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn warning_phase_auto_hides_after_the_window() {
+        let hide = 6.0;
+        // collapsed by the user -> chip, regardless of time
+        assert_eq!(
+            warning_phase(100.0, Some(10.0), false, hide),
+            WarningPhase::Chip
+        );
+        // expanded, not yet stamped -> expanded (caller stamps this frame)
+        assert_eq!(
+            warning_phase(100.0, None, true, hide),
+            WarningPhase::Expanded
+        );
+        // expanded, just shown -> counting down
+        assert_eq!(
+            warning_phase(10.0, Some(10.0), true, hide),
+            WarningPhase::Counting
+        );
+        // still within the window -> counting
+        assert_eq!(
+            warning_phase(15.9, Some(10.0), true, hide),
+            WarningPhase::Counting
+        );
+        // window elapsed -> auto-hidden to chip
+        assert_eq!(
+            warning_phase(16.0, Some(10.0), true, hide),
+            WarningPhase::Chip
+        );
+        assert_eq!(
+            warning_phase(99.0, Some(10.0), true, hide),
+            WarningPhase::Chip
+        );
+        // clock skew (negative elapsed) -> counting, never auto-hide early
+        assert_eq!(
+            warning_phase(9.0, Some(10.0), true, hide),
+            WarningPhase::Counting
+        );
+    }
 
     #[test]
     fn short_layer_name_drops_the_group_suffix() {
