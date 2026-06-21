@@ -318,6 +318,20 @@ fn layer_type_color(kind: etchy_core::LayerKind) -> Color32 {
     }
 }
 
+/// Distinct layer kinds in first-seen order — drives the Colors window's
+/// per-layer rows so every kind on the board can be coloured.
+fn present_layer_kinds(
+    kinds: impl Iterator<Item = etchy_core::LayerKind>,
+) -> Vec<etchy_core::LayerKind> {
+    let mut seen = Vec::new();
+    for k in kinds {
+        if !seen.contains(&k) {
+            seen.push(k);
+        }
+    }
+    seen
+}
+
 /// The base colour for `kind`: a user override if set, else the type default.
 fn resolve_base_color(
     kind: etchy_core::LayerKind,
@@ -397,8 +411,10 @@ struct ViewApp {
     /// Regions hidden by the threshold last frame, for the caption.
     last_hidden: usize,
     cam: Camera,
-    /// Brand egui theme applied once (G7c).
-    themed: bool,
+    /// Current theme (dark/light) and the one last applied to egui, so a change
+    /// re-applies the visuals (the old code applied once and never updated).
+    theme: Theme,
+    applied_theme: Option<Theme>,
     /// Trust warning is expanded (G1b). Auto-hide is time-derived; this records
     /// only explicit user intent (chip click expands, overlay dismiss collapses).
     warning_expanded: bool,
@@ -434,7 +450,8 @@ impl ViewApp {
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
-            themed: false,
+            theme: Theme::Dark,
+            applied_theme: None,
             warning_expanded: false,
             warning_shown_at: None,
             outline,
@@ -492,7 +509,7 @@ impl ViewApp {
                 .fixed_pos(pos)
                 .show(ui.ctx(), |ui| {
                     egui::Frame::default()
-                        .fill(C_CANVAS)
+                        .fill(chrome(self.theme).canvas)
                         .stroke(Stroke::new(1.0, C_COPPER))
                         .inner_margin(8.0)
                         .corner_radius(4.0)
@@ -707,12 +724,47 @@ const C_CREAM: Color32 = Color32::from_rgb(0xf4, 0xf1, 0xe8); // #f4f1e8
 /// chrome, not diff content. Premultiply-safe via from_rgba_unmultiplied.
 const C_OUTLINE_FAINT: Color32 = Color32::from_rgba_premultiplied(0x38, 0x27, 0x0e, 0x3c);
 
-/// The etchy egui theme: board-dark panels, copper accents on selection/hover (G7c).
-fn brand_visuals() -> egui::Visuals {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = C_SURFACE; // charcoal chrome, distinct from the board-dark canvas
-    v.window_fill = C_SURFACE;
-    v.override_text_color = Some(C_CREAM);
+/// Light or dark theme (G — dark/light mode).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Theme {
+    Dark,
+    Light,
+}
+
+/// Theme-dependent brand colours. Copper/added/removed stay constant across themes.
+struct Chrome {
+    canvas: Color32,
+    surface: Color32,
+    text: Color32,
+}
+
+/// The board (canvas) / chrome (panels) / text colours for a theme.
+fn chrome(theme: Theme) -> Chrome {
+    match theme {
+        Theme::Dark => Chrome {
+            canvas: C_CANVAS,
+            surface: C_SURFACE,
+            text: C_CREAM,
+        },
+        Theme::Light => Chrome {
+            canvas: Color32::from_rgb(0xf4, 0xf1, 0xe8), // paper-cream board
+            surface: Color32::from_rgb(0xe6, 0xe2, 0xd5), // slightly darker chrome
+            text: Color32::from_rgb(0x1c, 0x22, 0x20),   // near-black ink
+        },
+    }
+}
+
+/// The etchy egui theme for the given mode: branded panels, copper accents.
+fn brand_visuals(theme: Theme) -> egui::Visuals {
+    let c = chrome(theme);
+    let mut v = if theme == Theme::Light {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
+    v.panel_fill = c.surface; // chrome, distinct from the canvas board colour
+    v.window_fill = c.surface;
+    v.override_text_color = Some(c.text);
     v.hyperlink_color = C_COPPER;
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(0xe8, 0xa3, 0x3d, 70);
     v.selection.stroke = Stroke::new(1.0, C_COPPER);
@@ -777,9 +829,9 @@ impl eframe::App for ViewApp {
         }
 
         // Brand theme, applied once (G7c).
-        if !self.themed {
-            ui.ctx().set_visuals(brand_visuals());
-            self.themed = true;
+        if self.applied_theme != Some(self.theme) {
+            ui.ctx().set_visuals(brand_visuals(self.theme));
+            self.applied_theme = Some(self.theme);
         }
         egui::Panel::top("top").show_inside(ui, |ui| {
             // Title row: a single "etchy" wordmark (one lockup, matching the web),
@@ -846,6 +898,16 @@ impl eframe::App for ViewApp {
                     self.cam.fitted = false;
                 }
                 ui.separator();
+                // Dark/light toggle (re-applied live by the visuals check in ui()).
+                let icon = if self.theme == Theme::Dark { "☾ dark" } else { "☀ light" };
+                if ui.button(icon).clicked() {
+                    self.theme = if self.theme == Theme::Dark {
+                        Theme::Light
+                    } else {
+                        Theme::Dark
+                    };
+                }
+                ui.separator();
                 ui.add(
                     egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.02)
                         .text("noise filter (mm²)")
@@ -908,7 +970,7 @@ impl eframe::App for ViewApp {
         // Colors editor — a real Window (not a menu) so the nested colour-picker
         // popup works; a menu_button closed on the first click inside it.
         if self.show_colors {
-            let kind = self.diff.layers[self.selected].kind;
+            let kinds = present_layer_kinds(self.diff.layers.iter().map(|l| l.kind));
             let mut open = true;
             egui::Window::new("Colors")
                 .open(&mut open)
@@ -927,20 +989,27 @@ impl eframe::App for ViewApp {
                         self.col_removed = C_REMOVED;
                     }
                     ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!("Base colour — {}", layer_group(kind).title()))
-                            .strong(),
-                    );
-                    let mut base = resolve_base_color(kind, &self.base_overrides);
-                    if ui.color_edit_button_srgba(&mut base).changed() {
-                        if let Some(e) = self.base_overrides.iter_mut().find(|(k, _)| *k == kind) {
-                            e.1 = base;
-                        } else {
-                            self.base_overrides.push((kind, base));
-                        }
-                    }
-                    if ui.button("reset this layer's colour").clicked() {
-                        self.base_overrides.retain(|(k, _)| *k != kind);
+                    ui.label(egui::RichText::new("Layer base colours").strong());
+                    // One row per layer kind present on the board (#5/#10).
+                    for kind in kinds {
+                        ui.horizontal(|ui| {
+                            let mut base = resolve_base_color(kind, &self.base_overrides);
+                            if ui.color_edit_button_srgba(&mut base).changed() {
+                                if let Some(e) =
+                                    self.base_overrides.iter_mut().find(|(k, _)| *k == kind)
+                                {
+                                    e.1 = base;
+                                } else {
+                                    self.base_overrides.push((kind, base));
+                                }
+                            }
+                            ui.label(short_layer_name(kind));
+                            if self.base_overrides.iter().any(|(k, _)| *k == kind)
+                                && ui.small_button("reset").clicked()
+                            {
+                                self.base_overrides.retain(|(k, _)| *k != kind);
+                            }
+                        });
                     }
                 });
             self.show_colors = open;
@@ -965,7 +1034,7 @@ impl eframe::App for ViewApp {
     /// Clear the native framebuffer to the brand board-dark, so the window reads
     /// as #0b0f0e (not the default near-black) and matches the web page.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        C_CANVAS.to_normalized_gamma_f32()
+        chrome(self.theme).canvas.to_normalized_gamma_f32()
     }
 }
 
@@ -975,7 +1044,7 @@ impl ViewApp {
         let size = ui.available_size();
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
         let rect = response.rect;
-        painter.rect_filled(rect, 0.0, C_CANVAS);
+        painter.rect_filled(rect, 0.0, chrome(self.theme).canvas);
 
         // Fit on first show / layer change.
         if !self.cam.fitted {
@@ -1117,6 +1186,7 @@ impl ViewApp {
                 rect,
                 self.base_level,
                 base_color,
+                chrome(self.theme).canvas,
                 self.col_added,
                 self.col_removed,
                 min_area_nm2,
@@ -1317,6 +1387,7 @@ fn transform_cache(
     rect: Rect,
     base_level: BaseLevel,
     base_color: Color32,
+    canvas: Color32,
     col_added: Color32,
     col_removed: Color32,
     min_area_nm2: f64,
@@ -1325,7 +1396,7 @@ fn transform_cache(
     let mut hidden = 0usize;
     for item in &cache.items {
         let (mut color, is_diff) = match item.role {
-            Role::Base => (base_display_color(base_color, C_CANVAS, base_level), false),
+            Role::Base => (base_display_color(base_color, canvas, base_level), false),
             Role::Outline => (C_OUTLINE_FAINT, false),
             Role::Added => (col_added, true),
             Role::Removed => (col_removed, true),
@@ -1488,6 +1559,19 @@ mod tests {
     use etchy_core::LayerKind;
 
     #[test]
+    fn chrome_dark_and_light_differ() {
+        use super::{chrome, Theme, C_CANVAS, C_SURFACE};
+        let d = chrome(Theme::Dark);
+        assert_eq!(d.canvas, C_CANVAS);
+        assert_eq!(d.surface, C_SURFACE);
+        assert_ne!(d.canvas, d.surface); // chrome reads distinct from the board
+        let l = chrome(Theme::Light);
+        let lum = |c: egui::Color32| c.r() as u16 + c.g() as u16 + c.b() as u16;
+        assert!(lum(l.canvas) > lum(d.canvas)); // light canvas is lighter
+        assert!(lum(l.text) < lum(l.canvas)); // dark ink on a light board
+    }
+
+    #[test]
     fn base_display_color_dims_toward_canvas() {
         use super::{C_CANVAS, C_COPPER};
         // Off shows the canvas (base not drawn); Strong reads closer to the real
@@ -1562,6 +1646,26 @@ mod tests {
         assert_eq!(clamp_split_frac(0.0), 0.1);
         assert_eq!(clamp_split_frac(1.0), 0.9);
         assert_eq!(clamp_split_frac(0.5), 0.5);
+    }
+
+    #[test]
+    fn present_layer_kinds_dedupes_in_order() {
+        use super::present_layer_kinds;
+        let kinds = [
+            LayerKind::TopCopper,
+            LayerKind::InnerCopper(1),
+            LayerKind::TopCopper,
+            LayerKind::BottomMask,
+            LayerKind::InnerCopper(1),
+        ];
+        assert_eq!(
+            present_layer_kinds(kinds.iter().copied()),
+            vec![
+                LayerKind::TopCopper,
+                LayerKind::InnerCopper(1),
+                LayerKind::BottomMask
+            ]
+        );
     }
 
     #[test]
