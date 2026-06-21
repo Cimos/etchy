@@ -59,10 +59,19 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
 ### G4 · Side-by-side comparison view (#9)
 - [ ] A Before | After split (and/or swipe), in addition to the overlay.
 
-### G5 · Layer parsing & grouping, KiCad + Altium (#10)
-- [ ] Group the layer list into sections (copper / mask / silk / paste / drill / mech);
-  robust classification for both Altium (extension) and KiCad (suffix). Drill needs
-  Excellon — still unsupported (separate).
+### G5 · Layer parsing & grouping, KiCad + Altium (#10) — **DONE**
+- [x] Left panel grouped into Copper / Soldermask / Silkscreen / Paste / Drill /
+  Mechanical / Other (fixed order, changed-first within each). Classification keys
+  off the engine's normalized `LayerKind`, so KiCad + Altium both work. Pure
+  `layer_group`/`group_layers` with unit tests. Drill still needs Excellon (separate).
+
+### G9 · Zoom level-of-detail (#22, #29) — **DONE**
+- [x] Replaced the fixed-3px marker clamp (the cause of the zoomed-out green blob /
+  blob-vs-blurb). Diff features draw true-to-scale and fade to nothing as they go
+  sub-pixel. A heatmap variant was tried and rejected; pure fade is what shipped.
+- [x] Surfaced min-area noise threshold as a top-bar slider (0..0.002 mm², 0 = off);
+  the caption reports how many regions are hidden. Pure `geometry_alpha`/
+  `ring_area_nm2` kernels with unit tests.
 
 ### G7b · UI controls (#12, #13, #16)
 - [x] **#13** Hotkeys: `↑/↓` (or `J/K`) cycle layers · `O/B/A` switch view ·
