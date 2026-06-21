@@ -188,6 +188,34 @@ enum Mode {
     After,
 }
 
+/// How strongly to draw the unchanged base (the new layer) behind the diff (G3).
+/// An always-available faint base keeps unchanged copper visible so green/red
+/// changes read against it instead of floating in black (#8).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BaseLevel {
+    Off,
+    Faint,
+    Strong,
+}
+
+/// Opacity (0–255) of the base layer at each level.
+fn base_alpha(level: BaseLevel) -> u8 {
+    match level {
+        BaseLevel::Off => 0,
+        BaseLevel::Faint => 70,
+        BaseLevel::Strong => 150,
+    }
+}
+
+/// Cycle Off → Faint → Strong → Off (the `S` key / base selector).
+fn cycle_base(level: BaseLevel) -> BaseLevel {
+    match level {
+        BaseLevel::Off => BaseLevel::Faint,
+        BaseLevel::Faint => BaseLevel::Strong,
+        BaseLevel::Strong => BaseLevel::Off,
+    }
+}
+
 /// Pan/zoom camera in world (nm) space.
 struct Camera {
     center: [f64; 2], // world nm
@@ -214,7 +242,12 @@ struct ViewApp {
     order: Vec<usize>, // indices into diff.layers, changed-first
     selected: usize,   // index into diff.layers
     mode: Mode,
-    show_base: bool,
+    /// Always-available faint base behind the diff (G3): Off / Faint / Strong.
+    base_level: BaseLevel,
+    /// User-configurable diff colors (G3, Altium-compare style). Default to the
+    /// brand green/red; a "Colors" popover edits them.
+    col_added: Color32,
+    col_removed: Color32,
     /// Min-area noise threshold in mm² (G9): diff regions smaller than this are
     /// dropped. 0 disables it. Always surfaced — the caption reports how many were
     /// hidden. Driven by a slider in the top bar.
@@ -250,7 +283,9 @@ impl ViewApp {
             order,
             selected,
             mode: Mode::Overlay,
-            show_base: false,
+            base_level: BaseLevel::Faint,
+            col_added: C_ADDED,
+            col_removed: C_REMOVED,
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
@@ -567,7 +602,7 @@ impl eframe::App for ViewApp {
                 )
             });
         if toggle_base {
-            self.show_base = !self.show_base;
+            self.base_level = cycle_base(self.base_level);
         }
         if toggle_outline {
             self.show_outline = !self.show_outline;
@@ -652,7 +687,24 @@ impl eframe::App for ViewApp {
                 ui.selectable_value(&mut self.mode, Mode::Before, "Before");
                 ui.selectable_value(&mut self.mode, Mode::After, "After");
                 ui.separator();
-                ui.checkbox(&mut self.show_base, "show base");
+                ui.label("base:");
+                ui.selectable_value(&mut self.base_level, BaseLevel::Off, "off");
+                ui.selectable_value(&mut self.base_level, BaseLevel::Faint, "faint");
+                ui.selectable_value(&mut self.base_level, BaseLevel::Strong, "strong");
+                ui.menu_button("Colors", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("added");
+                        ui.color_edit_button_srgba(&mut self.col_added);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("removed");
+                        ui.color_edit_button_srgba(&mut self.col_removed);
+                    });
+                    if ui.button("reset to brand").clicked() {
+                        self.col_added = C_ADDED;
+                        self.col_removed = C_REMOVED;
+                    }
+                });
                 if self.outline.is_some() {
                     ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
                         "Show the board outline (Edge.Cuts/GKO) as a faint reference on every layer.",
@@ -810,18 +862,23 @@ impl ViewApp {
             Mode::Before => push(&layer.old, C_BASE),
             Mode::After => push(&layer.new, C_BASE),
             Mode::Overlay => {
-                if self.show_base {
-                    // Draw the unchanged base (the new layer) faintly behind the diff.
-                    let faint = Color32::from_rgba_unmultiplied(90, 95, 105, 90);
-                    push(&layer.new, faint);
+                // Always-available faint base (G3): keeps unchanged copper visible
+                // so the diff reads against it, not against black.
+                if self.base_level != BaseLevel::Off {
+                    let a = base_alpha(self.base_level);
+                    let base = Color32::from_rgba_unmultiplied(90, 95, 105, a);
+                    push(&layer.new, base);
                 }
                 // Diff: features drawn true-to-scale, fading to nothing as they go
                 // sub-pixel (no fixed-dot clamp), with an always-surfaced min-area
-                // noise threshold (G9).
+                // noise threshold (G9). Colors are user-configurable (G3).
                 let min_area_nm2 =
                     self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
                 let mut hidden = 0usize;
-                for (set, fill) in [(&layer.removed, C_REMOVED), (&layer.added, C_ADDED)] {
+                for (set, fill) in [
+                    (&layer.removed, self.col_removed),
+                    (&layer.added, self.col_added),
+                ] {
                     accumulate_diff(&mut shapes, &mut hidden, set, fill, cam, rect, min_area_nm2);
                 }
                 self.last_hidden = hidden;
@@ -865,7 +922,13 @@ impl ViewApp {
         if self.mode == Mode::Overlay {
             let outline_row =
                 outline_legend_visible(self.show_outline, self.outline, self.selected);
-            legend(&painter, rect, outline_row);
+            legend(
+                &painter,
+                rect,
+                self.col_added,
+                self.col_removed,
+                outline_row,
+            );
         }
 
         // Keep a border.
@@ -945,9 +1008,15 @@ fn accumulate_diff(
     }
 }
 
-fn legend(painter: &egui::Painter, rect: Rect, outline_row: bool) {
+fn legend(
+    painter: &egui::Painter,
+    rect: Rect,
+    added: Color32,
+    removed: Color32,
+    outline_row: bool,
+) {
     let mut y = rect.right_top() + egui::vec2(-150.0, 8.0);
-    let mut rows = vec![(C_ADDED, "added"), (C_REMOVED, "removed")];
+    let mut rows = vec![(added, "added"), (removed, "removed")];
     if outline_row {
         rows.push((C_OUTLINE_FAINT, "board edge"));
     }
@@ -1050,10 +1119,25 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        group_layers, layer_group, outline_legend_visible, pick_outline_index, short_layer_name,
-        step_in_order, warning_phase, LayerGroup, WarningPhase,
+        base_alpha, cycle_base, group_layers, layer_group, outline_legend_visible,
+        pick_outline_index, short_layer_name, step_in_order, warning_phase, BaseLevel, LayerGroup,
+        WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn base_alpha_scales_with_level() {
+        assert_eq!(base_alpha(BaseLevel::Off), 0);
+        assert!(base_alpha(BaseLevel::Faint) > 0);
+        assert!(base_alpha(BaseLevel::Strong) > base_alpha(BaseLevel::Faint));
+    }
+
+    #[test]
+    fn cycle_base_rotates_off_faint_strong() {
+        assert_eq!(cycle_base(BaseLevel::Off), BaseLevel::Faint);
+        assert_eq!(cycle_base(BaseLevel::Faint), BaseLevel::Strong);
+        assert_eq!(cycle_base(BaseLevel::Strong), BaseLevel::Off);
+    }
 
     #[test]
     fn pick_outline_index_finds_the_first_outline_layer() {
