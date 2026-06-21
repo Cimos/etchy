@@ -34,6 +34,13 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=ROOT, **k)
 
+    def end_headers(self):
+        # The WASM/JS filenames are stable (no hash), so browsers cache them and
+        # show a stale build after a rebuild ("the page didn't update"). Tell the
+        # browser never to cache — this is a dev demo, freshness beats caching.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        super().end_headers()
+
     def _blocked(self):
         p = self.path.split("?", 1)[0].rstrip("/").lower()
         return p in BLOCKED
