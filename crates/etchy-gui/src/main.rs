@@ -957,6 +957,12 @@ impl eframe::App for ViewApp {
         };
         publish_state(&layer_name, mode, zoom_pct);
     }
+
+    /// Clear the native framebuffer to the brand board-dark, so the window reads
+    /// as #0b0f0e (not the default near-black) and matches the web page.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        C_CANVAS.to_normalized_gamma_f32()
+    }
 }
 
 impl ViewApp {
@@ -982,10 +988,33 @@ impl ViewApp {
             self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
         }
         // Plain wheel = zoom (cursor-anchored); Ctrl+wheel = pan Y; Shift+wheel = pan X (G7b #12).
-        // Read scroll on BOTH axes: egui delivers Shift+wheel as the X axis, so reading
-        // only `.y` before missed it (the bug where Shift/Ctrl scroll did nothing).
-        let (raw, ctrl, shift) =
-            ui.input(|i| (i.smooth_scroll_delta, i.modifiers.ctrl, i.modifiers.shift));
+        // Read the RAW MouseWheel events (not smooth_scroll_delta): egui consumes
+        // Ctrl+wheel into its own zoom and routes Shift+wheel to the X axis, so the
+        // smoothed delta misses both modifiers. Sum the raw deltas, normalised to
+        // points by unit, with the modifiers carried on each event.
+        let (raw, ctrl, shift) = ui.input(|i| {
+            let mut d = egui::Vec2::ZERO;
+            let (mut ctrl, mut shift) = (false, false);
+            for ev in &i.events {
+                if let egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                    ..
+                } = ev
+                {
+                    let f = match unit {
+                        egui::MouseWheelUnit::Point => 1.0,
+                        egui::MouseWheelUnit::Line => 16.0,
+                        egui::MouseWheelUnit::Page => 400.0,
+                    };
+                    d += *delta * f;
+                    ctrl |= modifiers.ctrl;
+                    shift |= modifiers.shift;
+                }
+            }
+            (d, ctrl, shift)
+        });
         match scroll_to_camera_action(raw.x, raw.y, ctrl, shift, 0.0015, 1.0) {
             CameraAction::Zoom(f) => {
                 if let Some(ptr) = response.hover_pos() {
