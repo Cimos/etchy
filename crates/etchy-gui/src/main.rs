@@ -186,6 +186,8 @@ enum Mode {
     Overlay,
     Before,
     After,
+    /// Side-by-side: old board left, new board right, one shared camera (G4).
+    Split,
 }
 
 /// How strongly to draw the unchanged base (the new layer) behind the diff (G3).
@@ -312,6 +314,29 @@ fn resolve_base_color(
         .find(|(k, _)| *k == kind)
         .map(|(_, c)| *c)
         .unwrap_or_else(|| layer_type_color(kind))
+}
+
+/// Which viewport a cached item draws into (G4 split). Full = the whole canvas
+/// (every non-split mode); Left/Right = the old/new halves of the split view.
+#[derive(Clone, Copy, PartialEq)]
+enum Side {
+    Full,
+    Left,
+    Right,
+}
+
+/// Keep the split fraction within [0.1, 0.9] so neither half ever vanishes.
+fn clamp_split_frac(frac: f32) -> f32 {
+    frac.clamp(0.1, 0.9)
+}
+
+/// Partition `rect` into left/right sub-rects about a divider at `frac` (clamped),
+/// separated by `gutter` px; returns `(left, right, divider_x)` (G4).
+fn split_rects(rect: Rect, frac: f32, gutter: f32) -> (Rect, Rect, f32) {
+    let div = rect.left() + rect.width() * clamp_split_frac(frac);
+    let left = Rect::from_min_max(rect.min, Pos2::new(div - gutter * 0.5, rect.max.y));
+    let right = Rect::from_min_max(Pos2::new(div + gutter * 0.5, rect.min.y), rect.max);
+    (left, right, div)
 }
 
 /// Pan/zoom camera in world (nm) space.
@@ -795,6 +820,7 @@ impl eframe::App for ViewApp {
                 ui.selectable_value(&mut self.mode, Mode::Overlay, "Overlay");
                 ui.selectable_value(&mut self.mode, Mode::Before, "Before");
                 ui.selectable_value(&mut self.mode, Mode::After, "After");
+                ui.selectable_value(&mut self.mode, Mode::Split, "Split");
                 ui.separator();
                 ui.label("base:");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Off, "off");
@@ -917,6 +943,7 @@ impl eframe::App for ViewApp {
             Mode::Overlay => "Overlay",
             Mode::Before => "Before",
             Mode::After => "After",
+            Mode::Split => "Split",
         };
         let zoom_pct = if self.cam.fit_scale > 0.0 {
             (self.cam.scale / self.cam.fit_scale * 100.0).round() as i32
@@ -988,19 +1015,68 @@ impl ViewApp {
         let base_color =
             resolve_base_color(self.diff.layers[self.selected].kind, &self.base_overrides);
         let cache = self.cache.as_ref().expect("cache built above");
-        let (shapes, hidden) = transform_cache(
-            cache,
-            &self.cam,
-            rect,
-            self.base_level,
-            base_color,
-            self.col_added,
-            self.col_removed,
-            min_area_nm2,
-        );
-        self.last_hidden = hidden;
-        let n = shapes.len();
-        painter.extend(shapes);
+        let n;
+        if self.mode == Mode::Split {
+            // Side-by-side: old (left) and new (right) halves, one shared camera,
+            // each clipped to its half so geometry can't bleed past the divider (G4).
+            let (lr, rr, div_x) = split_rects(rect, 0.5, 6.0);
+            let (mut ln, mut rn) = (0usize, 0usize);
+            for item in &cache.items {
+                let (target, count) = match item.side {
+                    Side::Left => (lr, &mut ln),
+                    Side::Right => (rr, &mut rn),
+                    Side::Full => continue,
+                };
+                let mut mesh = egui::epaint::Mesh::default();
+                for tri in &item.tris {
+                    let b = mesh.vertices.len() as u32;
+                    for &p in tri {
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: world_to_screen(&self.cam, p, target),
+                            uv: egui::epaint::WHITE_UV,
+                            color: base_color,
+                        });
+                    }
+                    mesh.indices.extend_from_slice(&[b, b + 1, b + 2]);
+                }
+                if !mesh.is_empty() {
+                    *count += 1;
+                    painter.with_clip_rect(target).add(Shape::from(mesh));
+                }
+            }
+            painter.line_segment(
+                [
+                    Pos2::new(div_x, rect.top()),
+                    Pos2::new(div_x, rect.bottom()),
+                ],
+                Stroke::new(1.5, C_COPPER),
+            );
+            for (r, txt) in [(lr, "old (rev A)"), (rr, "new (rev B)")] {
+                painter.text(
+                    r.left_top() + egui::vec2(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    txt,
+                    egui::FontId::proportional(13.0),
+                    C_COPPER,
+                );
+            }
+            self.last_hidden = 0;
+            n = ln + rn;
+        } else {
+            let (shapes, hidden) = transform_cache(
+                cache,
+                &self.cam,
+                rect,
+                self.base_level,
+                base_color,
+                self.col_added,
+                self.col_removed,
+                min_area_nm2,
+            );
+            self.last_hidden = hidden;
+            n = shapes.len();
+            painter.extend(shapes);
+        }
 
         // Empty-state hint.
         if n == 0 {
@@ -1070,6 +1146,7 @@ enum Role {
 /// re-triangulating; base/outline leave them 0.
 struct CachedItem {
     role: Role,
+    side: Side,
     tris: Vec<[Pt; 3]>,
     extent_nm: i64,
     area_nm2: f64,
@@ -1081,7 +1158,7 @@ struct TessCache {
     items: Vec<CachedItem>,
 }
 
-fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
+fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role, side: Side) {
     for shape in &set.shapes {
         let Some(outer) = shape.first() else { continue };
         if outer.len() < 3 {
@@ -1091,6 +1168,7 @@ fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role)
         if !tris.is_empty() {
             items.push(CachedItem {
                 role,
+                side,
                 tris,
                 extent_nm: 0,
                 area_nm2: 0.0,
@@ -1118,6 +1196,7 @@ fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
         if !tris.is_empty() {
             items.push(CachedItem {
                 role,
+                side: Side::Full,
                 tris,
                 extent_nm,
                 area_nm2,
@@ -1138,19 +1217,23 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
             } else {
                 &lo.old
             };
-            push_context_items(&mut items, set, Role::Outline);
+            push_context_items(&mut items, set, Role::Outline, Side::Full);
         }
     }
     let layer = &diff.layers[key.selected];
     match key.mode {
-        Mode::Before => push_context_items(&mut items, &layer.old, Role::Base),
-        Mode::After => push_context_items(&mut items, &layer.new, Role::Base),
+        Mode::Before => push_context_items(&mut items, &layer.old, Role::Base, Side::Full),
+        Mode::After => push_context_items(&mut items, &layer.new, Role::Base, Side::Full),
         Mode::Overlay => {
             if key.base_on {
-                push_context_items(&mut items, &layer.new, Role::Base);
+                push_context_items(&mut items, &layer.new, Role::Base, Side::Full);
             }
             push_diff_items(&mut items, &layer.removed, Role::Removed);
             push_diff_items(&mut items, &layer.added, Role::Added);
+        }
+        Mode::Split => {
+            push_context_items(&mut items, &layer.old, Role::Base, Side::Left);
+            push_context_items(&mut items, &layer.new, Role::Base, Side::Right);
         }
     }
     TessCache {
@@ -1389,6 +1472,23 @@ mod tests {
     fn region_screen_px_scales_extent() {
         assert_eq!(region_screen_px(1000, 0.5), 500.0);
         assert_eq!(region_screen_px(0, 2.0), 0.0);
+    }
+
+    #[test]
+    fn split_rects_halves_with_a_divider() {
+        use super::{clamp_split_frac, split_rects};
+        use egui::{pos2, Rect};
+        let r = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 50.0));
+        let (l, rr, div) = split_rects(r, 0.5, 0.0);
+        assert_eq!(div, 50.0);
+        assert_eq!(l.left(), 0.0);
+        assert_eq!(l.right(), 50.0);
+        assert_eq!(rr.left(), 50.0);
+        assert_eq!(rr.right(), 100.0);
+        // frac is clamped so a side never vanishes
+        assert_eq!(clamp_split_frac(0.0), 0.1);
+        assert_eq!(clamp_split_frac(1.0), 0.9);
+        assert_eq!(clamp_split_frac(0.5), 0.5);
     }
 
     #[test]

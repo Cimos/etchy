@@ -106,7 +106,7 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
 - [ ] Overlay/thumbnail doesn't settle while the user keeps interacting.
   (Multi-screenshot paste + Ctrl+Enter already shipped.)
 
-## Next GUI batch (designed via workflow 2026-06-21) — build order: G6 → G4 → per-layer colors
+## Next GUI batch (2026-06-21) — DONE (G6, G7b#12, G4, per-layer colours)
 
 - **G6 · native perf** — cache the tessellation in world space (the expensive,
   camera-independent step); re-run only the cheap world→screen transform per frame,
