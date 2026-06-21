@@ -295,7 +295,7 @@ etchy old/ new/ --json     <span class="out"># machine-readable, for CI</span></
   </footer>
 </div>
 <script src="gui-demo.js"></script>
-<!-- DEV-ONLY feedback widget — REMOVE (or gate) before public launch; points at localhost:8771 (landing-only instance). -->
-<script src="feedback-widget.js" data-feedback-endpoint="http://localhost:8771/submit"></script>
+<!-- DEV-ONLY feedback widget — REMOVE (or gate) before public launch; posts to the local feedback-loop (:8765). -->
+<script src="feedback-widget.js" data-feedback-endpoint="http://localhost:8765/submit" data-feedback-key="landing-2f998112"></script>
 </body>
 </html>

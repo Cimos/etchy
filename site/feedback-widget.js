@@ -10,7 +10,8 @@
 (function () {
   "use strict";
   var script = document.currentScript;
-  var ENDPOINT = (script && script.dataset.feedbackEndpoint) || "http://localhost:8770/submit";
+  var ENDPOINT = (script && script.dataset.feedbackEndpoint) || "http://localhost:8765/submit";
+  var FB_KEY = (script && script.dataset.feedbackKey) || "";
   var NAME_KEY = "etchy_fb_name";
 
   // ---- scoped styles -------------------------------------------------------
@@ -167,6 +168,7 @@
     var name = nameInput.value.trim();
     if (name) localStorage.setItem(NAME_KEY, name);
     var payload = {
+      key: FB_KEY,
       source: "etchy-widget",
       page: { url: location.href, title: document.title },
       username: name || null,
@@ -191,7 +193,7 @@
       textarea.value = ""; picked = []; renderThumbs(); refreshSubmit();
       setTimeout(close, 1400);
     }).catch(function () {
-      status.textContent = "Couldn’t reach the feedback server (running on :8770?)";
+      status.textContent = "Couldn’t reach the feedback server (running on :8765?)";
       status.className = "efb-status efb-err";
       submitBtn.disabled = false;
     });
