@@ -171,7 +171,9 @@ fn main() {
             .and_then(|d| d.get_element_by_id("the_canvas_id"))
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("canvas element #the_canvas_id");
-        let app = ViewApp::new(demo_diff(), "demo — rev A".into(), "demo — rev B".into());
+        // Generic, non-confidential labels (the bundled demo board is gitignored;
+        // real board names come with the public demo board, not from these filenames).
+        let app = ViewApp::new(demo_diff(), "old revision".into(), "new revision".into());
         eframe::WebRunner::new()
             .start(canvas, web_options, Box::new(|_cc| Ok(Box::new(app))))
             .await
@@ -214,30 +216,42 @@ enum CameraAction {
 /// (cursor-anchored by the caller), Ctrl pans vertically, Shift pans horizontally.
 /// Ctrl wins if both are held. Pure so the mapping is unit-testable.
 fn scroll_to_camera_action(
+    scroll_x: f32,
     scroll_y: f32,
     ctrl: bool,
     shift: bool,
     zoom_rate: f64,
     pan_step: f64,
 ) -> CameraAction {
-    if scroll_y == 0.0 {
+    // Whichever axis the wheel reports — egui/the OS delivers Shift+wheel as the X
+    // axis, so we can't read only Y (the bug: Ctrl/Shift scroll did nothing).
+    let primary = if scroll_y != 0.0 { scroll_y } else { scroll_x };
+    if primary == 0.0 {
         CameraAction::None
     } else if ctrl {
-        CameraAction::PanY(scroll_y as f64 * pan_step)
+        CameraAction::PanY(primary as f64 * pan_step)
     } else if shift {
-        CameraAction::PanX(scroll_y as f64 * pan_step)
+        CameraAction::PanX(primary as f64 * pan_step)
     } else {
-        CameraAction::Zoom((scroll_y as f64 * zoom_rate).exp())
+        CameraAction::Zoom((primary as f64 * zoom_rate).exp())
     }
 }
 
-/// Opacity (0–255) of the base layer at each level.
-fn base_alpha(level: BaseLevel) -> u8 {
-    match level {
-        BaseLevel::Off => 0,
-        BaseLevel::Faint => 70,
-        BaseLevel::Strong => 150,
-    }
+/// Opaque display colour for the unchanged base: the layer colour blended toward
+/// the canvas by level (Faint = dim, Strong = near-full). Opaque (not low-alpha)
+/// so unchanged copper reads as dim copper, not near-black over the dark canvas.
+fn base_display_color(layer: Color32, canvas: Color32, level: BaseLevel) -> Color32 {
+    let t = match level {
+        BaseLevel::Off => 0.0,
+        BaseLevel::Faint => 0.4,
+        BaseLevel::Strong => 0.8,
+    };
+    let mix = |a: u8, b: u8| (b as f32 + (a as f32 - b as f32) * t).round() as u8;
+    Color32::from_rgb(
+        mix(layer.r(), canvas.r()),
+        mix(layer.g(), canvas.g()),
+        mix(layer.b(), canvas.b()),
+    )
 }
 
 /// Cycle Off → Faint → Strong → Off (the `S` key / base selector).
@@ -385,8 +399,6 @@ struct ViewApp {
     cam: Camera,
     /// Brand egui theme applied once (G7c).
     themed: bool,
-    /// Logo texture, decoded + uploaded on first frame (G7c).
-    logo: Option<egui::TextureHandle>,
     /// Trust warning is expanded (G1b). Auto-hide is time-derived; this records
     /// only explicit user intent (chip click expands, overlay dismiss collapses).
     warning_expanded: bool,
@@ -423,33 +435,12 @@ impl ViewApp {
             last_hidden: 0,
             cam: Camera::default(),
             themed: false,
-            logo: None,
-            warning_expanded: true,
+            warning_expanded: false,
             warning_shown_at: None,
             outline,
             show_outline: true,
             cache: None,
         }
-    }
-
-    /// The brand-coloured logo texture, decoded + uploaded once. Native only:
-    /// `eframe::icon_data` (which decodes the PNG) isn't available on wasm, so the
-    /// web build shows the copper wordmark alone. None if decoding fails.
-    fn logo_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.logo.is_none() {
-            let bytes = include_bytes!("../../../assets/brand/png/etchy-icon-256.png");
-            if let Ok(icon) = eframe::icon_data::from_png_bytes(bytes) {
-                let img = egui::ColorImage::from_rgba_unmultiplied(
-                    [icon.width as usize, icon.height as usize],
-                    &icon.rgba,
-                );
-                self.logo = Some(ctx.load_texture("etchy-logo", img, egui::TextureOptions::LINEAR));
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = ctx;
-        self.logo.clone()
     }
 
     /// Trust-warning affordance (G1b): a fixed-height copper chip. While expanded
@@ -471,13 +462,25 @@ impl ViewApp {
             AUTO_HIDE_SECS,
         );
         let n = self.diff.report.warnings.len();
+        // Fixed-height slot + no hover/active expansion, so neither hovering nor
+        // expanding the chip ever changes the top panel's height (was shifting the
+        // whole canvas down on hover — the blocking reflow bug).
+        ui.visuals_mut().widgets.hovered.expansion = 0.0;
+        ui.visuals_mut().widgets.active.expansion = 0.0;
         let chip = ui
-            .small_button(
-                egui::RichText::new(format!("heads-up · {n}"))
-                    .strong()
-                    .color(C_COPPER),
+            .allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.small_button(
+                        egui::RichText::new(format!("⚠ {}", warning_label(n)))
+                            .strong()
+                            .color(C_COPPER),
+                    )
+                    .on_hover_text(self.diff.report.warnings[0].as_str())
+                },
             )
-            .on_hover_text(self.diff.report.warnings[0].as_str());
+            .inner;
         if chip.clicked() {
             self.warning_expanded = true;
             self.warning_shown_at = Some(now);
@@ -496,7 +499,7 @@ impl ViewApp {
                         .show(ui, |ui| {
                             ui.set_max_width(560.0);
                             for w in &self.diff.report.warnings {
-                                ui.label(egui::RichText::new("heads-up:").strong().color(C_COPPER));
+                                ui.label(egui::RichText::new("warning:").strong().color(C_COPPER));
                                 ui.label(egui::RichText::new(w).color(C_CREAM));
                             }
                             if ui.small_button("dismiss").clicked() {
@@ -629,6 +632,15 @@ fn step_in_order(order: &[usize], selected: usize, delta: i32) -> usize {
 
 /// Seconds the trust warning stays expanded before auto-collapsing to a chip (G1b).
 const AUTO_HIDE_SECS: f64 = 6.0;
+
+/// Count-aware warning label (singular/plural); empty for zero.
+fn warning_label(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => "1 warning".to_string(),
+        _ => format!("{n} warnings"),
+    }
+}
 
 /// Display state of the trust-warning affordance (G1b).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -765,19 +777,11 @@ impl eframe::App for ViewApp {
             ui.ctx().set_visuals(brand_visuals());
             self.themed = true;
         }
-        let logo = self.logo_texture(ui.ctx());
-
         egui::Panel::top("top").show_inside(ui, |ui| {
-            // Title row: logo + wordmark, revisions, and the headline totals.
+            // Title row: a single "etchy" wordmark (one lockup, matching the web),
+            // the revisions, and the headline totals.
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                if let Some(tex) = &logo {
-                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
-                        tex.id(),
-                        egui::vec2(28.0, 28.0),
-                    )));
-                }
-                ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new("etchy")
                         .size(24.0)
@@ -839,8 +843,9 @@ impl eframe::App for ViewApp {
                 }
                 ui.separator();
                 ui.add(
-                    egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.002)
+                    egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.02)
                         .text("noise filter (mm²)")
+                        .logarithmic(true)
                         .fixed_decimals(4),
                 )
                 .on_hover_text(
@@ -977,9 +982,11 @@ impl ViewApp {
             self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
         }
         // Plain wheel = zoom (cursor-anchored); Ctrl+wheel = pan Y; Shift+wheel = pan X (G7b #12).
-        let (scroll, ctrl, shift) =
-            ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl, i.modifiers.shift));
-        match scroll_to_camera_action(scroll, ctrl, shift, 0.0015, 1.0) {
+        // Read scroll on BOTH axes: egui delivers Shift+wheel as the X axis, so reading
+        // only `.y` before missed it (the bug where Shift/Ctrl scroll did nothing).
+        let (raw, ctrl, shift) =
+            ui.input(|i| (i.smooth_scroll_delta, i.modifiers.ctrl, i.modifiers.shift));
+        match scroll_to_camera_action(raw.x, raw.y, ctrl, shift, 0.0015, 1.0) {
             CameraAction::Zoom(f) => {
                 if let Some(ptr) = response.hover_pos() {
                     let before = screen_to_world(&self.cam, ptr, rect);
@@ -1056,7 +1063,10 @@ impl ViewApp {
                 ],
                 Stroke::new(1.5, C_COPPER),
             );
-            for (r, txt) in [(lr, "old (rev A)"), (rr, "new (rev B)")] {
+            for (r, txt) in [
+                (lr, format!("{} (old)", self.old_label)),
+                (rr, format!("{} (new)", self.new_label)),
+            ] {
                 painter.text(
                     r.left_top() + egui::vec2(8.0, 8.0),
                     egui::Align2::LEFT_TOP,
@@ -1091,6 +1101,23 @@ impl ViewApp {
                 "no geometry in this view",
                 egui::FontId::proportional(16.0),
                 Color32::GRAY,
+            );
+        }
+
+        // In Before/After the whole board is drawn in its layer colour (not the
+        // green "added") — say so, so it's not mistaken for the diff (#3).
+        let mode_note = match self.mode {
+            Mode::Before => Some("showing OLD board (before)"),
+            Mode::After => Some("showing NEW board (after)"),
+            _ => None,
+        };
+        if let Some(note) = mode_note {
+            painter.text(
+                rect.right_top() + egui::vec2(-8.0, 8.0),
+                egui::Align2::RIGHT_TOP,
+                note,
+                egui::FontId::proportional(13.0),
+                C_COPPER,
             );
         }
 
@@ -1265,15 +1292,7 @@ fn transform_cache(
     let mut hidden = 0usize;
     for item in &cache.items {
         let (mut color, is_diff) = match item.role {
-            Role::Base => (
-                Color32::from_rgba_unmultiplied(
-                    base_color.r(),
-                    base_color.g(),
-                    base_color.b(),
-                    base_alpha(base_level),
-                ),
-                false,
-            ),
+            Role::Base => (base_display_color(base_color, C_CANVAS, base_level), false),
             Role::Outline => (C_OUTLINE_FAINT, false),
             Role::Added => (col_added, true),
             Role::Removed => (col_removed, true),
@@ -1428,12 +1447,28 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_alpha, build_geom_key, cycle_base, geom_cache_dirty, group_layers, layer_group,
-        outline_legend_visible, pick_outline_index, region_screen_px, scroll_to_camera_action,
-        short_layer_name, step_in_order, warning_phase, BaseLevel, CameraAction, LayerGroup, Mode,
-        WarningPhase,
+        base_display_color, build_geom_key, cycle_base, geom_cache_dirty, group_layers,
+        layer_group, outline_legend_visible, pick_outline_index, region_screen_px,
+        scroll_to_camera_action, short_layer_name, step_in_order, warning_phase, BaseLevel,
+        CameraAction, LayerGroup, Mode, WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn base_display_color_dims_toward_canvas() {
+        use super::{C_CANVAS, C_COPPER};
+        // Off shows the canvas (base not drawn); Strong reads closer to the real
+        // layer colour than Faint — both opaque so unchanged copper isn't black.
+        assert_eq!(
+            base_display_color(C_COPPER, C_CANVAS, BaseLevel::Off),
+            C_CANVAS
+        );
+        let faint = base_display_color(C_COPPER, C_CANVAS, BaseLevel::Faint);
+        let strong = base_display_color(C_COPPER, C_CANVAS, BaseLevel::Strong);
+        assert!(strong.r() > faint.r());
+        assert!(faint.r() > C_CANVAS.r()); // even faint is visibly above the black canvas
+        assert_eq!(strong.a(), 255); // opaque
+    }
 
     #[test]
     fn geom_key_tracks_selection_inputs_only() {
@@ -1531,37 +1566,35 @@ mod tests {
 
     #[test]
     fn scroll_maps_to_zoom_or_pan_by_modifier() {
-        // plain wheel = zoom
+        // plain wheel (y) = zoom
         assert!(matches!(
-            scroll_to_camera_action(10.0, false, false, 0.0015, 1.0),
+            scroll_to_camera_action(0.0, 10.0, false, false, 0.0015, 1.0),
             CameraAction::Zoom(_)
         ));
         // ctrl = vertical pan, shift = horizontal pan
         assert_eq!(
-            scroll_to_camera_action(10.0, true, false, 0.0015, 2.0),
+            scroll_to_camera_action(0.0, 10.0, true, false, 0.0015, 2.0),
             CameraAction::PanY(20.0)
         );
         assert_eq!(
-            scroll_to_camera_action(10.0, false, true, 0.0015, 2.0),
+            scroll_to_camera_action(0.0, 10.0, false, true, 0.0015, 2.0),
             CameraAction::PanX(20.0)
+        );
+        // Shift+wheel arriving on the X axis still pans (the bug we fixed)
+        assert_eq!(
+            scroll_to_camera_action(8.0, 0.0, false, true, 0.0015, 1.0),
+            CameraAction::PanX(8.0)
         );
         // ctrl wins if both held
         assert!(matches!(
-            scroll_to_camera_action(5.0, true, true, 0.0015, 1.0),
+            scroll_to_camera_action(0.0, 5.0, true, true, 0.0015, 1.0),
             CameraAction::PanY(_)
         ));
         // no scroll = nothing
         assert_eq!(
-            scroll_to_camera_action(0.0, false, false, 0.0015, 1.0),
+            scroll_to_camera_action(0.0, 0.0, false, false, 0.0015, 1.0),
             CameraAction::None
         );
-    }
-
-    #[test]
-    fn base_alpha_scales_with_level() {
-        assert_eq!(base_alpha(BaseLevel::Off), 0);
-        assert!(base_alpha(BaseLevel::Faint) > 0);
-        assert!(base_alpha(BaseLevel::Strong) > base_alpha(BaseLevel::Faint));
     }
 
     #[test]
@@ -1591,6 +1624,14 @@ mod tests {
         assert!(!outline_legend_visible(true, Some(2), 2)); // viewing the outline itself
         assert!(!outline_legend_visible(false, Some(2), 1)); // hidden
         assert!(!outline_legend_visible(true, None, 1)); // no outline layer
+    }
+
+    #[test]
+    fn warning_label_is_count_aware() {
+        use super::warning_label;
+        assert_eq!(warning_label(0), "");
+        assert_eq!(warning_label(1), "1 warning");
+        assert_eq!(warning_label(3), "3 warnings");
     }
 
     #[test]
