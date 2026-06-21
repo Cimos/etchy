@@ -13,6 +13,7 @@ Feedback file location (in priority order):
      preserved + collectable; the dir is created if missing).
   2. ROOT/feedback.jsonl  — default (next to the served bundle).
 """
+import base64
 import datetime
 import json
 import os
@@ -62,6 +63,37 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             self.send_error(400, "bad json")
             return
+        # Pasted screenshots arrive as data: URLs. Decode each to a file under a
+        # sibling screenshots/ dir and replace the bulky base64 in the logged record
+        # with the relative path(s), so the jsonl stays readable. Accepts a list
+        # (`screenshots`) or a single legacy string (`screenshot`).
+        def _save_shot(durl, idx):
+            header, b64 = durl.split(",", 1)
+            ext = "jpg" if "image/jpeg" in header else "webp" if "image/webp" in header else "png"
+            sdir = os.path.join(os.path.dirname(os.path.abspath(FEEDBACK)), "screenshots")
+            os.makedirs(sdir, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+            fname = f"{stamp}-{idx}-{self.client_address[0].replace(':', '_')}.{ext}"
+            with open(os.path.join(sdir, fname), "wb") as imgf:
+                imgf.write(base64.b64decode(b64))
+            return os.path.join("screenshots", fname)
+
+        shots = data.get("screenshots")
+        if isinstance(shots, list):
+            paths = []
+            for i, s in enumerate(shots):
+                durl = s.get("data") if isinstance(s, dict) else s
+                if isinstance(durl, str) and durl.startswith("data:image/"):
+                    try:
+                        paths.append(_save_shot(durl, i))
+                    except Exception:
+                        paths.append("(screenshot decode failed)")
+            data["screenshots"] = paths
+        elif isinstance(data.get("screenshot"), str) and data["screenshot"].startswith("data:image/"):
+            try:
+                data["screenshot"] = _save_shot(data["screenshot"], 0)
+            except Exception:
+                data["screenshot"] = "(screenshot decode failed)"
         rec = {
             "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "ip": self.client_address[0],
