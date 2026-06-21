@@ -222,6 +222,10 @@ struct ViewApp {
     /// Regions hidden by the threshold last frame, for the caption.
     last_hidden: usize,
     cam: Camera,
+    /// Brand egui theme applied once (G7c).
+    themed: bool,
+    /// Logo texture, decoded + uploaded on first frame (G7c).
+    logo: Option<egui::TextureHandle>,
 }
 
 impl ViewApp {
@@ -240,7 +244,29 @@ impl ViewApp {
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
+            themed: false,
+            logo: None,
         }
+    }
+
+    /// The brand-coloured logo texture, decoded + uploaded once. Native only:
+    /// `eframe::icon_data` (which decodes the PNG) isn't available on wasm, so the
+    /// web build shows the copper wordmark alone. None if decoding fails.
+    fn logo_texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.logo.is_none() {
+            let bytes = include_bytes!("../../../assets/brand/png/etchy-icon-256.png");
+            if let Ok(icon) = eframe::icon_data::from_png_bytes(bytes) {
+                let img = egui::ColorImage::from_rgba_unmultiplied(
+                    [icon.width as usize, icon.height as usize],
+                    &icon.rgba,
+                );
+                self.logo = Some(ctx.load_texture("etchy-logo", img, egui::TextureOptions::LINEAR));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = ctx;
+        self.logo.clone()
     }
 
     fn select(&mut self, idx: usize) {
@@ -365,6 +391,24 @@ const C_REMOVED: Color32 = Color32::from_rgb(0xff, 0x5d, 0x73); // #ff5d73
 const C_BASE: Color32 = Color32::from_rgb(90, 95, 105);
 /// Brand "board dark" — the canvas background.
 const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
+/// Brand copper-gold (ENIG) accent.
+const C_COPPER: Color32 = Color32::from_rgb(0xe8, 0xa3, 0x3d); // #e8a33d
+/// Brand paper-cream text.
+const C_CREAM: Color32 = Color32::from_rgb(0xf4, 0xf1, 0xe8); // #f4f1e8
+
+/// The etchy egui theme: board-dark panels, copper accents on selection/hover (G7c).
+fn brand_visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::dark();
+    v.panel_fill = C_CANVAS;
+    v.override_text_color = Some(C_CREAM);
+    v.hyperlink_color = C_COPPER;
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(0xe8, 0xa3, 0x3d, 70);
+    v.selection.stroke = Stroke::new(1.0, C_COPPER);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, C_COPPER);
+    v.widgets.active.bg_fill = Color32::from_rgb(0x6b, 0x4c, 0x1d);
+    v.widgets.active.bg_stroke = Stroke::new(1.0, C_COPPER);
+    v
+}
 
 // Level-of-detail (G9). Diff features are drawn true-to-scale: at/above
 // LOD_HI_PX they're fully opaque geometry, at/below LOD_LO_PX they vanish into
@@ -415,19 +459,63 @@ impl eframe::App for ViewApp {
             self.step_layer(-1);
         }
 
+        // Brand theme, applied once (G7c).
+        if !self.themed {
+            ui.ctx().set_visuals(brand_visuals());
+            self.themed = true;
+        }
+        let logo = self.logo_texture(ui.ctx());
+
         egui::Panel::top("top").show_inside(ui, |ui| {
+            // Title row: logo + wordmark, revisions, and the headline totals.
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.heading("etchy");
-                ui.separator();
-                ui.label(format!("{}  →  {}", self.old_label, self.new_label));
-                ui.separator();
+                if let Some(tex) = &logo {
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                        tex.id(),
+                        egui::vec2(28.0, 28.0),
+                    )));
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new("etchy")
+                        .size(24.0)
+                        .strong()
+                        .color(C_COPPER),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!("{}  →  {}", self.old_label, self.new_label))
+                        .size(15.0)
+                        .color(C_CREAM),
+                );
+                // Totals pushed to the right.
                 let t = &self.diff.report.totals;
-                ui.label(format!(
-                    "{}/{} layers changed   +{:.4} mm²  −{:.4} mm²",
-                    t.layers_changed, t.layers_total, t.added_area_mm2, t.removed_area_mm2
-                ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "+{:.4}  −{:.4} mm²",
+                            t.added_area_mm2, t.removed_area_mm2
+                        ))
+                        .size(14.0)
+                        .color(Color32::from_gray(170)),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}/{} layers changed",
+                            t.layers_changed, t.layers_total
+                        ))
+                        .size(14.0)
+                        .strong(),
+                    );
+                });
             });
+            ui.add_space(4.0);
+            // Controls row: larger hit targets than the egui default.
             ui.horizontal(|ui| {
+                ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
                 ui.selectable_value(&mut self.mode, Mode::Overlay, "Overlay");
                 ui.selectable_value(&mut self.mode, Mode::Before, "Before");
                 ui.selectable_value(&mut self.mode, Mode::After, "After");
@@ -446,13 +534,8 @@ impl eframe::App for ViewApp {
                     "Drop diff regions smaller than this as noise; 0 = off. \
                      The hidden count is shown in the canvas caption.",
                 );
-                ui.separator();
-                ui.label("drag = pan · scroll = zoom · ↑↓ layer · O/B/A view · S base · F fit")
-                    .on_hover_text(
-                        "Keys: ↑/↓ (or J/K) cycle layers · O/B/A switch Overlay/Before/After · \
-                         S toggle base · F fit to view",
-                    );
             });
+            ui.add_space(2.0);
             // Trust warnings (e.g. revisions exported with mismatched units/precision).
             for w in &self.diff.report.warnings {
                 ui.horizontal_wrapped(|ui| {
