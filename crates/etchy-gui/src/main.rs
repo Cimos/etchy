@@ -231,6 +231,10 @@ struct ViewApp {
     warning_expanded: bool,
     /// `ctx.input().time` when the warning was first shown / last re-expanded.
     warning_shown_at: Option<f64>,
+    /// Index of the board-outline layer (Edge.Cuts/GKO), drawn faintly on every
+    /// layer for orientation (G10); None if the board has no outline layer.
+    outline: Option<usize>,
+    show_outline: bool,
 }
 
 impl ViewApp {
@@ -238,6 +242,7 @@ impl ViewApp {
         let mut order: Vec<usize> = (0..diff.layers.len()).collect();
         order.sort_by_key(|&i| !diff.layers[i].is_changed()); // changed first, stable
         let selected = order.first().copied().unwrap_or(0);
+        let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
         Self {
             diff,
             old_label,
@@ -253,6 +258,8 @@ impl ViewApp {
             logo: None,
             warning_expanded: true,
             warning_shown_at: None,
+            outline,
+            show_outline: true,
         }
     }
 
@@ -490,6 +497,18 @@ fn warning_phase(
     }
 }
 
+/// Index of the board-outline layer (first `LayerKind::Outline`), if any (G10).
+/// Takes a count + kind accessor so it's testable without building `LayerView`s.
+fn pick_outline_index(n: usize, kind_of: impl Fn(usize) -> etchy_core::LayerKind) -> Option<usize> {
+    (0..n).find(|&i| kind_of(i) == etchy_core::LayerKind::Outline)
+}
+
+/// Whether to show the "board edge" legend row: only when the outline is enabled,
+/// exists, and isn't the layer currently being viewed (G10).
+fn outline_legend_visible(show_outline: bool, outline: Option<usize>, selected: usize) -> bool {
+    show_outline && outline.is_some_and(|i| i != selected)
+}
+
 // Brand palette (assets/brand/README.md): diff accents + board-dark canvas.
 const C_ADDED: Color32 = Color32::from_rgb(0x46, 0xd1, 0x8a); // #46d18a
 const C_REMOVED: Color32 = Color32::from_rgb(0xff, 0x5d, 0x73); // #ff5d73
@@ -500,6 +519,9 @@ const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
 const C_COPPER: Color32 = Color32::from_rgb(0xe8, 0xa3, 0x3d); // #e8a33d
 /// Brand paper-cream text.
 const C_CREAM: Color32 = Color32::from_rgb(0xf4, 0xf1, 0xe8); // #f4f1e8
+/// Faint copper for the board-outline reference on every layer (G10) — reads as
+/// chrome, not diff content. Premultiply-safe via from_rgba_unmultiplied.
+const C_OUTLINE_FAINT: Color32 = Color32::from_rgba_premultiplied(0x38, 0x27, 0x0e, 0x3c);
 
 /// The etchy egui theme: board-dark panels, copper accents on selection/hover (G7c).
 fn brand_visuals() -> egui::Visuals {
@@ -530,20 +552,25 @@ impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
         // lives in the host HTML), so these are always safe to read.
-        let (toggle_base, fit, overlay, before, after, next, prev) = ui.input(|i| {
-            use egui::Key;
-            (
-                i.key_pressed(Key::S),
-                i.key_pressed(Key::F),
-                i.key_pressed(Key::O),
-                i.key_pressed(Key::B),
-                i.key_pressed(Key::A),
-                i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
-                i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
-            )
-        });
+        let (toggle_base, fit, overlay, before, after, next, prev, toggle_outline) =
+            ui.input(|i| {
+                use egui::Key;
+                (
+                    i.key_pressed(Key::S),
+                    i.key_pressed(Key::F),
+                    i.key_pressed(Key::O),
+                    i.key_pressed(Key::B),
+                    i.key_pressed(Key::A),
+                    i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
+                    i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
+                    i.key_pressed(Key::E),
+                )
+            });
         if toggle_base {
             self.show_base = !self.show_base;
+        }
+        if toggle_outline {
+            self.show_outline = !self.show_outline;
         }
         if fit {
             self.cam.fitted = false;
@@ -626,6 +653,11 @@ impl eframe::App for ViewApp {
                 ui.selectable_value(&mut self.mode, Mode::After, "After");
                 ui.separator();
                 ui.checkbox(&mut self.show_base, "show base");
+                if self.outline.is_some() {
+                    ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
+                        "Show the board outline (Edge.Cuts/GKO) as a faint reference on every layer.",
+                    );
+                }
                 if ui.button("Fit").clicked() {
                     self.cam.fitted = false;
                 }
@@ -759,6 +791,20 @@ impl ViewApp {
             }
         };
 
+        // Board outline first (underneath everything), faint, on every layer for
+        // orientation — skipped when the outline layer is the one being viewed (G10).
+        if let Some(oi) = self.outline {
+            if self.show_outline && oi != self.selected {
+                let lo = &self.diff.layers[oi];
+                let set = if !lo.new.shapes.is_empty() {
+                    &lo.new
+                } else {
+                    &lo.old
+                };
+                push(set, C_OUTLINE_FAINT);
+            }
+        }
+
         self.last_hidden = 0;
         match self.mode {
             Mode::Before => push(&layer.old, C_BASE),
@@ -817,7 +863,9 @@ impl ViewApp {
             Color32::from_gray(200),
         );
         if self.mode == Mode::Overlay {
-            legend(&painter, rect);
+            let outline_row =
+                outline_legend_visible(self.show_outline, self.outline, self.selected);
+            legend(&painter, rect, outline_row);
         }
 
         // Keep a border.
@@ -897,9 +945,13 @@ fn accumulate_diff(
     }
 }
 
-fn legend(painter: &egui::Painter, rect: Rect) {
+fn legend(painter: &egui::Painter, rect: Rect, outline_row: bool) {
     let mut y = rect.right_top() + egui::vec2(-150.0, 8.0);
-    for (c, txt) in [(C_ADDED, "added"), (C_REMOVED, "removed")] {
+    let mut rows = vec![(C_ADDED, "added"), (C_REMOVED, "removed")];
+    if outline_row {
+        rows.push((C_OUTLINE_FAINT, "board edge"));
+    }
+    for (c, txt) in rows {
         painter.rect_filled(Rect::from_min_size(y, egui::vec2(12.0, 12.0)), 2.0, c);
         painter.text(
             y + egui::vec2(18.0, 6.0),
@@ -998,10 +1050,32 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        group_layers, layer_group, short_layer_name, step_in_order, warning_phase, LayerGroup,
-        WarningPhase,
+        group_layers, layer_group, outline_legend_visible, pick_outline_index, short_layer_name,
+        step_in_order, warning_phase, LayerGroup, WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn pick_outline_index_finds_the_first_outline_layer() {
+        let kinds = [
+            LayerKind::TopCopper,
+            LayerKind::Outline,
+            LayerKind::BottomCopper,
+            LayerKind::Outline,
+        ];
+        assert_eq!(pick_outline_index(kinds.len(), |i| kinds[i]), Some(1));
+        let none = [LayerKind::TopCopper, LayerKind::BottomCopper];
+        assert_eq!(pick_outline_index(none.len(), |i| none[i]), None);
+        assert_eq!(pick_outline_index(0, |_| LayerKind::Outline), None);
+    }
+
+    #[test]
+    fn outline_legend_visible_only_when_shown_and_not_selected() {
+        assert!(outline_legend_visible(true, Some(2), 1)); // shown, different layer
+        assert!(!outline_legend_visible(true, Some(2), 2)); // viewing the outline itself
+        assert!(!outline_legend_visible(false, Some(2), 1)); // hidden
+        assert!(!outline_legend_visible(true, None, 1)); // no outline layer
+    }
 
     #[test]
     fn warning_phase_auto_hides_after_the_window() {
