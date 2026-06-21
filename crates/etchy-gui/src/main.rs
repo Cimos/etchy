@@ -296,6 +296,21 @@ impl LayerGroup {
     }
 }
 
+/// Short layer label for the grouped list: just the position within its section
+/// (the section header already names the category), e.g. `top`, `bottom`,
+/// `inner 2`. The CLI keeps the full `top-copper` form via `LayerView::name`.
+fn short_layer_name(kind: etchy_core::LayerKind) -> String {
+    use etchy_core::LayerKind::*;
+    match kind {
+        TopCopper | TopMask | TopSilk | TopPaste => "top".to_string(),
+        BottomCopper | BottomMask | BottomSilk | BottomPaste => "bottom".to_string(),
+        InnerCopper(n) => format!("inner {n}"),
+        Drill => "drill".to_string(),
+        Outline => "outline".to_string(),
+        Other => "other".to_string(),
+    }
+}
+
 /// Which section a layer kind belongs to.
 fn layer_group(kind: etchy_core::LayerKind) -> LayerGroup {
     use etchy_core::LayerKind::*;
@@ -475,10 +490,11 @@ impl eframe::App for ViewApp {
                             // Just the layer name — no per-layer figures (#7) and no
                             // status glyph (#11; ●/○ render as tofu in the web font).
                             // Changed layers read strong, unchanged are dimmed.
+                            let name = short_layer_name(l.kind);
                             let label = if l.is_changed() {
-                                egui::RichText::new(l.name()).strong()
+                                egui::RichText::new(name).strong()
                             } else {
-                                egui::RichText::new(l.name()).weak()
+                                egui::RichText::new(name).weak()
                             };
                             if ui.selectable_label(idx == self.selected, label).clicked() {
                                 self.select(idx);
@@ -801,8 +817,18 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{group_layers, layer_group, step_in_order, LayerGroup};
+    use super::{group_layers, layer_group, short_layer_name, step_in_order, LayerGroup};
     use etchy_core::LayerKind;
+
+    #[test]
+    fn short_layer_name_drops_the_group_suffix() {
+        // With section headers, the row only needs the position within the group.
+        assert_eq!(short_layer_name(LayerKind::TopCopper), "top");
+        assert_eq!(short_layer_name(LayerKind::BottomMask), "bottom");
+        assert_eq!(short_layer_name(LayerKind::InnerCopper(2)), "inner 2");
+        assert_eq!(short_layer_name(LayerKind::Drill), "drill");
+        assert_eq!(short_layer_name(LayerKind::Other), "other");
+    }
 
     #[test]
     fn layer_group_maps_kinds_to_sections() {
