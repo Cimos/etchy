@@ -12,6 +12,8 @@ touch `site/**` (expected — it goes green once Pages is enabled).
 - [ ] Set the repo **Social preview** image to `site/assets/brand/etchy-social-1280x640.png` (Settings → General).
 - [ ] Re-check the page copy matches the **actually-shipped** feature set at launch
       (shipped GUI viewer modes today: **Overlay / Before / After** — everything else stays on the roadmap).
+      Specifically: `site/docs.html` Viewer section currently lists `split` / `swipe` / `onion`,
+      which are NOT shipped — trim them to the shipped set before going public.
 - [ ] If a custom domain is used instead of `cimos.github.io/etchy/`: add `site/CNAME`
       and update the absolute `og:url` / `og:image` base in `site/index.html`.
 
