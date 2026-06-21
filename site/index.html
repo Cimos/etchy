@@ -160,11 +160,14 @@
         <div class="term-body">
           <div><span class="pr">$</span> <span class="cmd">etchy revA/ revB/</span></div>
           <div class="out">&nbsp;</div>
-          <div class="out">resolving 16 copper layers … ok</div>
-          <div class="out">diffing geometry … done in 0.9s</div>
+          <div class="out">resolving 4 copper layers … ok</div>
           <div class="out">&nbsp;</div>
-          <div><span class="add">+ 4 regions added</span>&nbsp;&nbsp;<span class="rem">- 1 region removed</span></div>
-          <div class="out">→ report.html · overlay.svg · diff.json</div>
+          <div class="out">layer           status    +mm²    -mm²</div>
+          <div>top-copper      <span class="add">changed</span>   19.60    0.00</div>
+          <div>inner1-copper   <span class="rem">changed</span>    0.00   19.60</div>
+          <div class="out">&nbsp;</div>
+          <div>2 of 4 layers changed · <span class="add">+19.6</span> / <span class="rem">-19.6</span> mm²</div>
+          <div><span class="pr">$</span> <span class="cmd">etchy revA/ revB/ --json &gt; diff.json</span></div>
         </div>
       </div>
       <div class="hp-view hp-gui-view">
@@ -194,7 +197,7 @@
     <span class="label">What it does</span>
     <div class="cards">
       <div class="card"><div class="ic copper">◳</div><h3>See what changed</h3><p>Highlights every added and removed feature on each layer, then measures it — changed area and region count.</p></div>
-      <div class="card"><div class="ic copper">⎙</div><h3>See it &amp; export it</h3><p>Native desktop viewer with overlay, before, and after modes. Exports a self-contained HTML report, standalone SVGs, and machine-readable JSON.</p></div>
+      <div class="card"><div class="ic copper">⎙</div><h3>See it &amp; measure it</h3><p>The CLI prints a per-layer summary — changed area and region counts — plus a JSON report for CI. The native viewer shows the diff in overlay, before, and after.</p></div>
       <div class="card"><div class="ic copper">✓</div><h3>Same-board only</h3><p>Compares two revisions of the same board on absolute coordinates — no auto-aligning. If the boards don't match, it errors instead of showing a wrong diff.</p></div>
     </div>
   </section>
@@ -229,7 +232,8 @@
 cargo install etchy
 <span class="out"># …or grab a static binary from Releases</span>
 
-etchy old/ new/   <span class="out"># → report.html · overlay.svg · diff.json</span></pre>
+etchy old/ new/            <span class="out"># per-layer summary</span>
+etchy old/ new/ --json     <span class="out"># machine-readable, for CI</span></pre>
       </div>
       <div class="getcard">
         <div class="label" style="margin-bottom:10px">Gate a PR in CI</div>
