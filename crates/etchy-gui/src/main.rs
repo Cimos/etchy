@@ -1020,14 +1020,16 @@ impl ViewApp {
             // Side-by-side: old (left) and new (right) halves, one shared camera,
             // each clipped to its half so geometry can't bleed past the divider (G4).
             let (lr, rr, div_x) = split_rects(rect, 0.5, 6.0);
-            let (mut ln, mut rn) = (0usize, 0usize);
+            // One mesh per side (not per item) → a single clipped draw per half,
+            // matching the smooth non-split path instead of a painter per item.
+            let mut lmesh = egui::epaint::Mesh::default();
+            let mut rmesh = egui::epaint::Mesh::default();
             for item in &cache.items {
-                let (target, count) = match item.side {
-                    Side::Left => (lr, &mut ln),
-                    Side::Right => (rr, &mut rn),
+                let (target, mesh) = match item.side {
+                    Side::Left => (lr, &mut lmesh),
+                    Side::Right => (rr, &mut rmesh),
                     Side::Full => continue,
                 };
-                let mut mesh = egui::epaint::Mesh::default();
                 for tri in &item.tris {
                     let b = mesh.vertices.len() as u32;
                     for &p in tri {
@@ -1039,10 +1041,13 @@ impl ViewApp {
                     }
                     mesh.indices.extend_from_slice(&[b, b + 1, b + 2]);
                 }
-                if !mesh.is_empty() {
-                    *count += 1;
-                    painter.with_clip_rect(target).add(Shape::from(mesh));
-                }
+            }
+            let (ln, rn) = (lmesh.vertices.len(), rmesh.vertices.len());
+            if !lmesh.is_empty() {
+                painter.with_clip_rect(lr).add(Shape::from(lmesh));
+            }
+            if !rmesh.is_empty() {
+                painter.with_clip_rect(rr).add(Shape::from(rmesh));
             }
             painter.line_segment(
                 [
