@@ -32,6 +32,9 @@
   .brand b{font-family:"Zilla Slab";font-weight:700;font-size:18px}
   .barnav{display:flex;gap:18px;font-size:13px;color:var(--muted);flex-wrap:wrap;justify-content:flex-end}
   .barnav a{color:var(--muted)} .barnav a:hover{color:var(--copper-1);text-decoration:none}
+  .barnav a.home{color:#1a1206;background:linear-gradient(135deg,var(--copper-1),var(--copper-3));border-radius:7px;padding:4px 12px;font-weight:700}
+  .barnav a.home:hover{filter:brightness(1.06);color:#1a1206}
+  .brand{cursor:pointer} .brand:hover b{text-decoration:underline}
   .lead{padding:40px 0 8px}
   .lead h1{font-size:40px;margin:0 0 8px}
   .lead p{color:var(--muted);font-size:16px;margin:0;max-width:60ch}
@@ -66,7 +69,7 @@
       <a class="hide" href="#how">How it works</a>
       <a class="hide" href="#json">JSON</a>
       <a class="hide" href="#trust">Trust</a>
-      <a href="index.html">← Home</a>
+      <a class="home" href="index.html">← Home</a>
       <a href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
@@ -90,14 +93,29 @@
   <section id="install">
     <span class="eyebrow">Install</span>
     <h2>Install <span class="soon">at first release</span></h2>
-    <p>etchy ships as small static binaries and a distroless container. Until the first release, build from source.</p>
-    <pre class="code"><span class="c"># at first release</span>
-cargo install etchy
-<span class="c"># …or download a static binary from GitHub Releases</span>
+    <p>etchy ships as a single self-contained binary per OS, a Cargo crate, and a distroless container — pick your platform. (Distribution lands with the first release; the commands below are the planned form.)</p>
 
-<span class="c"># from source today</span>
-git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy
-cargo build --release    <span class="c"># binary at target/release/etchy</span></pre>
+    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Linux</h3>
+    <pre class="code"><span class="c"># static musl binary — no runtime to install</span>
+curl -L https://github.com/Cimos/etchy/releases/latest/download/etchy-x86_64-unknown-linux-musl -o etchy
+chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre>
+
+    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">macOS</h3>
+    <pre class="code"><span class="c"># Apple Silicon (use x86_64-apple-darwin on Intel)</span>
+curl -L https://github.com/Cimos/etchy/releases/latest/download/etchy-aarch64-apple-darwin -o etchy
+chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre>
+
+    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Windows</h3>
+    <pre class="code"><span class="c"># PowerShell — download etchy.exe, then add it to your PATH</span>
+Invoke-WebRequest https://github.com/Cimos/etchy/releases/latest/download/etchy-x86_64-pc-windows-msvc.exe -OutFile etchy.exe</pre>
+
+    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Any OS — Cargo</h3>
+    <pre class="code">cargo install etchy</pre>
+
+    <h3 style="font-size:15px;margin:20px 0 6px;color:var(--copper-2)">Container</h3>
+    <pre class="code">docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy /work/old /work/new</pre>
+
+    <p>Build from source today: <code class="inline">git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy &amp;&amp; cargo build --release</code> → <code class="inline">target/release/etchy</code>.</p>
   </section>
 
   <section id="cli">
@@ -114,12 +132,12 @@ inner-copper1    <span class="rem">changed</span>       0.00000     19.60342    
 …
 2 of 22 layer(s) changed; total <span class="add">+19.60</span> / <span class="rem">-19.60</span> mm² (100+/100-)
 result: differences found</pre>
-    <p><strong>Exit codes</strong> — designed for CI:</p>
+    <p><strong>Exit codes</strong> — designed for CI. These three are the whole contract:</p>
     <table>
       <tr><th>Code</th><th>Meaning</th></tr>
-      <tr><td><code>0</code></td><td>No differences</td></tr>
-      <tr><td><code>1</code></td><td>Differences found</td></tr>
-      <tr><td><code>2</code></td><td>Error (e.g. boards aren't the same revision)</td></tr>
+      <tr><td><code>0</code></td><td>No differences — the two revisions are identical</td></tr>
+      <tr><td><code>1</code></td><td>Differences found — the revisions differ (the normal “what changed” result)</td></tr>
+      <tr><td><code>2</code></td><td>Error — a comparison couldn't be made: the inputs aren't the <strong>same board</strong> (extents mismatch — etchy compares revisions of one board, not two different boards), a layer failed to parse, or files are missing</td></tr>
     </table>
   </section>
 
