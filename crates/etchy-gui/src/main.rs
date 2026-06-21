@@ -283,9 +283,6 @@ const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
 // fixed dot (the old blob/all-green-when-zoomed-out bug).
 const LOD_LO_PX: f32 = 1.5;
 const LOD_HI_PX: f32 = 5.0;
-/// Screen-space heatmap cell size (px). Sub-pixel changes deposit a density glow
-/// here so a changed region stays visible without any single feature growing.
-const HEAT_CELL_PX: f32 = 14.0;
 /// Default min-area threshold (mm²). Diff regions smaller than this are treated
 /// as noise (e.g. the sub-µm rims from a units/precision mismatch) and dropped —
 /// but the count is always surfaced in the caption, never silently.
@@ -485,41 +482,19 @@ impl ViewApp {
                     let faint = Color32::from_rgba_unmultiplied(90, 95, 105, 90);
                     push(&layer.new, faint);
                 }
-                // Diff: true-to-scale features + a density heatmap for the sub-pixel
-                // ones, with an (always-surfaced) min-area noise threshold (G9).
+                // Diff: features drawn true-to-scale, fading to nothing as they go
+                // sub-pixel (no fixed-dot clamp), with an always-surfaced min-area
+                // noise threshold (G9).
                 let min_area_nm2 = if self.threshold_on {
                     MIN_AREA_MM2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64
                 } else {
                     0.0
                 };
-                let mut heat = lod::HeatGrid::new(
-                    (rect.left(), rect.top()),
-                    rect.width(),
-                    rect.height(),
-                    HEAT_CELL_PX,
-                );
-                let mut diff_geo: Vec<Shape> = Vec::new();
                 let mut hidden = 0usize;
-                for (set, fill, is_added) in [
-                    (&layer.removed, C_REMOVED, false),
-                    (&layer.added, C_ADDED, true),
-                ] {
-                    accumulate_diff(
-                        &mut diff_geo,
-                        &mut heat,
-                        &mut hidden,
-                        set,
-                        fill,
-                        is_added,
-                        cam,
-                        rect,
-                        min_area_nm2,
-                    );
+                for (set, fill) in [(&layer.removed, C_REMOVED), (&layer.added, C_ADDED)] {
+                    accumulate_diff(&mut shapes, &mut hidden, set, fill, cam, rect, min_area_nm2);
                 }
                 self.last_hidden = hidden;
-                // Heatmap underneath (the zoomed-out glow), real geometry on top.
-                push_heat(&mut shapes, &heat);
-                shapes.extend(diff_geo);
             }
         }
         let n = shapes.len();
@@ -604,17 +579,14 @@ fn with_alpha(c: Color32, a: f32) -> Color32 {
 }
 
 /// Draw a diff set with level-of-detail (G9): a feature at/above [`LOD_HI_PX`] is
-/// opaque geometry; below [`LOD_LO_PX`] it fades out and instead deposits density
-/// into `heat`; in between it cross-fades. Regions below `min_area_nm2` are dropped
-/// as noise and counted into `hidden`.
-#[allow(clippy::too_many_arguments)]
+/// opaque geometry, fading linearly to nothing by [`LOD_LO_PX`] so tiny changes
+/// disappear as you zoom out instead of clamping to a fixed dot. Regions below
+/// `min_area_nm2` are dropped as noise and counted into `hidden`.
 fn accumulate_diff(
     out: &mut Vec<Shape>,
-    heat: &mut lod::HeatGrid,
     hidden: &mut usize,
     set: &PolygonSet,
     fill: Color32,
-    is_added: bool,
     cam: &Camera,
     rect: Rect,
     min_area_nm2: f64,
@@ -637,36 +609,11 @@ fn accumulate_diff(
         }
         let px = ((bb[2] - bb[0]).max(bb[3] - bb[1]) as f64 * cam.scale) as f32;
         let alpha = lod::geometry_alpha(px, LOD_LO_PX, LOD_HI_PX);
-        if alpha < 1.0 {
-            let center = Pt::new((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2);
-            let c = world_to_screen(cam, center, rect);
-            heat.add((c.x, c.y), 1.0 - alpha, is_added);
-        }
         if alpha > 0.0 {
             if let Some(mesh) = mesh_for(shape, with_alpha(fill, alpha), cam, rect) {
                 out.push(Shape::from(mesh));
             }
         }
-    }
-}
-
-/// Render the density grid as soft green/red glow blobs — one per non-empty cell,
-/// brighter where changes cluster. Drawn under the real geometry so that, zoomed
-/// out, a changed region still glows without any single feature growing into a dot.
-fn push_heat(out: &mut Vec<Shape>, heat: &lod::HeatGrid) {
-    let max = heat.max();
-    if max <= 0.0 {
-        return;
-    }
-    let cs = heat.cell_size();
-    let r = cs * 0.75; // overlap neighbours slightly for a smooth field
-    for (col, row, added, removed) in heat.cells() {
-        let inten = ((added + removed) / max).clamp(0.0, 1.0);
-        let alpha = (0.18 + 0.5 * inten).min(0.7); // faint floor, brighter where dense
-        let base = if added >= removed { C_ADDED } else { C_REMOVED };
-        let (ox, oy) = heat.cell_origin(col, row);
-        let center = Pos2::new(ox + cs * 0.5, oy + cs * 0.5);
-        out.push(Shape::circle_filled(center, r, with_alpha(base, alpha)));
     }
 }
 
