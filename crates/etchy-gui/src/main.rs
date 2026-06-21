@@ -8,6 +8,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod loader;
+mod lod;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
@@ -214,6 +215,11 @@ struct ViewApp {
     selected: usize,   // index into diff.layers
     mode: Mode,
     show_base: bool,
+    /// Drop diff regions below the min-area threshold (noise filter, G9). Always
+    /// surfaced: the canvas caption reports how many were hidden.
+    threshold_on: bool,
+    /// Regions hidden by the threshold last frame, for the caption.
+    last_hidden: usize,
     cam: Camera,
 }
 
@@ -230,6 +236,8 @@ impl ViewApp {
             selected,
             mode: Mode::Overlay,
             show_base: false,
+            threshold_on: true,
+            last_hidden: 0,
             cam: Camera::default(),
         }
     }
@@ -269,17 +277,25 @@ const C_BASE: Color32 = Color32::from_rgb(90, 95, 105);
 /// Brand "board dark" — the canvas background.
 const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
 
-/// A changed region smaller than this many screen pixels is drawn as one crisp
-/// marker dot instead of its (sub-pixel, aliasing) real geometry.
-const MIN_FEATURE_PX: f32 = 3.0;
-/// Radius (px) of that marker dot.
-const MARKER_R: f32 = 3.0;
+// Level-of-detail (G9). Diff features are drawn true-to-scale: at/above
+// LOD_HI_PX they're fully opaque geometry, at/below LOD_LO_PX they vanish into
+// the heatmap, linear between. So tiny changes fade out instead of clamping to a
+// fixed dot (the old blob/all-green-when-zoomed-out bug).
+const LOD_LO_PX: f32 = 1.5;
+const LOD_HI_PX: f32 = 5.0;
+/// Screen-space heatmap cell size (px). Sub-pixel changes deposit a density glow
+/// here so a changed region stays visible without any single feature growing.
+const HEAT_CELL_PX: f32 = 14.0;
+/// Default min-area threshold (mm²). Diff regions smaller than this are treated
+/// as noise (e.g. the sub-µm rims from a units/precision mismatch) and dropped —
+/// but the count is always surfaced in the caption, never silently.
+const MIN_AREA_MM2: f64 = 0.0004;
 
 impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
         // lives in the host HTML), so these are always safe to read.
-        let (toggle_base, fit, overlay, before, after, next, prev) = ui.input(|i| {
+        let (toggle_base, fit, overlay, before, after, next, prev, toggle_thresh) = ui.input(|i| {
             use egui::Key;
             (
                 i.key_pressed(Key::S),
@@ -289,10 +305,14 @@ impl eframe::App for ViewApp {
                 i.key_pressed(Key::A),
                 i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
                 i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
+                i.key_pressed(Key::T),
             )
         });
         if toggle_base {
             self.show_base = !self.show_base;
+        }
+        if toggle_thresh {
+            self.threshold_on = !self.threshold_on;
         }
         if fit {
             self.cam.fitted = false;
@@ -437,67 +457,69 @@ impl ViewApp {
         // Build the shapes to draw, per mode.
         let mut shapes: Vec<Shape> = Vec::new();
         let cam = &self.cam;
-        // Render each shape as a filled mesh from our own concave-correct
-        // triangulation. We deliberately do NOT use egui's path stroke for an
-        // outline: its miter join extrudes each vertex by `normal / length_sq`,
+        // Base/context layers draw as solid filled meshes from our own concave-
+        // correct triangulation. We deliberately do NOT use egui's path stroke for
+        // an outline: its miter join extrudes each vertex by `normal / length_sq`,
         // which explodes at the ~0° tips that boolean-diff crescents always have,
         // flinging stroke vertices clear across the board (the "green lines"). The
         // filled mesh alone shows the shape correctly and can't spike.
-        //
-        // `marker` shapes (the diff) additionally collapse to a single fixed dot
-        // when they'd be sub-pixel on screen, so changes stay visible (and don't
-        // alias into red/green speckle) when zoomed out.
-        let mut push = |set: &PolygonSet, fill: Color32, marker: bool| {
+        let mut push = |set: &PolygonSet, fill: Color32| {
             for shape in &set.shapes {
                 let Some(outer) = shape.first() else { continue };
                 if outer.len() < 3 {
                     continue;
                 }
-                if marker {
-                    let mut bb = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
-                    for p in outer {
-                        bb[0] = bb[0].min(p.x);
-                        bb[1] = bb[1].min(p.y);
-                        bb[2] = bb[2].max(p.x);
-                        bb[3] = bb[3].max(p.y);
-                    }
-                    let px = ((bb[2] - bb[0]).max(bb[3] - bb[1]) as f64 * cam.scale) as f32;
-                    if px < MIN_FEATURE_PX {
-                        let center = Pt::new((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2);
-                        let c = world_to_screen(cam, center, rect);
-                        shapes.push(Shape::circle_filled(c, MARKER_R, fill));
-                        continue;
-                    }
-                }
-                let mut mesh = egui::epaint::Mesh::default();
-                for tri in etchy_core::triangulate_shape(shape) {
-                    let base = mesh.vertices.len() as u32;
-                    for p in tri {
-                        mesh.vertices.push(egui::epaint::Vertex {
-                            pos: world_to_screen(cam, p, rect),
-                            uv: egui::epaint::WHITE_UV,
-                            color: fill,
-                        });
-                    }
-                    mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
-                }
-                if !mesh.is_empty() {
+                if let Some(mesh) = mesh_for(shape, fill, cam, rect) {
                     shapes.push(Shape::from(mesh));
                 }
             }
         };
 
+        self.last_hidden = 0;
         match self.mode {
-            Mode::Before => push(&layer.old, C_BASE, false),
-            Mode::After => push(&layer.new, C_BASE, false),
+            Mode::Before => push(&layer.old, C_BASE),
+            Mode::After => push(&layer.new, C_BASE),
             Mode::Overlay => {
                 if self.show_base {
                     // Draw the unchanged base (the new layer) faintly behind the diff.
                     let faint = Color32::from_rgba_unmultiplied(90, 95, 105, 90);
-                    push(&layer.new, faint, false);
+                    push(&layer.new, faint);
                 }
-                push(&layer.removed, C_REMOVED, true);
-                push(&layer.added, C_ADDED, true);
+                // Diff: true-to-scale features + a density heatmap for the sub-pixel
+                // ones, with an (always-surfaced) min-area noise threshold (G9).
+                let min_area_nm2 = if self.threshold_on {
+                    MIN_AREA_MM2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64
+                } else {
+                    0.0
+                };
+                let mut heat = lod::HeatGrid::new(
+                    (rect.left(), rect.top()),
+                    rect.width(),
+                    rect.height(),
+                    HEAT_CELL_PX,
+                );
+                let mut diff_geo: Vec<Shape> = Vec::new();
+                let mut hidden = 0usize;
+                for (set, fill, is_added) in [
+                    (&layer.removed, C_REMOVED, false),
+                    (&layer.added, C_ADDED, true),
+                ] {
+                    accumulate_diff(
+                        &mut diff_geo,
+                        &mut heat,
+                        &mut hidden,
+                        set,
+                        fill,
+                        is_added,
+                        cam,
+                        rect,
+                        min_area_nm2,
+                    );
+                }
+                self.last_hidden = hidden;
+                // Heatmap underneath (the zoomed-out glow), real geometry on top.
+                push_heat(&mut shapes, &heat);
+                shapes.extend(diff_geo);
             }
         }
         let n = shapes.len();
@@ -515,13 +537,23 @@ impl ViewApp {
         }
 
         // Per-layer caption + a tiny legend.
-        let cap = format!(
+        let mut cap = format!(
             "{}  —  {}   (+{} / −{} regions)",
             layer.name(),
             status_str(layer.status),
             layer.change.added_region_count,
             layer.change.removed_region_count,
         );
+        if self.mode == Mode::Overlay {
+            if self.threshold_on && self.last_hidden > 0 {
+                cap.push_str(&format!(
+                    "   ·   {} hidden < {} mm² (T to show)",
+                    self.last_hidden, MIN_AREA_MM2
+                ));
+            } else if !self.threshold_on {
+                cap.push_str("   ·   threshold off (T)");
+            }
+        }
         painter.text(
             rect.left_top() + egui::vec2(8.0, 8.0),
             egui::Align2::LEFT_TOP,
@@ -540,6 +572,101 @@ impl ViewApp {
             Stroke::new(1.0, Color32::from_gray(60)),
             StrokeKind::Inside,
         );
+    }
+}
+
+/// Triangulate one shape into a screen-space egui mesh tinted `fill`. None if it
+/// yields no triangles.
+fn mesh_for(
+    shape: &etchy_core::Shape,
+    fill: Color32,
+    cam: &Camera,
+    rect: Rect,
+) -> Option<egui::epaint::Mesh> {
+    let mut mesh = egui::epaint::Mesh::default();
+    for tri in etchy_core::triangulate_shape(shape) {
+        let base = mesh.vertices.len() as u32;
+        for p in tri {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: world_to_screen(cam, p, rect),
+                uv: egui::epaint::WHITE_UV,
+                color: fill,
+            });
+        }
+        mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    (!mesh.is_empty()).then_some(mesh)
+}
+
+/// Scale a colour's opacity by `a` (clamped to [0,1]).
+fn with_alpha(c: Color32, a: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+/// Draw a diff set with level-of-detail (G9): a feature at/above [`LOD_HI_PX`] is
+/// opaque geometry; below [`LOD_LO_PX`] it fades out and instead deposits density
+/// into `heat`; in between it cross-fades. Regions below `min_area_nm2` are dropped
+/// as noise and counted into `hidden`.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_diff(
+    out: &mut Vec<Shape>,
+    heat: &mut lod::HeatGrid,
+    hidden: &mut usize,
+    set: &PolygonSet,
+    fill: Color32,
+    is_added: bool,
+    cam: &Camera,
+    rect: Rect,
+    min_area_nm2: f64,
+) {
+    for shape in &set.shapes {
+        let Some(outer) = shape.first() else { continue };
+        if outer.len() < 3 {
+            continue;
+        }
+        if lod::ring_area_nm2(outer) < min_area_nm2 {
+            *hidden += 1;
+            continue;
+        }
+        let mut bb = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+        for p in outer {
+            bb[0] = bb[0].min(p.x);
+            bb[1] = bb[1].min(p.y);
+            bb[2] = bb[2].max(p.x);
+            bb[3] = bb[3].max(p.y);
+        }
+        let px = ((bb[2] - bb[0]).max(bb[3] - bb[1]) as f64 * cam.scale) as f32;
+        let alpha = lod::geometry_alpha(px, LOD_LO_PX, LOD_HI_PX);
+        if alpha < 1.0 {
+            let center = Pt::new((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2);
+            let c = world_to_screen(cam, center, rect);
+            heat.add((c.x, c.y), 1.0 - alpha, is_added);
+        }
+        if alpha > 0.0 {
+            if let Some(mesh) = mesh_for(shape, with_alpha(fill, alpha), cam, rect) {
+                out.push(Shape::from(mesh));
+            }
+        }
+    }
+}
+
+/// Render the density grid as soft green/red glow blobs — one per non-empty cell,
+/// brighter where changes cluster. Drawn under the real geometry so that, zoomed
+/// out, a changed region still glows without any single feature growing into a dot.
+fn push_heat(out: &mut Vec<Shape>, heat: &lod::HeatGrid) {
+    let max = heat.max();
+    if max <= 0.0 {
+        return;
+    }
+    let cs = heat.cell_size();
+    let r = cs * 0.75; // overlap neighbours slightly for a smooth field
+    for (col, row, added, removed) in heat.cells() {
+        let inten = ((added + removed) / max).clamp(0.0, 1.0);
+        let alpha = (0.18 + 0.5 * inten).min(0.7); // faint floor, brighter where dense
+        let base = if added >= removed { C_ADDED } else { C_REMOVED };
+        let (ox, oy) = heat.cell_origin(col, row);
+        let center = Pos2::new(ox + cs * 0.5, oy + cs * 0.5);
+        out.push(Shape::circle_filled(center, r, with_alpha(base, alpha)));
     }
 }
 
