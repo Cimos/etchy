@@ -44,11 +44,24 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
   verified live on the FMU pack. A surfaced sub-tolerance merge stays a possible
   later step; auto-align remains a non-goal.
 
-### G3 · Overlap visualization (#2, #8)
-- [ ] Added (green) + removed (red) overlap renders black/occluded; unchanged copper
-  invisible without "show base".
-- [ ] Per-layer colors + **user-configurable colors** (Altium-compare style); a
-  distinct overlap treatment; an always-available faint base. Ties to brand-theme.
+### G3 · Overlap visualization (#2, #8) — **DONE (base + colors)**
+- [x] Always-available faint base (Off/Faint/Strong, `S` cycles, default Faint) so
+  unchanged copper stays visible instead of being lost in black — the real #8 fix.
+- [x] User-configurable added/removed colors via a "Colors" popover (Altium-compare
+  style), default brand green/red. `base_alpha`/`cycle_base` pure + unit-tested.
+- Dropped from the design: an "overlap = added ∩ removed" treatment. The engine's
+  `added = B−A` / `removed = A−B` are disjoint by construction, so that set is always
+  empty — it was a non-problem. Per-layer color overrides deferred (global for now).
+
+### G1b · Auto-hide the units warning (#27) — **DONE**
+- [x] The warning shows briefly then collapses to a clickable copper "heads-up" chip;
+  click re-expands it as a floating overlay (no canvas reflow); auto-hides after
+  `AUTO_HIDE_SECS`. Never silently gone. Pure `warning_phase` kernel, wasm-safe timing.
+
+### G10 · Board outline on all layers (#24) — **DONE**
+- [x] Edge.Cuts/GKO outline drawn faintly under every layer for orientation; "board
+  edge" checkbox / `E` toggle; skipped when the outline layer itself is selected.
+  Pure `pick_outline_index`/`outline_legend_visible` + unit tests.
 
 ### G6 · Native viewer performance (#15, #17)
 - [ ] Native drag/scroll laggy; the wasm build is smooth.
