@@ -76,9 +76,18 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
 ### G7b · UI controls (#12, #13, #16)
 - [x] **#13** Hotkeys: `↑/↓` (or `J/K`) cycle layers · `O/B/A` switch view ·
   `S` toggle base · `F` fit. Pure `step_in_order()` for the cycling (unit-tested),
-  egui input glue for the rest; hint line lists the keys.
-- [ ] **#12** Pan X/Y with Ctrl / Shift + scroll. **#16** Golden etchy mark/wordmark
-  top-left (brand-theme).
+  egui input glue for the rest. (The on-canvas hint line was later dropped in G7c
+  as clutter — #23.)
+- [ ] **#12** Pan X/Y with Ctrl / Shift + scroll.
+
+### G7c · Top-bar layout + branding (#28, #16, #23) — **DONE**
+- [x] etchy egui theme (board-dark panels, copper accents on selection/hover).
+- [x] Logo + copper "etchy" wordmark top-left (#16). Logo image native-only
+  (`eframe::icon_data` isn't on wasm); web shows the wordmark.
+- [x] Title row = wordmark · revisions · changed-area totals; control row given
+  larger hit targets (#28). Dropped the cluttered keyboard-hint line (#23).
+- Backlog (from review): move the noise-filter slider into a future VSCode-style
+  settings menu (not a File/Edit menubar). Optional wasm logo via an image loader.
 
 ### G8 · Feedback-widget polish (#14)
 - [ ] Overlay/thumbnail doesn't settle while the user keeps interacting.
