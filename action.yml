@@ -38,17 +38,29 @@ runs:
       run: cargo build --release --quiet -p etchy-cli --manifest-path "${{ github.action_path }}/Cargo.toml"
     - id: run
       shell: bash
+      # Inputs are passed via env (NOT ${{ }} into the script) so a crafted value
+      # can't be expanded as shell — avoids GitHub Actions script injection.
+      env:
+        OLD_DIR: ${{ inputs.old }}
+        NEW_DIR: ${{ inputs.new }}
+        DO_COMMENT: ${{ inputs.comment }}
+        FAIL_ON_DIFF: ${{ inputs.fail-on-diff }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
+        set -euo pipefail
+        # Reject dash-leading paths so a value can't be smuggled in as an etchy flag.
+        case "$OLD_DIR" in -*) echo "invalid old dir: $OLD_DIR" >&2; exit 2;; esac
+        case "$NEW_DIR" in -*) echo "invalid new dir: $NEW_DIR" >&2; exit 2;; esac
+        etchy="${GITHUB_ACTION_PATH}/target/release/etchy"
         set +e
-        etchy="${{ github.action_path }}/target/release/etchy"
-        md="$("$etchy" --format md "${{ inputs.old }}" "${{ inputs.new }}")"
+        md="$("$etchy" --format md -- "$OLD_DIR" "$NEW_DIR")"
         code=$?
         set -e
         printf '%s\n' "$md" >> "$GITHUB_STEP_SUMMARY"
-        if [ "$code" -eq 2 ]; then echo "etchy errored"; exit 2; fi
+        [ "$code" -eq 2 ] && { echo "etchy errored" >&2; exit 2; }
         echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-        if [ "${{ inputs.comment }}" = "true" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
-          printf '%s\n' "$md" | gh pr comment "${{ github.event.pull_request.number }}" --edit-last --body-file - || \
-          printf '%s\n' "$md" | gh pr comment "${{ github.event.pull_request.number }}" --body-file -
+        if [ "$DO_COMMENT" = "true" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+          printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --edit-last --body-file - \
+            || printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --body-file -
         fi
-        if [ "${{ inputs.fail-on-diff }}" = "true" ] && [ "$code" -eq 1 ]; then exit 1; fi
+        [ "$FAIL_ON_DIFF" = "true" ] && [ "$code" -eq 1 ] && exit 1 || true
