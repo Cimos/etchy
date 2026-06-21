@@ -330,16 +330,31 @@ fn feature_thickness_nm(area_nm2: f64, extent_nm: i64) -> i64 {
 /// Default base/context colour for a layer by type, so flipping layers reads by
 /// colour (copper→copper-gold, silk→cream, mask→green, paste→grey…). Added/removed
 /// stay green/red — these only colour the unchanged base. Per-review re-scope.
-fn layer_type_color(kind: etchy_core::LayerKind) -> Color32 {
+fn layer_type_color(kind: etchy_core::LayerKind, theme: Theme) -> Color32 {
     use etchy_core::LayerKind::*;
-    match kind {
-        TopCopper | BottomCopper | InnerCopper(_) => C_COPPER,
-        TopSilk | BottomSilk => C_CREAM,
-        TopMask | BottomMask => Color32::from_rgb(0x2e, 0x7d, 0x4f), // soldermask green
-        TopPaste | BottomPaste => Color32::from_rgb(0xb4, 0xb4, 0xbe), // paste grey
-        Drill => Color32::from_rgb(0x7a, 0x8a, 0xa0),                // drill slate
-        Outline => C_COPPER,
-        Other => C_BASE,
+    // (dark, light) per family — light variants are darker so they read on a
+    // cream board (e.g. silk's cream would vanish on a light canvas) (#57).
+    let (dark, light) = match kind {
+        TopCopper | BottomCopper | InnerCopper(_) => (C_COPPER, C_COPPER),
+        TopSilk | BottomSilk => (C_CREAM, Color32::from_rgb(0x6b, 0x64, 0x56)),
+        TopMask | BottomMask => (
+            Color32::from_rgb(0x2e, 0x7d, 0x4f),
+            Color32::from_rgb(0x1f, 0x5c, 0x3a),
+        ),
+        TopPaste | BottomPaste => (
+            Color32::from_rgb(0xb4, 0xb4, 0xbe),
+            Color32::from_rgb(0x6b, 0x6f, 0x78),
+        ),
+        Drill => (
+            Color32::from_rgb(0x7a, 0x8a, 0xa0),
+            Color32::from_rgb(0x4a, 0x55, 0x68),
+        ),
+        Outline => (C_COPPER, C_COPPER),
+        Other => (C_BASE, Color32::from_rgb(0x6b, 0x72, 0x80)),
+    };
+    match theme {
+        Theme::Dark => dark,
+        Theme::Light => light,
     }
 }
 
@@ -361,12 +376,13 @@ fn present_layer_kinds(
 fn resolve_base_color(
     kind: etchy_core::LayerKind,
     overrides: &[(etchy_core::LayerKind, Color32)],
+    theme: Theme,
 ) -> Color32 {
     overrides
         .iter()
         .find(|(k, _)| *k == kind)
         .map(|(_, c)| *c)
-        .unwrap_or_else(|| layer_type_color(kind))
+        .unwrap_or_else(|| layer_type_color(kind, theme))
 }
 
 /// Which viewport a cached item draws into (G4 split). Full = the whole canvas
@@ -504,25 +520,18 @@ impl ViewApp {
             AUTO_HIDE_SECS,
         );
         let n = self.diff.report.warnings.len();
-        // Fixed-height slot + no hover/active expansion, so neither hovering nor
-        // expanding the chip ever changes the top panel's height (was shifting the
-        // whole canvas down on hover — the blocking reflow bug).
+        // No hover/active size change, so hovering the chip can't nudge the row.
         ui.visuals_mut().widgets.hovered.expansion = 0.0;
         ui.visuals_mut().widgets.active.expansion = 0.0;
+        // Inline chip in the controls row. ASCII "[!]" marker — egui's default font
+        // has no warning glyph (⚠ rendered as tofu). Click expands the overlay.
         let chip = ui
-            .allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.small_button(
-                        egui::RichText::new(format!("⚠ {}", warning_label(n)))
-                            .strong()
-                            .color(C_COPPER),
-                    )
-                    .on_hover_text(self.diff.report.warnings[0].as_str())
-                },
+            .small_button(
+                egui::RichText::new(format!("[!] {}", warning_label(n)))
+                    .strong()
+                    .color(C_COPPER),
             )
-            .inner;
+            .on_hover_text(self.diff.report.warnings[0].as_str());
         if chip.clicked() {
             self.warning_expanded = true;
             self.warning_shown_at = Some(now);
@@ -923,9 +932,14 @@ impl eframe::App for ViewApp {
                     self.cam.fitted = false;
                 }
                 ui.separator();
-                // Dark/light toggle (re-applied live by the visuals check in ui()).
-                let icon = if self.theme == Theme::Dark { "☾ dark" } else { "☀ light" };
-                if ui.button(icon).clicked() {
+                // Dark/light toggle. ASCII label — egui's default font has no
+                // sun/moon glyph (it rendered as tofu). Re-applied live in ui().
+                let label = if self.theme == Theme::Dark {
+                    "theme: dark"
+                } else {
+                    "theme: light"
+                };
+                if ui.button(label).clicked() {
                     self.theme = if self.theme == Theme::Dark {
                         Theme::Light
                     } else {
@@ -934,20 +948,21 @@ impl eframe::App for ViewApp {
                 }
                 ui.separator();
                 ui.add(
+                    // Linear range (user found the log feel odd — #52).
                     egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.02)
                         .text("noise filter (mm²)")
-                        .logarithmic(true)
                         .fixed_decimals(4),
                 )
                 .on_hover_text(
                     "Drop diff regions smaller than this as noise; 0 = off. \
                      The hidden count is shown in the canvas caption.",
                 );
+                ui.separator();
+                // Warning chip lives IN the controls row (no separate row that can
+                // reflow the canvas — #49). Overlay floats; ASCII glyph (no tofu).
+                let now = ui.ctx().input(|i| i.time);
+                self.warnings_ui(ui, now);
             });
-            ui.add_space(2.0);
-            // Trust warnings (e.g. mismatched units/precision) — auto-hiding chip (G1b).
-            let now = ui.ctx().input(|i| i.time);
-            self.warnings_ui(ui, now);
         });
 
         egui::Panel::left("layers")
@@ -1018,7 +1033,8 @@ impl eframe::App for ViewApp {
                     // One row per layer kind present on the board (#5/#10).
                     for kind in kinds {
                         ui.horizontal(|ui| {
-                            let mut base = resolve_base_color(kind, &self.base_overrides);
+                            let mut base =
+                                resolve_base_color(kind, &self.base_overrides, self.theme);
                             if ui.color_edit_button_srgba(&mut base).changed() {
                                 if let Some(e) =
                                     self.base_overrides.iter_mut().find(|(k, _)| *k == kind)
@@ -1145,8 +1161,11 @@ impl ViewApp {
         }
         let min_area_nm2 =
             self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
-        let base_color =
-            resolve_base_color(self.diff.layers[self.selected].kind, &self.base_overrides);
+        let base_color = resolve_base_color(
+            self.diff.layers[self.selected].kind,
+            &self.base_overrides,
+            self.theme,
+        );
         let cache = self.cache.as_ref().expect("cache built above");
         let n;
         if self.mode == Mode::Split {
@@ -1769,34 +1788,42 @@ mod tests {
 
     #[test]
     fn layer_type_color_is_distinct_per_family() {
-        use super::{layer_type_color, C_COPPER, C_CREAM};
-        assert_eq!(layer_type_color(LayerKind::TopCopper), C_COPPER);
-        assert_eq!(layer_type_color(LayerKind::InnerCopper(2)), C_COPPER);
-        assert_eq!(layer_type_color(LayerKind::BottomSilk), C_CREAM);
+        use super::{layer_type_color, Theme, C_COPPER, C_CREAM};
+        let d = Theme::Dark;
+        assert_eq!(layer_type_color(LayerKind::TopCopper, d), C_COPPER);
+        assert_eq!(layer_type_color(LayerKind::InnerCopper(2), d), C_COPPER);
+        assert_eq!(layer_type_color(LayerKind::BottomSilk, d), C_CREAM);
         // mask, paste, copper read as different families
         assert_ne!(
-            layer_type_color(LayerKind::TopMask),
-            layer_type_color(LayerKind::TopCopper)
+            layer_type_color(LayerKind::TopMask, d),
+            layer_type_color(LayerKind::TopCopper, d)
         );
         assert_ne!(
-            layer_type_color(LayerKind::TopPaste),
-            layer_type_color(LayerKind::TopMask)
+            layer_type_color(LayerKind::TopPaste, d),
+            layer_type_color(LayerKind::TopMask, d)
+        );
+        // light-mode silk is darker than dark-mode silk so it reads on a cream board
+        let lum = |c: egui::Color32| c.r() as u16 + c.g() as u16 + c.b() as u16;
+        assert!(
+            lum(layer_type_color(LayerKind::TopSilk, Theme::Light))
+                < lum(layer_type_color(LayerKind::TopSilk, Theme::Dark))
         );
     }
 
     #[test]
     fn resolve_base_color_prefers_override() {
-        use super::{layer_type_color, resolve_base_color};
+        use super::{layer_type_color, resolve_base_color, Theme};
         use egui::Color32;
+        let d = Theme::Dark;
         let ovr = [(LayerKind::TopCopper, Color32::from_rgb(1, 2, 3))];
         assert_eq!(
-            resolve_base_color(LayerKind::TopCopper, &ovr),
+            resolve_base_color(LayerKind::TopCopper, &ovr, d),
             Color32::from_rgb(1, 2, 3)
         );
         // no override for this kind -> the type default
         assert_eq!(
-            resolve_base_color(LayerKind::TopSilk, &ovr),
-            layer_type_color(LayerKind::TopSilk)
+            resolve_base_color(LayerKind::TopSilk, &ovr, d),
+            layer_type_color(LayerKind::TopSilk, d)
         );
     }
 
