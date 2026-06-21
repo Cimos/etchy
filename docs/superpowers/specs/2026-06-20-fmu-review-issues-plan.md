@@ -106,6 +106,20 @@ diffing **CubeOrange+ FMU REV 4 ↔ REV 67** (real Altium fab packs).
 - [ ] Overlay/thumbnail doesn't settle while the user keeps interacting.
   (Multi-screenshot paste + Ctrl+Enter already shipped.)
 
+## Next GUI batch (designed via workflow 2026-06-21) — build order: G6 → G4 → per-layer colors
+
+- **G6 · native perf** — cache the tessellation in world space (the expensive,
+  camera-independent step); re-run only the cheap world→screen transform per frame,
+  so pan/zoom and color edits never re-triangulate. Build first (the lag complaint).
+- **G4 · side-by-side** — Before | After split, one shared camera, draggable divider.
+- **Per-layer colors (RE-SCOPED per review)** — NOT per-layer added/removed overrides.
+  Give the **base/context layer its own layer-type colour** (copper→copper-gold,
+  silk→cream, mask→green-ish, etc.); added/removed stay green/red globally. The global
+  add/removed colour pickers (G3) stay — Simon likes those.
+- **Settings/help menu — DEFERRED ("down the track").** Eventually the noise slider,
+  colour pickers, base level, toggles all move into a proper VSCode-style settings/help
+  menu. Not now; keep them on the bar for the moment.
+
 ## Notes
 
 - Work builds on the `gui-web-wasm` viewer; that branch still needs its own

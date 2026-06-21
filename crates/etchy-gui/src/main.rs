@@ -181,7 +181,7 @@ fn main() {
 
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Overlay,
     Before,
@@ -247,6 +247,45 @@ fn cycle_base(level: BaseLevel) -> BaseLevel {
     }
 }
 
+/// The inputs that change WHICH geometry is triangulated (G6 cache key). Colours,
+/// the base alpha, the noise threshold, and the camera are deliberately NOT here —
+/// they're applied cheaply at transform time, so they never force a re-triangulation.
+/// Adding a new geometry-selecting input? It MUST join this key or the cache goes
+/// stale and shows the wrong thing (a silent miss the project forbids).
+#[derive(Clone, PartialEq, Debug)]
+struct GeomKey {
+    selected: usize,
+    mode: Mode,
+    base_on: bool,
+    outline_effective: bool,
+}
+
+/// Build the cache key from the current selection inputs.
+fn build_geom_key(
+    selected: usize,
+    mode: Mode,
+    base_level: BaseLevel,
+    show_outline: bool,
+    outline: Option<usize>,
+) -> GeomKey {
+    GeomKey {
+        selected,
+        mode,
+        base_on: base_level != BaseLevel::Off,
+        outline_effective: outline_legend_visible(show_outline, outline, selected),
+    }
+}
+
+/// Rebuild the tessellation cache when there's none yet or the key changed.
+fn geom_cache_dirty(prev: Option<&GeomKey>, now: &GeomKey) -> bool {
+    prev != Some(now)
+}
+
+/// On-screen px width of a region from its cached world extent (nm) and the scale.
+fn region_screen_px(extent_nm: i64, scale: f64) -> f32 {
+    (extent_nm as f64 * scale) as f32
+}
+
 /// Pan/zoom camera in world (nm) space.
 struct Camera {
     center: [f64; 2], // world nm
@@ -299,6 +338,9 @@ struct ViewApp {
     /// layer for orientation (G10); None if the board has no outline layer.
     outline: Option<usize>,
     show_outline: bool,
+    /// World-space tessellation cache (G6): rebuilt only when the GeomKey changes,
+    /// so pan/zoom/colour edits skip re-triangulation.
+    cache: Option<TessCache>,
 }
 
 impl ViewApp {
@@ -326,6 +368,7 @@ impl ViewApp {
             warning_shown_at: None,
             outline,
             show_outline: true,
+            cache: None,
         }
     }
 
@@ -861,67 +904,33 @@ impl ViewApp {
         }
 
         // Build the shapes to draw, per mode.
-        let mut shapes: Vec<Shape> = Vec::new();
-        let cam = &self.cam;
-        // Base/context layers draw as solid filled meshes from our own concave-
-        // correct triangulation. We deliberately do NOT use egui's path stroke for
-        // an outline: its miter join extrudes each vertex by `normal / length_sq`,
-        // which explodes at the ~0° tips that boolean-diff crescents always have,
-        // flinging stroke vertices clear across the board (the "green lines"). The
-        // filled mesh alone shows the shape correctly and can't spike.
-        let mut push = |set: &PolygonSet, fill: Color32| {
-            for shape in &set.shapes {
-                let Some(outer) = shape.first() else { continue };
-                if outer.len() < 3 {
-                    continue;
-                }
-                if let Some(mesh) = mesh_for(shape, fill, cam, rect) {
-                    shapes.push(Shape::from(mesh));
-                }
-            }
-        };
-
-        // Board outline first (underneath everything), faint, on every layer for
-        // orientation — skipped when the outline layer is the one being viewed (G10).
-        if let Some(oi) = self.outline {
-            if self.show_outline && oi != self.selected {
-                let lo = &self.diff.layers[oi];
-                let set = if !lo.new.shapes.is_empty() {
-                    &lo.new
-                } else {
-                    &lo.old
-                };
-                push(set, C_OUTLINE_FAINT);
-            }
+        // Geometry is triangulated ONCE and cached in world space (G6); only the
+        // cheap world→screen transform + colour/alpha/min-area cull run per frame,
+        // so pan/zoom and colour edits never re-triangulate. The cache rebuilds only
+        // when the GeomKey (selection inputs) changes.
+        let key = build_geom_key(
+            self.selected,
+            self.mode,
+            self.base_level,
+            self.show_outline,
+            self.outline,
+        );
+        if geom_cache_dirty(self.cache.as_ref().map(|c| &c.key), &key) {
+            self.cache = Some(build_cache(&self.diff, &key, self.outline));
         }
-
-        self.last_hidden = 0;
-        match self.mode {
-            Mode::Before => push(&layer.old, C_BASE),
-            Mode::After => push(&layer.new, C_BASE),
-            Mode::Overlay => {
-                // Always-available faint base (G3): keeps unchanged copper visible
-                // so the diff reads against it, not against black.
-                if self.base_level != BaseLevel::Off {
-                    let a = base_alpha(self.base_level);
-                    let base = Color32::from_rgba_unmultiplied(90, 95, 105, a);
-                    push(&layer.new, base);
-                }
-                // Diff: features drawn true-to-scale, fading to nothing as they go
-                // sub-pixel (no fixed-dot clamp), with an always-surfaced min-area
-                // noise threshold (G9). Colors are user-configurable (G3).
-                let min_area_nm2 =
-                    self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
-                let mut hidden = 0usize;
-                for (set, fill) in [
-                    (&layer.removed, self.col_removed),
-                    (&layer.added, self.col_added),
-                ] {
-                    accumulate_diff(&mut shapes, &mut hidden, set, fill, cam, rect, min_area_nm2);
-                }
-                self.last_hidden = hidden;
-            }
-        }
+        let min_area_nm2 =
+            self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
+        let cache = self.cache.as_ref().expect("cache built above");
+        let (shapes, hidden) = transform_cache(
+            cache,
+            &self.cam,
+            rect,
+            self.base_level,
+            self.col_added,
+            self.col_removed,
+            min_area_nm2,
+        );
+        self.last_hidden = hidden;
         let n = shapes.len();
         painter.extend(shapes);
 
@@ -979,56 +988,56 @@ impl ViewApp {
     }
 }
 
-/// Triangulate one shape into a screen-space egui mesh tinted `fill`. None if it
-/// yields no triangles.
-fn mesh_for(
-    shape: &etchy_core::Shape,
-    fill: Color32,
-    cam: &Camera,
-    rect: Rect,
-) -> Option<egui::epaint::Mesh> {
-    let mut mesh = egui::epaint::Mesh::default();
-    for tri in etchy_core::triangulate_shape(shape) {
-        let base = mesh.vertices.len() as u32;
-        for p in tri {
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos: world_to_screen(cam, p, rect),
-                uv: egui::epaint::WHITE_UV,
-                color: fill,
-            });
-        }
-        mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
-    }
-    (!mesh.is_empty()).then_some(mesh)
+/// What a cached item is, so the per-frame pass knows how to colour it (G6).
+#[derive(Clone, Copy, PartialEq)]
+enum Role {
+    Base,
+    Outline,
+    Added,
+    Removed,
 }
 
-/// Scale a colour's opacity by `a` (clamped to [0,1]).
-fn with_alpha(c: Color32, a: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
+/// One triangulated draw item, in WORLD space (camera-independent). For diff items
+/// `extent_nm`/`area_nm2` drive the per-frame LOD fade + min-area cull without
+/// re-triangulating; base/outline leave them 0.
+struct CachedItem {
+    role: Role,
+    tris: Vec<[Pt; 3]>,
+    extent_nm: i64,
+    area_nm2: f64,
 }
 
-/// Draw a diff set with level-of-detail (G9): a feature at/above [`LOD_HI_PX`] is
-/// opaque geometry, fading linearly to nothing by [`LOD_LO_PX`] so tiny changes
-/// disappear as you zoom out instead of clamping to a fixed dot. Regions below
-/// `min_area_nm2` are dropped as noise and counted into `hidden`.
-fn accumulate_diff(
-    out: &mut Vec<Shape>,
-    hidden: &mut usize,
-    set: &PolygonSet,
-    fill: Color32,
-    cam: &Camera,
-    rect: Rect,
-    min_area_nm2: f64,
-) {
+/// The tessellation cache: world-space items valid for one [`GeomKey`].
+struct TessCache {
+    key: GeomKey,
+    items: Vec<CachedItem>,
+}
+
+fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
     for shape in &set.shapes {
         let Some(outer) = shape.first() else { continue };
         if outer.len() < 3 {
             continue;
         }
-        if lod::ring_area_nm2(outer) < min_area_nm2 {
-            *hidden += 1;
+        let tris = etchy_core::triangulate_shape(shape);
+        if !tris.is_empty() {
+            items.push(CachedItem {
+                role,
+                tris,
+                extent_nm: 0,
+                area_nm2: 0.0,
+            });
+        }
+    }
+}
+
+fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
+    for shape in &set.shapes {
+        let Some(outer) = shape.first() else { continue };
+        if outer.len() < 3 {
             continue;
         }
+        let area_nm2 = lod::ring_area_nm2(outer);
         let mut bb = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
         for p in outer {
             bb[0] = bb[0].min(p.x);
@@ -1036,14 +1045,119 @@ fn accumulate_diff(
             bb[2] = bb[2].max(p.x);
             bb[3] = bb[3].max(p.y);
         }
-        let px = ((bb[2] - bb[0]).max(bb[3] - bb[1]) as f64 * cam.scale) as f32;
-        let alpha = lod::geometry_alpha(px, LOD_LO_PX, LOD_HI_PX);
-        if alpha > 0.0 {
-            if let Some(mesh) = mesh_for(shape, with_alpha(fill, alpha), cam, rect) {
-                out.push(Shape::from(mesh));
-            }
+        let extent_nm = (bb[2] - bb[0]).max(bb[3] - bb[1]);
+        let tris = etchy_core::triangulate_shape(shape);
+        if !tris.is_empty() {
+            items.push(CachedItem {
+                role,
+                tris,
+                extent_nm,
+                area_nm2,
+            });
         }
     }
+}
+
+/// Triangulate the geometry selected by `key` into world-space items, once.
+fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessCache {
+    let mut items = Vec::new();
+    // Outline first (drawn underneath), in all modes (G10).
+    if key.outline_effective {
+        if let Some(oi) = outline {
+            let lo = &diff.layers[oi];
+            let set = if !lo.new.shapes.is_empty() {
+                &lo.new
+            } else {
+                &lo.old
+            };
+            push_context_items(&mut items, set, Role::Outline);
+        }
+    }
+    let layer = &diff.layers[key.selected];
+    match key.mode {
+        Mode::Before => push_context_items(&mut items, &layer.old, Role::Base),
+        Mode::After => push_context_items(&mut items, &layer.new, Role::Base),
+        Mode::Overlay => {
+            if key.base_on {
+                push_context_items(&mut items, &layer.new, Role::Base);
+            }
+            push_diff_items(&mut items, &layer.removed, Role::Removed);
+            push_diff_items(&mut items, &layer.added, Role::Added);
+        }
+    }
+    TessCache {
+        key: key.clone(),
+        items,
+    }
+}
+
+/// Per-frame: transform cached world items to screen meshes, applying colour, the
+/// LOD fade (diff only), and the min-area cull (returns the hidden count). No
+/// triangulation here — this is the cheap part that runs every frame.
+#[allow(clippy::too_many_arguments)]
+fn transform_cache(
+    cache: &TessCache,
+    cam: &Camera,
+    rect: Rect,
+    base_level: BaseLevel,
+    col_added: Color32,
+    col_removed: Color32,
+    min_area_nm2: f64,
+) -> (Vec<Shape>, usize) {
+    let mut shapes = Vec::with_capacity(cache.items.len());
+    let mut hidden = 0usize;
+    for item in &cache.items {
+        let (mut color, is_diff) = match item.role {
+            Role::Base => (
+                Color32::from_rgba_unmultiplied(
+                    C_BASE.r(),
+                    C_BASE.g(),
+                    C_BASE.b(),
+                    base_alpha(base_level),
+                ),
+                false,
+            ),
+            Role::Outline => (C_OUTLINE_FAINT, false),
+            Role::Added => (col_added, true),
+            Role::Removed => (col_removed, true),
+        };
+        if is_diff {
+            if item.area_nm2 < min_area_nm2 {
+                hidden += 1;
+                continue;
+            }
+            let alpha = lod::geometry_alpha(
+                region_screen_px(item.extent_nm, cam.scale),
+                LOD_LO_PX,
+                LOD_HI_PX,
+            );
+            if alpha <= 0.0 {
+                continue;
+            }
+            color = with_alpha(color, alpha);
+        }
+        let mut mesh = egui::epaint::Mesh::default();
+        for tri in &item.tris {
+            let base = mesh.vertices.len() as u32;
+            for &p in tri {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: world_to_screen(cam, p, rect),
+                    uv: egui::epaint::WHITE_UV,
+                    color,
+                });
+            }
+            mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+        }
+        if !mesh.is_empty() {
+            shapes.push(Shape::from(mesh));
+        }
+    }
+    (shapes, hidden)
+}
+
+/// Scale a colour's opacity by `a` (clamped to [0,1]).
+fn with_alpha(c: Color32, a: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
 }
 
 fn legend(
@@ -1157,11 +1271,56 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_alpha, cycle_base, group_layers, layer_group, outline_legend_visible,
-        pick_outline_index, scroll_to_camera_action, short_layer_name, step_in_order,
-        warning_phase, BaseLevel, CameraAction, LayerGroup, WarningPhase,
+        base_alpha, build_geom_key, cycle_base, geom_cache_dirty, group_layers, layer_group,
+        outline_legend_visible, pick_outline_index, region_screen_px, scroll_to_camera_action,
+        short_layer_name, step_in_order, warning_phase, BaseLevel, CameraAction, LayerGroup, Mode,
+        WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn geom_key_tracks_selection_inputs_only() {
+        let base = build_geom_key(0, Mode::Overlay, BaseLevel::Faint, true, Some(1));
+        // base Faint vs Strong is a colour, not geometry -> same key (no rebuild)
+        assert_eq!(
+            base,
+            build_geom_key(0, Mode::Overlay, BaseLevel::Strong, true, Some(1))
+        );
+        // base Off flips base_on -> different key (the base mesh joins/leaves the draw)
+        assert_ne!(
+            base,
+            build_geom_key(0, Mode::Overlay, BaseLevel::Off, true, Some(1))
+        );
+        // selected / mode changes -> different key
+        assert_ne!(
+            base,
+            build_geom_key(2, Mode::Overlay, BaseLevel::Faint, true, Some(1))
+        );
+        assert_ne!(
+            base,
+            build_geom_key(0, Mode::Before, BaseLevel::Faint, true, Some(1))
+        );
+        // viewing the outline layer itself -> outline not drawn -> different key
+        assert_ne!(
+            base,
+            build_geom_key(1, Mode::Overlay, BaseLevel::Faint, true, Some(1))
+        );
+    }
+
+    #[test]
+    fn geom_cache_dirty_on_none_or_change() {
+        let k = build_geom_key(0, Mode::Overlay, BaseLevel::Faint, false, None);
+        assert!(geom_cache_dirty(None, &k));
+        assert!(!geom_cache_dirty(Some(&k), &k));
+        let k2 = build_geom_key(2, Mode::Overlay, BaseLevel::Faint, false, None);
+        assert!(geom_cache_dirty(Some(&k), &k2));
+    }
+
+    #[test]
+    fn region_screen_px_scales_extent() {
+        assert_eq!(region_screen_px(1000, 0.5), 500.0);
+        assert_eq!(region_screen_px(0, 2.0), 0.0);
+    }
 
     #[test]
     fn scroll_maps_to_zoom_or_pan_by_modifier() {
