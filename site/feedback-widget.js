@@ -11,7 +11,7 @@
 (function () {
   "use strict";
   var script = document.currentScript;
-  var ENDPOINT = (script && script.dataset.feedbackEndpoint) || "http://localhost:8765/submit";
+  var ENDPOINT = (script && script.dataset.feedbackEndpoint) || "/submit";
   var FB_KEY = (script && script.dataset.feedbackKey) || "";
 
   var css = "\
@@ -184,9 +184,10 @@
     };
     sendBtn.disabled = true; sendBtn.textContent = "Sending…";
     status.textContent = ""; status.className = "efb-status";
-    // text/plain + no-cors = CORS simple request: reaches the feedback server cross-origin
-    // (e.g. :8765) with no preflight. Server reads the JSON body regardless of content-type.
-    fetch(ENDPOINT, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(payload) })
+    // Same-origin POST to /submit on the server that served this page — works for
+    // localhost AND any teammate on the LAN (they load the page from your machine,
+    // so /submit is your machine too). No CORS, no localhost pitfalls.
+    fetch(ENDPOINT, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
       .then(function () {
         status.textContent = "✓ Thanks — sent. I'll pick it up."; status.className = "efb-status ok";
         textarea.value = ""; textarea.style.borderColor = ""; shots = []; renderThumbs();
