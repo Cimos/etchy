@@ -129,12 +129,12 @@ inner-copper1    <span class="rem">changed</span>       0.00000     19.60342    
 …
 2 of 22 layer(s) changed; total <span class="add">+19.60</span> / <span class="rem">-19.60</span> mm² (100+/100-)
 result: differences found</pre>
-    <p><strong>Exit codes</strong> — designed for CI:</p>
+    <p><strong>Exit codes</strong> — designed for CI. These three are the whole contract:</p>
     <table>
       <tr><th>Code</th><th>Meaning</th></tr>
-      <tr><td><code>0</code></td><td>No differences</td></tr>
-      <tr><td><code>1</code></td><td>Differences found</td></tr>
-      <tr><td><code>2</code></td><td>Error (e.g. boards aren't the same revision)</td></tr>
+      <tr><td><code>0</code></td><td>No differences — the two revisions are identical</td></tr>
+      <tr><td><code>1</code></td><td>Differences found — the revisions differ (the normal “what changed” result)</td></tr>
+      <tr><td><code>2</code></td><td>Error — a comparison couldn't be made: the inputs aren't the <strong>same board</strong> (extents mismatch — etchy compares revisions of one board, not two different boards), a layer failed to parse, or files are missing</td></tr>
     </table>
   </section>
 
