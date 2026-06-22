@@ -156,6 +156,7 @@
         <input id="etfb-name" class="etfb-name" placeholder="Your name or initials (optional)">
         <div class="etfb-shots" id="etfb-shots"></div>
         <div class="etfb-shot" id="etfb-shot">📎 Paste screenshots (Ctrl+V) — or click to attach</div>
+        <div class="etfb-kbd" id="etfb-shot-hint">Pasted shots are captured at paste time; otherwise the current view is attached on Send.</div>
         <input type="file" id="etfb-file" accept="image/*" multiple style="display:none">
         <div class="etfb-ctx" id="etfb-ctx"></div>
         <button class="etfb-send" id="etfb-send" onclick="etfbSend()">Send feedback</button>
@@ -215,11 +216,20 @@
       var t=el('etfb-toast');t.textContent=ok?'✓ Thanks — sent!':"⚠ Couldn't send — please tell Simon directly";
       t.style.borderColor=ok?'#36d39a':'#e8b34a';t.style.color=ok?'#bff5e0':'#f0d49a';t.style.background=ok?'#10331f':'#33270f';
       t.classList.add('show');setTimeout(function(){t.classList.remove('show');},2800);}
+    // Capture the live canvas as a PNG data-URI (#27). Returns null if the canvas
+    // can't be read (e.g. tainted context). Done at SEND time so it reflects the
+    // current pan/zoom, not a frozen view from when the panel opened.
+    function captureCanvas(){try{var c=el('the_canvas_id');
+      return (c&&c.toDataURL)?c.toDataURL('image/png'):null;}catch(e){return null;}}
     window.etfbSend=function(){var text=el('etfb-text').value.trim();
       if(!text){el('etfb-text').focus();el('etfb-text').style.borderColor='#e8b34a';return;}
+      // If the user hasn't manually attached a screenshot, grab the canvas fresh
+      // now so the attached image matches what they're currently looking at (#27).
+      var sent=shots.map(function(s){return {data:s.data,name:s.name};});
+      if(!sent.length){var live=captureCanvas();if(live)sent.push({data:live,name:'canvas.png'});}
       var payload={sentiment:sentiment,category:category,severity:(sentiment==='issue'?severity:null),
         text:text,name:el('etfb-name').value.trim(),ctx:ctx(),
-        screenshots:shots.map(function(s){return {data:s.data,name:s.name};})};
+        screenshots:sent};
       var b=el('etfb-send');b.disabled=true;b.textContent='Sending…';
       fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
         .then(function(r){if(!r.ok)throw 0;done(true);}).catch(function(){done(false);})

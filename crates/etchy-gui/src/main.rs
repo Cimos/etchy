@@ -472,6 +472,11 @@ struct ViewApp {
     /// World-space tessellation cache (G6): rebuilt only when the GeomKey changes,
     /// so pan/zoom/colour edits skip re-triangulation.
     cache: Option<TessCache>,
+    /// Measure tool active (#22): canvas clicks drop ruler points instead of
+    /// panning; Esc clears and exits.
+    measure_mode: bool,
+    /// The last (up to) two world-space points of the ruler.
+    measure_pts: Vec<[f64; 2]>,
 }
 
 impl ViewApp {
@@ -502,6 +507,8 @@ impl ViewApp {
             outline,
             show_outline: true,
             cache: None,
+            measure_mode: false,
+            measure_pts: Vec::new(),
         }
     }
 
@@ -827,8 +834,8 @@ impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
         // lives in the host HTML), so these are always safe to read.
-        let (toggle_base, fit, overlay, before, after, next, prev, toggle_outline) =
-            ui.input(|i| {
+        let (toggle_base, fit, overlay, before, after, next, prev, toggle_outline, escape) = ui
+            .input(|i| {
                 use egui::Key;
                 (
                     i.key_pressed(Key::S),
@@ -839,8 +846,14 @@ impl eframe::App for ViewApp {
                     i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
                     i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
                     i.key_pressed(Key::E),
+                    i.key_pressed(Key::Escape),
                 )
             });
+        if escape {
+            // Esc clears the ruler and leaves measure mode (#22).
+            self.measure_pts.clear();
+            self.measure_mode = false;
+        }
         if toggle_base {
             self.base_level = cycle_base(self.base_level);
         }
@@ -935,6 +948,18 @@ impl eframe::App for ViewApp {
                 if ui.button("Fit").clicked() {
                     self.cam.fitted = false;
                 }
+                if ui
+                    .selectable_label(self.measure_mode, "Measure")
+                    .on_hover_text(
+                        "Click two points on the canvas to measure the distance in mm. Esc clears.",
+                    )
+                    .clicked()
+                {
+                    self.measure_mode = !self.measure_mode;
+                    if !self.measure_mode {
+                        self.measure_pts.clear();
+                    }
+                }
                 ui.separator();
                 // Dark/light toggle. ASCII label — egui's default font has no
                 // sun/moon glyph (it rendered as tofu). Re-applied live in ui().
@@ -952,8 +977,9 @@ impl eframe::App for ViewApp {
                 }
                 ui.separator();
                 ui.add(
-                    // Linear range (user found the log feel odd — #52).
-                    egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.02)
+                    // Linear range (user found the log feel odd — #52). Widened to
+                    // 0.1 mm² so coarser noise can be filtered (#23).
+                    egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.1)
                         .text("noise filter (mm²)")
                         .fixed_decimals(4),
                 )
@@ -961,6 +987,15 @@ impl eframe::App for ViewApp {
                     "Drop diff regions smaller than this as noise; 0 = off. \
                      The hidden count is shown in the canvas caption.",
                 );
+                // Editable numeric field so the user can set any value, including
+                // beyond the slider's max (#23).
+                ui.add(
+                    egui::DragValue::new(&mut self.min_area_mm2)
+                        .speed(0.001)
+                        .range(0.0..=f64::INFINITY)
+                        .fixed_decimals(4),
+                )
+                .on_hover_text("Type or drag to set the noise filter exactly (mm²), beyond the slider's range.");
                 ui.separator();
                 // Warning chip lives IN the controls row (no separate row that can
                 // reflow the canvas — #49). Overlay floats; ASCII glyph (no tofu).
@@ -1099,8 +1134,20 @@ impl ViewApp {
             self.cam.fitted = true;
         }
 
-        // Pan.
-        if response.dragged() {
+        // Measure tool (#22): record clicks as world points (keep the last 2);
+        // while active, suppress panning so a drag doesn't move the board.
+        if self.measure_mode {
+            if response.clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let w = screen_to_world(&self.cam, pos, rect);
+                    if self.measure_pts.len() >= 2 {
+                        self.measure_pts.clear();
+                    }
+                    self.measure_pts.push(w);
+                }
+            }
+        } else if response.dragged() {
+            // Pan (only when not measuring).
             let d = response.drag_delta();
             self.cam.center[0] -= d.x as f64 / self.cam.scale;
             self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
@@ -1299,6 +1346,42 @@ impl ViewApp {
                 self.col_added,
                 self.col_removed,
                 outline_row,
+            );
+        }
+
+        // Measure tool overlay (#22): the ruler points, the segment between them,
+        // and a midpoint label with the distance in mm.
+        if self.measure_mode {
+            // World [f64;2] → screen, matching world_to_screen's float transform.
+            let w2s = |w: [f64; 2]| -> Pos2 {
+                let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
+                let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
+                Pos2::new(x as f32, y as f32)
+            };
+            for w in &self.measure_pts {
+                painter.circle_filled(w2s(*w), 3.0, C_COPPER);
+            }
+            if self.measure_pts.len() == 2 {
+                let (a, b) = (self.measure_pts[0], self.measure_pts[1]);
+                let (sa, sb) = (w2s(a), w2s(b));
+                painter.line_segment([sa, sb], Stroke::new(1.5, C_COPPER));
+                let mid = Pos2::new((sa.x + sb.x) / 2.0, (sa.y + sb.y) / 2.0);
+                let dist = distance_mm(a, b);
+                painter.text(
+                    mid + egui::vec2(0.0, -10.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    format!("{dist:.4} mm"),
+                    egui::FontId::proportional(13.0),
+                    C_COPPER,
+                );
+            }
+            // Hint at the bottom-left.
+            painter.text(
+                rect.left_bottom() + egui::vec2(8.0, -8.0),
+                egui::Align2::LEFT_BOTTOM,
+                "measure: click two points · Esc to clear",
+                egui::FontId::proportional(12.0),
+                C_COPPER,
             );
         }
 
@@ -1594,6 +1677,15 @@ fn world_to_screen(cam: &Camera, p: Pt, rect: Rect) -> Pos2 {
     Pos2::new(x as f32, y as f32)
 }
 
+/// Euclidean distance between two world-space points (nm), returned in mm — the
+/// pure kernel behind the measure tool (#22). World coords are nm, so the raw
+/// distance is nm; divide by `NM_PER_MM` for the mm the label shows.
+fn distance_mm(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    (dx * dx + dy * dy).sqrt() / etchy_core::NM_PER_MM as f64
+}
+
 fn screen_to_world(cam: &Camera, s: Pos2, rect: Rect) -> [f64; 2] {
     let wx = cam.center[0] + (s.x - rect.center().x) as f64 / cam.scale;
     let wy = cam.center[1] - (s.y - rect.center().y) as f64 / cam.scale;
@@ -1662,12 +1754,24 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_display_color, build_geom_key, cycle_base, geom_cache_dirty, group_layers,
-        layer_group, outline_legend_visible, pick_outline_index, region_screen_px,
+        base_display_color, build_geom_key, cycle_base, distance_mm, geom_cache_dirty,
+        group_layers, layer_group, outline_legend_visible, pick_outline_index, region_screen_px,
         scroll_to_camera_action, short_layer_name, step_in_order, warning_phase, BaseLevel,
         CameraAction, LayerGroup, Mode, WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn distance_mm_is_a_3_4_5_triangle() {
+        // World coords are nm. A 3 mm / 4 mm leg pair → 5 mm hypotenuse.
+        let mm = etchy_core::NM_PER_MM as f64;
+        let a = [0.0, 0.0];
+        let b = [3.0 * mm, 4.0 * mm];
+        assert!((distance_mm(a, b) - 5.0).abs() < 1e-9, "3-4-5 → 5 mm");
+        // Symmetric, and zero for a point on itself.
+        assert!((distance_mm(b, a) - 5.0).abs() < 1e-9);
+        assert_eq!(distance_mm(a, a), 0.0);
+    }
 
     #[test]
     fn chrome_dark_and_light_differ() {
