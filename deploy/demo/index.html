@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>etchy — PCB diff viewer</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='7' fill='%230b0f0e' stroke='%23e8a33d' stroke-width='1.5'/%3E%3Cpath d='M8 20 L16 8 L24 20' fill='none' stroke='%23e8a33d' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='22.5' r='1.9' fill='%2346d18a'/%3E%3C/svg%3E">
+<style>
+  /* Match the app's panel/chrome charcoal (C_SURFACE #141a18) so the page margins
+     agree with the egui chrome; the PCB canvas itself paints board-dark #0b0f0e. */
+  html, body { margin: 0; height: 100%; background: #141a18; overflow: hidden; }
+  canvas { width: 100%; height: 100%; display: block; }
+  #loading { position: fixed; inset: 0; display: grid; place-items: center; z-index: 10;
+    color: #8b93a3; font: 15px -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .lwrap { width: min(420px, 80vw); text-align: center; }
+  .lbrand { font-size: 19px; margin-bottom: 18px; letter-spacing: .3px; }
+  .lbrand b { color: #36d39a; font-weight: 800; }
+  .ltrack { height: 8px; border-radius: 6px; background: #1a2029; border: 1px solid #262c38; overflow: hidden; }
+  #bar { height: 100%; width: 0%; background: linear-gradient(90deg,#2c9c75,#36d39a); border-radius: 6px;
+    transition: width .15s ease; }
+  #bar.indet { width: 100% !important; transition: none;
+    background: linear-gradient(90deg,#16302a 0%,#36d39a 50%,#16302a 100%); background-size: 220% 100%;
+    animation: indet 1.1s linear infinite; }
+  @keyframes indet { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
+  .lrow { display: flex; justify-content: space-between; margin-top: 10px; font-size: 13px; }
+  #pct { color: #36d39a; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #lmsg { color: #8b93a3; }
+</style>
+<link rel="modulepreload" href="/etchy-gui.js?v=2" crossorigin="anonymous"><link rel="preload" href="/etchy-gui_bg.wasm?v=2" crossorigin="anonymous" as="fetch" type="application/wasm"></head>
+<body>
+  <div id="loading">
+    <div class="lwrap">
+      <div class="lbrand"><b>etchy</b> — PCB diff viewer</div>
+      <div class="ltrack"><div id="bar"></div></div>
+      <div class="lrow"><span id="lmsg">Loading…</span><span id="pct">0%</span></div>
+    </div>
+  </div>
+  <canvas id="the_canvas_id"></canvas>
+
+  <script type="module">
+    import init, * as bindings from '/etchy-gui.js?v=2';
+    const WASM = '/etchy-gui_bg.wasm?v=2';
+    const bar = document.getElementById('bar'), pct = document.getElementById('pct'), msg = document.getElementById('lmsg');
+    const DL = 0.9; // download fills to 90%; the last 10% is the compile/start phase
+    const setp = f => { const p = Math.max(0, Math.min(1, f)); bar.style.width = (p*100).toFixed(0)+'%'; pct.textContent = (p*100).toFixed(0)+'%'; };
+    const indet = on => { bar.classList.toggle('indet', on); if (on) pct.textContent = ''; };
+    const t0 = performance.now();
+    try {
+      const resp = await fetch(WASM);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching engine');
+      const total = (+resp.headers.get('Content-Length')) || 17618150;
+      let bytes;
+      if (resp.body && resp.body.getReader) {
+        msg.textContent = 'Downloading engine…';
+        const reader = resp.body.getReader(); let recv = 0; const chunks = [];
+        for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); recv += value.length; setp(DL * recv/total); }
+        bytes = new Uint8Array(recv); let o = 0; for (const c of chunks) { bytes.set(c, o); o += c.length; }
+      } else {
+        bytes = new Uint8Array(await resp.arrayBuffer());
+      }
+      setp(DL);
+      // Compiling + starting takes a few seconds with no measurable progress — show an
+      // indeterminate "working" bar rather than a frozen 100%.
+      msg.textContent = 'Starting engine…'; indet(true);
+      const wasm = await init({ module_or_path: bytes });
+      window.wasmBindings = bindings;
+      indet(false); setp(1); msg.textContent = 'Ready';
+      dispatchEvent(new CustomEvent("TrunkApplicationStarted", { detail: { wasm } }));
+      // Remove the splash only now (the app is starting). Hold a brief floor so the
+      // bar is perceptible even on a fast/cached load.
+      const elapsed = performance.now() - t0;
+      setTimeout(() => { const l = document.getElementById('loading'); if (l) l.remove(); }, Math.max(0, 450 - elapsed));
+    } catch (e) {
+      indet(false);
+      console.error(e);
+      msg.innerHTML = '⚠ Failed to load: ' + (e && e.message ? e.message : e) +
+        '<br><span style="font-size:12px;color:#8b93a3">Try a hard refresh (Ctrl+F5).</span>';
+      pct.textContent = '';
+    }
+  </script>
+
+  <!-- ===== etchy feedback overlay (POST /feedback) ===== -->
+  <style>
+  #etfb-root *{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  #etfb-fab{position:fixed;right:18px;bottom:18px;z-index:2147483000;display:flex;align-items:center;gap:8px;cursor:pointer;
+    background:#36d39a;color:#06281c;font-weight:800;border:0;border-radius:24px;padding:11px 17px;font-size:14px;box-shadow:0 6px 20px rgba(0,0,0,.5)}
+  #etfb-fab:hover{filter:brightness(1.07)}
+  #etfb-hint{position:fixed;right:18px;bottom:66px;z-index:2147482999;max-width:260px;background:#11304a;border:1px solid #2f6da3;color:#cfe6fb;
+    padding:10px 30px 10px 13px;border-radius:10px;font:13px/1.45 -apple-system,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.5);
+    opacity:0;transform:translateY(8px);pointer-events:none;transition:.22s}
+  #etfb-hint.show{opacity:1;transform:none;pointer-events:auto}
+  #etfb-hint b{color:#8fd0ff}
+  #etfb-hint .hx{position:absolute;top:5px;right:8px;cursor:pointer;color:#7fa8c9;font-size:15px;line-height:1}
+  #etfb-panel{position:fixed;right:18px;bottom:18px;z-index:2147483001;width:340px;max-width:calc(100vw - 36px);
+    background:#0e1218;border:1px solid #2b3340;border-radius:12px;box-shadow:0 16px 48px rgba(0,0,0,.6);
+    transform:translateY(12px) scale(.98);opacity:0;pointer-events:none;transition:.16s ease;color:#e7eaf0}
+  #etfb-panel.open{transform:none;opacity:1;pointer-events:auto}
+  #etfb-panel .etfb-h{display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid #262c38}
+  #etfb-panel .etfb-h b{font-size:14px}
+  #etfb-panel .etfb-x{margin-left:auto;cursor:pointer;color:#8b93a3;font-size:20px;line-height:1;border:0;background:none}
+  #etfb-panel .etfb-body{padding:13px 14px;max-height:min(70vh,460px);overflow:auto}
+  .etfb-sents{display:flex;gap:6px;margin-bottom:14px}
+  .etfb-sent{flex:1;cursor:pointer;background:#161b22;border:1px solid #262c38;border-radius:9px;color:#cdd6e4;padding:9px 4px;font-size:12.5px;font-weight:600}
+  .etfb-sent.on{border-color:#36d39a;background:rgba(54,211,154,.14);color:#bff5e0}
+  #etfb-panel .etfb-l{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#8b93a3;margin:2px 0 7px}
+  .etfb-pills{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:13px}
+  .etfb-pill{font-size:12px;padding:5px 10px;border-radius:14px;border:1px solid #262c38;background:#161b22;color:#e7eaf0;cursor:pointer}
+  .etfb-pill.on{background:rgba(54,211,154,.16);border-color:#36d39a;color:#bff5e0}
+  .etfb-sev{display:flex;gap:6px;margin-bottom:13px}
+  .etfb-s{flex:1;text-align:center;font-size:11.5px;padding:7px 0;border-radius:7px;border:1px solid #262c38;background:#161b22;cursor:pointer;color:#8b93a3}
+  .etfb-s.on{border-color:#e8b34a;color:#f0d49a;background:rgba(232,179,74,.12)}
+  #etfb-text{width:100%;min-height:64px;background:#161b22;color:#e7eaf0;border:1px solid #262c38;border-radius:8px;padding:9px 10px;font:13.5px/1.5 inherit;resize:vertical}
+  .etfb-name{width:100%;background:#161b22;color:#e7eaf0;border:1px solid #262c38;border-radius:8px;padding:8px 10px;font:13.5px inherit;margin-top:10px}
+  .etfb-ctx{margin-top:11px;font-size:11px;color:#5b6577;border-top:1px dashed #262c38;padding-top:9px}
+  .etfb-ctx b{color:#8b93a3}
+  .etfb-send{width:100%;margin-top:12px;border:0;border-radius:8px;background:#36d39a;color:#06281c;font-weight:800;padding:11px;font-size:14px;cursor:pointer}
+  .etfb-send:disabled{opacity:.6;cursor:default}
+  #etfb-toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);z-index:2147483002;
+    background:#10331f;border:1px solid #36d39a;color:#bff5e0;padding:10px 18px;border-radius:8px;font:600 13px/1 -apple-system,"Segoe UI",sans-serif;
+    opacity:0;pointer-events:none;transition:.2s}
+  #etfb-toast.show{opacity:1;transform:translateX(-50%)}
+  .etfb-shot{margin-top:11px;border:1px dashed #2f6da3;border-radius:8px;background:#11171f;color:#8fb6d8;
+    font-size:12px;padding:10px;cursor:pointer;text-align:center}
+  .etfb-shot:hover{border-color:#36d39a;color:#bff5e0}
+  .etfb-shots{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+  .etfb-thumb{position:relative;width:66px;height:66px;border-radius:6px;overflow:hidden;border:1px solid #2b3340;background:#0a0d12}
+  .etfb-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  .etfb-thumb .rm{position:absolute;top:1px;right:2px;width:17px;height:17px;border-radius:9px;background:rgba(0,0,0,.62);
+    color:#ffd2d2;font-weight:800;font-size:13px;line-height:16px;text-align:center;cursor:pointer}
+  .etfb-thumb .rm:hover{background:#a23;color:#fff}
+  .etfb-kbd{display:block;text-align:center;margin-top:8px;font-size:11px;color:#5b6577}
+  .etfb-kbd b{color:#8fb6d8;font-weight:700}
+  </style>
+  <div id="etfb-root">
+    <button id="etfb-fab" onclick="etfbOpen()">💬 Feedback</button>
+    <div id="etfb-hint">👋 Spotted something — or like what you see? Tap <b>Feedback</b>.<span class="hx" onclick="etfbHideHint()">×</span></div>
+    <div id="etfb-panel">
+      <div class="etfb-h"><b>Send feedback</b><button class="etfb-x" onclick="etfbClose()">×</button></div>
+      <div class="etfb-body">
+        <div class="etfb-sents">
+          <button class="etfb-sent" data-v="love">💚 Love this</button>
+          <button class="etfb-sent on" data-v="issue">🛠 Needs work</button>
+          <button class="etfb-sent" data-v="idea">💡 Idea</button>
+        </div>
+        <label class="etfb-l">Which part?</label>
+        <div class="etfb-pills" id="etfb-pills">
+          <span class="etfb-pill on">Layout &amp; sizing</span><span class="etfb-pill">Colors &amp; contrast</span>
+          <span class="etfb-pill">Clarity</span><span class="etfb-pill">Speed</span><span class="etfb-pill">Other</span>
+        </div>
+        <div id="etfb-sevrow">
+          <label class="etfb-l">How much does it bug you?</label>
+          <div class="etfb-sev" id="etfb-sev"><div class="etfb-s">Minor</div><div class="etfb-s on">Annoying</div><div class="etfb-s">Blocking</div></div>
+        </div>
+        <label class="etfb-l">Tell us more</label>
+        <textarea id="etfb-text" placeholder="What's not working? e.g. the layer buttons up top are too small"></textarea>
+        <input id="etfb-name" class="etfb-name" placeholder="Your name or initials (optional)">
+        <div class="etfb-shots" id="etfb-shots"></div>
+        <div class="etfb-shot" id="etfb-shot">📎 Paste screenshots (Ctrl+V) — or click to attach</div>
+        <input type="file" id="etfb-file" accept="image/*" multiple style="display:none">
+        <div class="etfb-ctx" id="etfb-ctx"></div>
+        <button class="etfb-send" id="etfb-send" onclick="etfbSend()">Send feedback</button>
+        <span class="etfb-kbd"><b>Ctrl+Enter</b> to send · <b>Ctrl+V</b> to paste a screenshot</span>
+      </div>
+    </div>
+    <div id="etfb-toast"></div>
+  </div>
+  <script>
+  (function(){
+    var sentiment='issue', category='Layout & sizing', severity='Annoying', shots=[];
+    var ph={love:"What's working well? What do you like?",
+            issue:"What's not working? e.g. the layer buttons up top are too small",
+            idea:"What would you add or change?"};
+    function el(id){return document.getElementById(id);}
+    function ctx(){var d=window.devicePixelRatio||1;var s={
+      screen:screen.width+'x'+screen.height, viewport:innerWidth+'x'+innerHeight,
+      dpr:Math.round(d*100)/100, ua:navigator.userAgent, lang:navigator.language, url:location.href};
+      try{ if(window.__etchyState) s.app=window.__etchyState; }catch(e){}
+      return s;}
+    window.etfbHideHint=function(){var h=el('etfb-hint');if(h)h.classList.remove('show');try{localStorage.setItem('etfb-hint-seen','1');}catch(e){}};
+    window.etfbOpen=function(){etfbHideHint();el('etfb-panel').classList.add('open');el('etfb-fab').style.display='none';
+      var c=ctx();var extra=c.app?(' · <b>view</b> '+(c.app.layer||'?')+' · <b>zoom</b> '+(c.app.zoomPct||'?')+'%'):'';
+      el('etfb-ctx').innerHTML='Sent automatically: <b>screen</b> '+c.screen+' · <b>window</b> '+c.viewport+' · <b>scale</b> '+c.dpr+'×'+extra;};
+    window.etfbClose=function(){el('etfb-panel').classList.remove('open');el('etfb-fab').style.display='flex';};
+    [].forEach.call(document.querySelectorAll('.etfb-sent'),function(b){b.addEventListener('click',function(){
+      [].forEach.call(document.querySelectorAll('.etfb-sent'),function(x){x.classList.remove('on');});b.classList.add('on');
+      sentiment=b.getAttribute('data-v'); el('etfb-text').placeholder=ph[sentiment];
+      el('etfb-sevrow').style.display=(sentiment==='issue')?'block':'none';});});
+    el('etfb-pills').addEventListener('click',function(e){if(e.target.classList.contains('etfb-pill')){
+      [].forEach.call(this.children,function(p){p.classList.remove('on');});e.target.classList.add('on');category=e.target.textContent.trim();}});
+    el('etfb-sev').addEventListener('click',function(e){if(e.target.classList.contains('etfb-s')){
+      [].forEach.call(this.children,function(p){p.classList.remove('on');});e.target.classList.add('on');severity=e.target.textContent.trim();}});
+    // --- screenshots attach: clipboard paste (Ctrl+V) or click-to-browse; multiple ---
+    function renderShots(){var g=el('etfb-shots');g.innerHTML='';
+      shots.forEach(function(s,i){var t=document.createElement('div');t.className='etfb-thumb';
+        t.innerHTML='<span class="rm" title="remove">×</span><img alt="'+(s.name||'screenshot')+'">';
+        t.querySelector('img').src=s.data;
+        t.querySelector('.rm').onclick=function(){shots.splice(i,1);renderShots();};
+        g.appendChild(t);});
+      el('etfb-shot').textContent=shots.length
+        ? ('📎 '+shots.length+' attached — paste or click to add more')
+        : '📎 Paste screenshots (Ctrl+V) — or click to attach';}
+    function takeFile(file){if(!file||String(file.type).indexOf('image/')!==0)return;
+      var r=new FileReader();r.onload=function(){shots.push({data:r.result,name:file.name||'pasted.png',type:file.type});renderShots();};
+      r.readAsDataURL(file);}
+    el('etfb-shot').addEventListener('click',function(){el('etfb-file').click();});
+    el('etfb-file').addEventListener('change',function(){[].forEach.call(this.files||[],takeFile);this.value='';});
+    document.addEventListener('paste',function(e){
+      if(!el('etfb-panel').classList.contains('open'))return;
+      var items=((e.clipboardData||{}).items)||[],got=false;
+      for(var i=0;i<items.length;i++){if(items[i].type&&items[i].type.indexOf('image/')===0){takeFile(items[i].getAsFile());got=true;}}
+      if(got)e.preventDefault();});
+    el('etfb-panel').addEventListener('keydown',function(e){
+      if((e.ctrlKey||e.metaKey)&&(e.key==='Enter'||e.keyCode===13)){e.preventDefault();etfbSend();}});
+    function done(ok){shots=[];renderShots();etfbClose();el('etfb-text').value='';el('etfb-name').value='';el('etfb-text').style.borderColor='';
+      var t=el('etfb-toast');t.textContent=ok?'✓ Thanks — sent!':"⚠ Couldn't send — please tell Simon directly";
+      t.style.borderColor=ok?'#36d39a':'#e8b34a';t.style.color=ok?'#bff5e0':'#f0d49a';t.style.background=ok?'#10331f':'#33270f';
+      t.classList.add('show');setTimeout(function(){t.classList.remove('show');},2800);}
+    window.etfbSend=function(){var text=el('etfb-text').value.trim();
+      if(!text){el('etfb-text').focus();el('etfb-text').style.borderColor='#e8b34a';return;}
+      var payload={sentiment:sentiment,category:category,severity:(sentiment==='issue'?severity:null),
+        text:text,name:el('etfb-name').value.trim(),ctx:ctx(),
+        screenshots:shots.map(function(s){return {data:s.data,name:s.name};})};
+      var b=el('etfb-send');b.disabled=true;b.textContent='Sending…';
+      fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+        .then(function(r){if(!r.ok)throw 0;done(true);}).catch(function(){done(false);})
+        .then(function(){b.disabled=false;b.textContent='Send feedback';});};
+    // one-time hint bubble
+    try{ if(!localStorage.getItem('etfb-hint-seen')){
+      setTimeout(function(){var h=el('etfb-hint');if(h)h.classList.add('show');},2200);
+      setTimeout(function(){var h=el('etfb-hint');if(h)h.classList.remove('show');},13000);
+    }}catch(e){}
+  })();
+  </script>
+</body>
+</html>

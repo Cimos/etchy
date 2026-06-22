@@ -58,7 +58,100 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
     for cmd in doc.commands() {
         m.step(cmd)?;
     }
-    Ok(boolean::difference(&m.dark, &m.clear))
+    // Sequential polarity: paint the spans in order — dark unions copper on, clear
+    // subtracts it — so a later dark span correctly repaints over an earlier clear
+    // (an order-independent dark − clear erases such repaints).
+    let mut acc: Vec<Contour> = Vec::new();
+    let mut result = PolygonSet::default();
+    for (is_dark, contours) in &m.spans {
+        result = if *is_dark {
+            boolean::union(&acc, contours)
+        } else {
+            boolean::difference(&acc, contours)
+        };
+        acc = boolean::flatten(&result);
+    }
+    Ok(result)
+}
+
+/// Coordinate units a Gerber declares via `%MO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Units {
+    Inches,
+    Millimeters,
+}
+
+/// A layer's coordinate system: units (`%MO`) + the `%FS` integer/decimal digit
+/// counts. Two revisions exported with different `GerberFormat` quantize identical
+/// geometry onto different grids, producing spurious sub-µm "rim" differences
+/// around every edge — the dominant noise when diffing same-design re-exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GerberFormat {
+    pub units: Units,
+    pub int_digits: u8,
+    pub dec_digits: u8,
+}
+
+impl GerberFormat {
+    /// Compact human form, e.g. `in@2.5` or `mm@4.4`.
+    pub fn describe(&self) -> String {
+        let u = match self.units {
+            Units::Inches => "in",
+            Units::Millimeters => "mm",
+        };
+        format!("{u}@{}.{}", self.int_digits, self.dec_digits)
+    }
+}
+
+/// Extract a layer's coordinate format (`%MO` units + `%FS` digit counts) straight
+/// from its bytes — independent of the geometry parse, so callers can compare two
+/// revisions' grids cheaply.
+pub fn gerber_format(bytes: &[u8]) -> Result<GerberFormat> {
+    let text = String::from_utf8_lossy(bytes);
+    let units = if text.contains("%MOIN") {
+        Units::Inches
+    } else if text.contains("%MOMM") {
+        Units::Millimeters
+    } else {
+        return Err(EngineError::UnitsUnresolved);
+    };
+    // %FSLAX<int><dec>Y<int><dec>*%  — digits after the first 'X' in the %FS block.
+    let fs = text
+        .find("%FS")
+        .ok_or_else(|| EngineError::Parse("missing %FS format spec".into()))?;
+    let xpos = text[fs..]
+        .find('X')
+        .ok_or_else(|| EngineError::Parse("no X in %FS".into()))?;
+    let digits: Vec<u8> = text[fs + xpos + 1..]
+        .chars()
+        .take(2)
+        .filter_map(|c| c.to_digit(10).map(|d| d as u8))
+        .collect();
+    if digits.len() != 2 {
+        return Err(EngineError::Parse("malformed %FS coordinate digits".into()));
+    }
+    Ok(GerberFormat {
+        units,
+        int_digits: digits[0],
+        dec_digits: digits[1],
+    })
+}
+
+/// If two revisions' coordinate formats differ, a human-facing warning explaining
+/// the spurious sub-µm "rim" diffs that mismatch causes; otherwise `None`.
+pub fn coordinate_mismatch_warning(old: &GerberFormat, new: &GerberFormat) -> Option<String> {
+    if old == new {
+        return None;
+    }
+    Some(format!(
+        "Revisions were exported with different coordinate systems (old {}, new {}). \
+         Identical geometry then quantizes onto different grids, so the diff shows spurious \
+         sub-µm rounding differences (\"rims\") around every feature and the changed-area \
+         totals are inflated — they may not reflect real design changes. Re-export both fab \
+         packs with the same units and coordinate format for a clean diff.",
+        old.describe(),
+        new.describe()
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -149,8 +242,11 @@ struct Machine<'a> {
     unit_to_mm: f64,
     nm_per_unit: f64,
 
-    dark: Vec<Contour>,
-    clear: Vec<Contour>,
+    /// Objects in paint order, batched into runs of one polarity. Gerber polarity
+    /// is sequential — a later dark run repaints over an earlier clear — so these
+    /// are resolved in order (union for dark, subtract for clear), not as one
+    /// order-independent `dark − clear` pass.
+    spans: Vec<(bool, Vec<Contour>)>,
 
     cur: Pt,
     ap: Option<i32>,
@@ -174,8 +270,7 @@ impl<'a> Machine<'a> {
             macros,
             unit_to_mm,
             nm_per_unit,
-            dark: Vec::new(),
-            clear: Vec::new(),
+            spans: Vec::new(),
             cur: Pt::new(0, 0),
             ap: None,
             interp: InterpolationMode::Linear,
@@ -571,15 +666,17 @@ impl<'a> Machine<'a> {
         Ok(Pt::new(x, y))
     }
 
-    /// Add a contour with `exposure`, routed to dark/clear by the current polarity:
-    /// dark copper iff `polarity_dark == exposure`.
+    /// Append a contour in paint order. Its effective polarity is dark iff
+    /// `polarity_dark == exposure`; consecutive same-polarity contours extend the
+    /// current span so they're resolved together (see [`Machine::spans`]).
     fn push(&mut self, c: Contour, exposure: bool) {
-        if c.len() >= 3 {
-            if self.polarity_dark == exposure {
-                self.dark.push(c);
-            } else {
-                self.clear.push(c);
-            }
+        if c.len() < 3 {
+            return;
+        }
+        let is_dark = self.polarity_dark == exposure;
+        match self.spans.last_mut() {
+            Some((d, run)) if *d == is_dark => run.push(c),
+            _ => self.spans.push((is_dark, vec![c])),
         }
     }
 }
@@ -697,6 +794,56 @@ mod tests {
         let a = area_mm2(g);
         // 2×2 pad (4) minus a 1×1 clear (1) = 3 mm².
         assert!((a - 3.0).abs() < 0.01, "after clear area {a} vs 3.0");
+    }
+
+    #[test]
+    fn polarity_is_sequential_later_dark_repaints() {
+        // Gerber polarity paints in ORDER: dark pad → clear punches a hole → a
+        // later dark pad inside the hole must REPAINT (survive). A single
+        // all-dark − all-clear pass erases that later pad (it's lumped into "dark"
+        // and subtracted by the clear) — the FMU "trace-shaped voids" bug.
+        // 10×10 (100) − 4×4 clear (16) + 2×2 dark inside (4) = 88 mm².
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,10X10*%\n%ADD11R,4X4*%\n%ADD12R,2X2*%\n\
+                 D10*\nX5000000Y5000000D03*\n\
+                 %LPC*%\nD11*\nX5000000Y5000000D03*\n\
+                 %LPD*%\nD12*\nX5000000Y5000000D03*\nM02*\n";
+        let a = area_mm2(g);
+        assert!(
+            (a - 88.0).abs() < 0.05,
+            "sequential polarity area {a} vs 88.0"
+        );
+    }
+
+    #[test]
+    fn gerber_format_parses_units_and_digits() {
+        let inch = gerber_format(b"%FSLAX25Y25*%\n%MOIN*%\nM02*\n").unwrap();
+        assert_eq!(
+            (inch.units, inch.int_digits, inch.dec_digits),
+            (Units::Inches, 2, 5)
+        );
+        let mm = gerber_format(b"%MOMM*%\n%FSLAX44Y44*%\nM02*\n").unwrap();
+        assert_eq!(
+            (mm.units, mm.int_digits, mm.dec_digits),
+            (Units::Millimeters, 4, 4)
+        );
+    }
+
+    #[test]
+    fn coordinate_mismatch_warns_only_on_difference() {
+        // The real FMU case: REV4 inches@2.5 vs REV67 mm@4.4.
+        let a = GerberFormat {
+            units: Units::Inches,
+            int_digits: 2,
+            dec_digits: 5,
+        };
+        let b = GerberFormat {
+            units: Units::Millimeters,
+            int_digits: 4,
+            dec_digits: 4,
+        };
+        assert!(coordinate_mismatch_warning(&a, &a).is_none());
+        let w = coordinate_mismatch_warning(&a, &b).expect("mismatch must warn");
+        assert!(w.contains("in@2.5") && w.contains("mm@4.4"), "warning: {w}");
     }
 
     #[test]

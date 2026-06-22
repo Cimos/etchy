@@ -16,3 +16,25 @@ Thumbs.db
 
 # Claude Code local session state (settings + agent memory)
 .claude/
+
+# NOTE: crates/etchy-gui/assets/demo/{old,new} is now the COMMITTED public demo
+# board (Mad_RP2040 v0.0.0 -> v0.0.1, from its GitHub release fab packs). To review
+# a confidential board locally, swap files in and use
+#   git update-index --skip-worktree crates/etchy-gui/assets/demo/old/* new/*
+# so they never stage; never commit a private board here.
+
+# trunk (wasm) build output
+crates/etchy-gui/dist/
+
+# staged demo serve dir (built artifacts; rebuilt by deploy/setup.sh)
+deploy/.serve/
+
+# Local review feedback — may reference confidential boards; never commit.
+# (The committed m1-seed.jsonl stays tracked; it predates this rule.)
+deploy/feedback/*.jsonl
+!deploy/feedback/m1-seed.jsonl
+deploy/feedback/screenshots/
+
+# Python (deploy/ tooling)
+__pycache__/
+*.pyc

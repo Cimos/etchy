@@ -77,6 +77,14 @@ pub(crate) fn triangulate_shape(shape: &[Contour]) -> Vec<[Pt; 3]> {
         .collect()
 }
 
+/// NonZero union of `a` and `b` — accumulates copper across a dark polarity span
+/// (self-overlapping flashes/traces merge; the running result is fed back in).
+pub(crate) fn union(a: &[Contour], b: &[Contour]) -> PolygonSet {
+    let s = to_int(a);
+    let c = to_int(b);
+    from_int(Overlay::<i64>::with_contours(&s, &c).overlay(OverlayRule::Union, FillRule::NonZero))
+}
+
 /// Flatten a [`PolygonSet`] back to a flat contour list (outer + holes), e.g. to
 /// feed a resolved layer into another boolean op.
 pub(crate) fn flatten(ps: &PolygonSet) -> Vec<Contour> {

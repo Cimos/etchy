@@ -8,7 +8,7 @@ use etchy_core::{Board, Layer};
 
 /// Walk a directory (one level), read each Gerber file, classify it, and
 /// polygonize it into a [`Layer`]. Non-Gerber files are skipped (Excellon later).
-pub fn load_board(dir: &Path) -> Result<Board> {
+pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>)> {
     if !dir.is_dir() {
         bail!("{} is not a directory", dir.display());
     }
@@ -20,10 +20,14 @@ pub fn load_board(dir: &Path) -> Result<Board> {
     entries.sort();
 
     let mut layers = Vec::new();
+    let mut fmt = None;
     for path in entries {
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         if !etchy_core::looks_like_gerber(&bytes) {
             continue;
+        }
+        if fmt.is_none() {
+            fmt = etchy_core::gerber_format(&bytes).ok();
         }
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
@@ -41,5 +45,5 @@ pub fn load_board(dir: &Path) -> Result<Board> {
             geometry,
         });
     }
-    Ok(Board { layers })
+    Ok((Board { layers }, fmt))
 }
