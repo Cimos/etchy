@@ -133,6 +133,41 @@ impl DiffReport {
     pub fn to_json_pretty(&self) -> String {
         serde_json::to_string_pretty(self).expect("DiffReport serializes")
     }
+
+    /// GitHub-flavoured Markdown summary, for a CI step-summary or PR comment.
+    /// Pure (no I/O); the CLI just prints it. Lists only the changed layers.
+    pub fn to_markdown_summary(&self) -> String {
+        let t = &self.totals;
+        let mut s = String::from("## etchy — PCB diff\n\n");
+        if !self.any_changes {
+            s.push_str("✅ **No differences found.**\n");
+        } else {
+            s.push_str(&format!(
+                "**{} of {} layer(s) changed** · +{:.4} mm² added · −{:.4} mm² removed · {}+/{}− regions\n\n",
+                t.layers_changed, t.layers_total, t.added_area_mm2, t.removed_area_mm2,
+                t.added_regions, t.removed_regions,
+            ));
+            s.push_str("| layer | +mm² | −mm² | +regions | −regions |\n");
+            s.push_str("|---|--:|--:|--:|--:|\n");
+            for l in self.layers.iter().filter(|l| l.is_changed()) {
+                let name = match l.inner_index {
+                    Some(n) => format!("{}{}", l.kind, n),
+                    None => l.kind.to_string(),
+                };
+                s.push_str(&format!(
+                    "| {} | {:.4} | {:.4} | {} | {} |\n",
+                    name, l.added_area_mm2, l.removed_area_mm2, l.added_regions, l.removed_regions,
+                ));
+            }
+        }
+        if !self.warnings.is_empty() {
+            s.push_str("\n⚠️ **Warnings**\n");
+            for w in &self.warnings {
+                s.push_str(&format!("- {w}\n"));
+            }
+        }
+        s
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +179,35 @@ mod tests {
         let r = DiffReport::new(vec![], vec![]);
         assert!(!r.any_changes());
         assert_eq!(r.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn markdown_summary_reflects_changes() {
+        // No changes → the clean "no differences" line, no table.
+        let none = DiffReport::new(vec![], vec![]);
+        let md = none.to_markdown_summary();
+        assert!(md.contains("No differences found"));
+        assert!(!md.contains("| layer |"));
+
+        // A changed layer → a totals line + a table row for it; warnings listed.
+        let changed = LayerReport::new(
+            LayerKind::TopCopper,
+            Some("f".into()),
+            Some("f".into()),
+            LayerStatus::Changed,
+            &LayerChange {
+                added_area_nm2: 1_000_000_000_000,
+                removed_area_nm2: 0,
+                added_region_count: 2,
+                removed_region_count: 0,
+            },
+        );
+        let r = DiffReport::new(vec![changed], vec!["heads up".into()]);
+        let md = r.to_markdown_summary();
+        assert!(md.contains("1 of 1 layer(s) changed"));
+        assert!(md.contains("| layer |"));
+        assert!(md.contains("top-copper"));
+        assert!(md.contains("heads up"));
     }
 
     #[test]

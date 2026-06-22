@@ -1,0 +1,68 @@
+name: etchy PCB diff
+description: >-
+  Diff two revisions of a board's fab output and gate the pipeline on the result.
+  Writes a Markdown summary to the job step-summary and (optionally) a sticky PR
+  comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error.
+author: Cimos
+branding:
+  icon: layers
+  color: orange
+
+inputs:
+  old:
+    description: Directory of the OLD revision's Gerber/Excellon files.
+    required: true
+  new:
+    description: Directory of the NEW revision's Gerber/Excellon files.
+    required: true
+  fail-on-diff:
+    description: Fail the step when differences are found (exit 1). Set false to report only.
+    required: false
+    default: "true"
+  comment:
+    description: Post the Markdown summary as a sticky PR comment (needs pull-requests:write + GITHUB_TOKEN).
+    required: false
+    default: "false"
+
+outputs:
+  changed:
+    description: "true if any layer changed, else false."
+    value: ${{ steps.run.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    # Build etchy from this repo (no release binary published yet). Cargo's own
+    # cache + the toolchain are the consumer workflow's responsibility. Use the
+    # runner-provided $GITHUB_ACTION_PATH env var, not a ${{ }} template, so no
+    # value is expanded into the script.
+    - shell: bash
+      run: cargo build --release --quiet -p etchy-cli --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+    - id: run
+      shell: bash
+      # Inputs are passed via env (NOT ${{ }} into the script) so a crafted value
+      # can't be expanded as shell — avoids GitHub Actions script injection.
+      env:
+        OLD_DIR: ${{ inputs.old }}
+        NEW_DIR: ${{ inputs.new }}
+        DO_COMMENT: ${{ inputs.comment }}
+        FAIL_ON_DIFF: ${{ inputs.fail-on-diff }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        # Reject dash-leading paths so a value can't be smuggled in as an etchy flag.
+        case "$OLD_DIR" in -*) echo "invalid old dir: $OLD_DIR" >&2; exit 2;; esac
+        case "$NEW_DIR" in -*) echo "invalid new dir: $NEW_DIR" >&2; exit 2;; esac
+        etchy="${GITHUB_ACTION_PATH}/target/release/etchy"
+        set +e
+        md="$("$etchy" --format md -- "$OLD_DIR" "$NEW_DIR")"
+        code=$?
+        set -e
+        printf '%s\n' "$md" >> "$GITHUB_STEP_SUMMARY"
+        [ "$code" -eq 2 ] && { echo "etchy errored" >&2; exit 2; }
+        echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        if [ "$DO_COMMENT" = "true" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+          printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --edit-last --body-file - \
+            || printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --body-file -
+        fi
+        [ "$FAIL_ON_DIFF" = "true" ] && [ "$code" -eq 1 ] && exit 1 || true

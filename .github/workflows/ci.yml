@@ -51,3 +51,35 @@ jobs:
       - name: clippy (informational)
         run: cargo clippy --workspace --all-targets
         continue-on-error: true
+
+  wasm:
+    name: web build (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (stable) + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Prebuilt trunk binary, pinned — avoids the slow build-from-source and
+      # any extra third-party action. Bump deliberately alongside the toolchain.
+      - name: Install trunk (prebuilt, pinned)
+        run: |
+          set -euo pipefail
+          ver=v0.21.14
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${ver}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin"
+          trunk --version
+
+      # Builds the browser viewer, which embeds the committed demo board via
+      # include_dir! — the gate that keeps the public demo board buildable.
+      - name: Build web viewer (embeds the committed demo board)
+        working-directory: crates/etchy-gui
+        run: trunk build --release --filehash false
+
+      - name: Verify bundle produced
+        run: |
+          test -f crates/etchy-gui/dist/etchy-gui_bg.wasm
+          test -f crates/etchy-gui/dist/etchy-gui.js

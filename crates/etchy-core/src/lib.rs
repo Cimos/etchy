@@ -30,7 +30,7 @@ pub use geo::{
     GRID_NM, NM_PER_MM,
 };
 pub use geom::CIRCLE_SEGMENTS;
-pub use gerber::resolve_layer;
+pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};
 pub use model::{pair_layers, same_board_guard, Board, Layer, LayerKind, LayerPairing};
 pub use naming::{classify, looks_like_gerber};
 pub use report::{DiffReport, LayerReport, LayerStatus, Totals, SCHEMA_VERSION};
