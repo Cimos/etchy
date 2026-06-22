@@ -3,7 +3,27 @@
 **Branch:** **`gui-web-wasm-v2`** = **PR #10** (supersedes #7, now closed).
 **As of:** 2026-06-22. Pick up by `git fetch && git checkout gui-web-wasm-v2`.
 
-## Latest (2026-06-22) — #10 unblocked, branches cleaned, private review demo
+## Latest (2026-06-22) — #10 gate cleared: public demo board + web CI, all green
+
+- **PR #10's last gate is done — CLEAN + MERGEABLE, all CI green.** Committed a
+  public, non-confidential demo board (`crates/etchy-gui/assets/demo/{old,new}` =
+  **Mad_RP2040 v0.0.0 → v0.0.1**, the PCBWay gerbers from the board's own GitHub
+  release `pcb-datapack`s), un-ignored that path, and added a **web-build (wasm)
+  CI job** (`trunk build`, trunk installed from its pinned prebuilt release). All
+  4 jobs pass: build+test on ubuntu/macos/windows + the new wasm job. Site example
+  updated to the real v0.0.0 → v0.0.1 figures (+235.3 / −395.3 mm², 8/11 layers).
+- **Mad_RP2040 release pipeline fixed + exercised** (PR #18 there): `release.yaml`
+  is now idempotent (create-or-clobber publish — fixes the failed v0.0.1 run) and
+  `workflow_dispatch(tag)`-able for any tag. Dispatched clean release builds for
+  **v0.0.0** (first ever) and **v0.0.1** (rebuilt) — both now carry fresh fab packs.
+- **Known debug item:** etchy classifies the inner-copper files `.gl2/.gl3` as
+  `other` (the layer classifier knows `.G1/.G2` but not KiCad's `.glN`). Demo works;
+  small etchy-core classifier fix worth doing.
+- **Private-board override:** `assets/demo` is now committed; to review a confidential
+  board locally, swap files in and `git update-index --skip-worktree …` so they never
+  stage (see `.gitignore` note). Never commit a private board.
+
+## Earlier (2026-06-22) — #10 unblocked, branches cleaned, private review demo
 
 - **PR #10 is now MERGEABLE.** Merged `main` into the branch and resolved the two
   add/add conflicts (`docs/PAGES_LAUNCH_CHECKLIST.md`, `site/docs.html`) to main's
