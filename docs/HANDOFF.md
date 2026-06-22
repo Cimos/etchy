@@ -1,7 +1,40 @@
 # etchy — handoff (resume on another machine)
 
-**Branch:** `gui-web-wasm` (local) → pushed to **`gui-web-wasm-v2`** = **PR #10** (supersedes #7).
+**Branch:** **`gui-web-wasm-v2`** = **PR #10** (supersedes #7, now closed).
 **As of:** 2026-06-22. Pick up by `git fetch && git checkout gui-web-wasm-v2`.
+
+## Latest (2026-06-22) — #10 unblocked, branches cleaned, private review demo
+
+- **PR #10 is now MERGEABLE.** Merged `main` into the branch and resolved the two
+  add/add conflicts (`docs/PAGES_LAUNCH_CHECKLIST.md`, `site/docs.html`) to main's
+  finished versions; `scripts/check-landing.py` passes. The "trim viewer-modes copy"
+  task was already satisfied — `docs.html` lists only the shipped modes
+  (Overlay/Before/After); the landing's split/swipe/onion mention sits in the roadmap
+  section, which is fine.
+- **Branches cleaned up.** Closed #7 (superseded). Deleted 8 merged/superseded remote
+  branches (the 7 squash-merged docs/landing PRs + `gui-web-wasm`) and `gui-brand-theme`
+  — its one unique commit (the GUI brand/theme design spec) was salvaged into this
+  branch first (`de859e7`). Remotes left: `main`, `gui-web-wasm-v2`, `feedback-widget`.
+- **Private LAN review demo (NOT committed) — CubeOrange+ FMU REV_4 vs REV_67.** Built
+  the web viewer for a co-worker to review on the office LAN. How it was made, for next
+  time:
+  - Source packs: `…/ProductionFiles/Production/CubeOrange+/FMU_REV_4.zip` and
+    `FMU_REV67.zip` (both pack their files as `FMU_REV_4.*`, so layers pair by name).
+  - **Stage only the electrical layers** into `assets/demo/{old,new}` —
+    `GTL GBL G1..G6 GTS GBS GTO GBO GTP GBP TXT`. A REV_67 drawing/dimension layer spans
+    to ~131mm (vs the ~34mm board) and trips the same-board guard, so the full pack
+    won't diff; the 14 electrical layers do.
+  - Set the web labels locally to `FMU REV_4` / `FMU REV_67` (**kept local — not
+    committed**; the repo keeps the generic non-confidential labels). `trunk build
+    --release --filehash false`, deploy to the Windows serve dir, serve with
+    `deploy/demo/etchy-server.py` on `0.0.0.0:8080`.
+  - **Feedback given:** Simon confirmed REV_4-vs-REV_67 is the intended comparison — it
+    is a near-total redesign (all 14 layers changed, ~+1120 / −638 mm², ~5,900/6,580
+    regions; expected for a rev 4 -> 67 gap). He had the demo **stopped** after review;
+    relaunch on request.
+- **Env note:** the office machine now drives reviews through the `feedback-loop` tool
+  (`~/UbuntuProjects/feedback-loop`, SessionStart hook) and the merged `~/.claude/CLAUDE.md`
+  agreements (Cimos identity, no AI attribution, never the word "canonical").
 
 ## How to build / run / test
 - `cargo test` (workspace), `cargo clippy`, `cargo fmt` — keep all green/clean.
@@ -44,8 +77,13 @@ llvmpipe and won't fully match the GPU web build.
 - #52: noise slider switched from `.logarithmic(true)` to linear.
 
 ## Remaining roadmap
+- **Finalize PR #10 (now MERGEABLE — conflicts resolved, #7/#9 closed).** The one gate
+  left is the PUBLIC non-confidential demo board: commit one (replace the gitignored FMU
+  embed in `demo_diff()`), have `setup.sh` stage it, then add **web CI** — CI can't build
+  the wasm until a committable board exists, so the two are coupled. Mad_RP2040 is the
+  likely board (already the site's public example). Then merge. Native CI (`ci.yml`,
+  build+test+clippy on 3 OSes) already passes and is board-independent.
 - **M2** finish: release binaries (cargo-dist) so `action.yml` doesn't build from source; docs.
-- **Finalize PR #10:** commit a PUBLIC non-confidential demo board (replace the gitignored FMU embed in `demo_diff()`), have `setup.sh` stage it, add web CI; then it's mergeable. Pre-launch: trim `site/docs.html` viewer-modes copy (split/swipe/onion not all shipped). Close #7 and #9 (superseded/salvaged).
 
 ## Conventions (also ~/.claude/CLAUDE.md)
 Commits/PRs: clean, plain, **no AI attribution, no emoji**. etchy-core stays pure (no I/O). Permissive deps only (`cargo deny`). Brand: copper `#e8a33d`, board `#0b0f0e`, surface `#141a18`, cream `#f4f1e8`; green `#46d18a`/red `#ff5d73` reserved for added/removed.
