@@ -174,9 +174,13 @@ fn main() {
             .and_then(|d| d.get_element_by_id("the_canvas_id"))
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("canvas element #the_canvas_id");
-        // Generic, non-confidential labels (the bundled demo board is gitignored;
-        // real board names come with the public demo board, not from these filenames).
-        let app = ViewApp::new(demo_diff(), "old revision".into(), "new revision".into());
+        // The bundled demo board is the public Mad_RP2040 (v0.0.0 -> v0.0.1), from
+        // its GitHub release fab packs — label it accordingly.
+        let app = ViewApp::new(
+            demo_diff(),
+            "Mad_RP2040 v0.0.0".into(),
+            "Mad_RP2040 v0.0.1".into(),
+        );
         eframe::WebRunner::new()
             .start(canvas, web_options, Box::new(|_cc| Ok(Box::new(app))))
             .await
