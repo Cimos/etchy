@@ -818,6 +818,10 @@ fn brand_visuals(theme: Theme) -> egui::Visuals {
 // fixed dot (the old blob/all-green-when-zoomed-out bug).
 const LOD_LO_PX: f32 = 1.5;
 const LOD_HI_PX: f32 = 5.0;
+/// Side length (screen px) of the fixed marker dot drawn for a real-but-sub-pixel
+/// diff region (below `LOD_LO_PX`), so it stays visible at every zoom instead of
+/// phantoming (#14). Approximate — needs later visual tuning against real boards.
+const MARKER_PX: f32 = 3.0;
 /// Default min-area threshold (mm²). Diff regions smaller than this are treated
 /// as noise (e.g. the sub-µm rims from a units/precision mismatch) and dropped —
 /// but the count is always surfaced in the caption, never silently.
@@ -1468,20 +1472,30 @@ fn transform_cache(
             Role::Removed => (col_removed, true),
         };
         if is_diff {
-            if item.area_nm2 < min_area_nm2 {
-                hidden += 1;
-                continue;
-            }
             // Fade by on-screen THICKNESS, not extent: a long thin crescent has a
             // large extent but is sub-pixel thick — fading by thickness stops it
             // flickering by position when panned (#46).
             let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
-            let alpha =
-                lod::geometry_alpha(region_screen_px(thickness, cam.scale), LOD_LO_PX, LOD_HI_PX);
-            if alpha <= 0.0 {
-                continue;
+            let px = region_screen_px(thickness, cam.scale);
+            // The kernel keeps the absolute-min cull (genuine noise) separate from
+            // the screen-px LOD: a real diff below LOD_LO_PX draws as a fixed marker
+            // dot instead of vanishing (the #14 phantom/all-green-when-zoomed-out fix).
+            match lod::lod_render(px, LOD_LO_PX, LOD_HI_PX, item.area_nm2 < min_area_nm2) {
+                lod::Lod::Cull => {
+                    hidden += 1;
+                    continue;
+                }
+                lod::Lod::Marker => {
+                    // A fixed-size dot at the region centre so the diff stays visible
+                    // at every zoom. Centre comes from the cached world bbox.
+                    let cx = (item.bbox[0] + item.bbox[2]) / 2;
+                    let cy = (item.bbox[1] + item.bbox[3]) / 2;
+                    let at = world_to_screen(cam, Pt::new(cx, cy), rect);
+                    push_screen_quad(&mut mesh, at, MARKER_PX, color);
+                    continue;
+                }
+                lod::Lod::Fade(alpha) => color = with_alpha(color, alpha),
             }
-            color = with_alpha(color, alpha);
         }
         for tri in &item.tris {
             let base = mesh.vertices.len() as u32;
@@ -1549,6 +1563,28 @@ fn bbox_visible(bbox: [i64; 4], cam: &Camera, rect: Rect) -> bool {
 /// Scale a colour's opacity by `a` (clamped to [0,1]).
 fn with_alpha(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+/// Push a fixed-size, axis-aligned square (two triangles) centred at `at` in screen
+/// space into `mesh` — the LOD marker dot for a sub-pixel diff region (#14).
+fn push_screen_quad(mesh: &mut egui::epaint::Mesh, at: Pos2, px: f32, color: Color32) {
+    let h = px * 0.5;
+    let corners = [
+        Pos2::new(at.x - h, at.y - h),
+        Pos2::new(at.x + h, at.y - h),
+        Pos2::new(at.x + h, at.y + h),
+        Pos2::new(at.x - h, at.y + h),
+    ];
+    let base = mesh.vertices.len() as u32;
+    for pos in corners {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv: egui::epaint::WHITE_UV,
+            color,
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 fn legend(
@@ -1740,6 +1776,23 @@ mod tests {
     fn region_screen_px_scales_extent() {
         assert_eq!(region_screen_px(1000, 0.5), 500.0);
         assert_eq!(region_screen_px(0, 2.0), 0.0);
+    }
+
+    #[test]
+    fn marker_quad_is_a_fixed_size_square() {
+        use super::push_screen_quad;
+        use egui::{pos2, Color32};
+        let mut mesh = egui::epaint::Mesh::default();
+        push_screen_quad(&mut mesh, pos2(10.0, 20.0), 4.0, Color32::RED);
+        // Two triangles, four shared corners centred on `at`, side = px.
+        assert_eq!(mesh.indices.len(), 6);
+        assert_eq!(mesh.vertices.len(), 4);
+        let xs: Vec<f32> = mesh.vertices.iter().map(|v| v.pos.x).collect();
+        let ys: Vec<f32> = mesh.vertices.iter().map(|v| v.pos.y).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 8.0);
+        assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 12.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MAX, f32::min), 18.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 22.0);
     }
 
     #[test]
