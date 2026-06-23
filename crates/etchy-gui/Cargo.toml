@@ -14,9 +14,18 @@ path = "src/main.rs"
 
 [dependencies]
 etchy-core = { path = "../etchy-core" }
-eframe.workspace = true
+# "persistence" pulls eframe's storage backends so user settings (#52) survive a
+# restart on BOTH surfaces: a RON config file on native, localStorage on web. No
+# new external crate — serde/ron/home are already in the workspace lock.
+eframe = { workspace = true, features = ["persistence"] }
 egui.workspace = true
 anyhow.workspace = true
+# Settings (#52) are serialized via eframe's storage; serde derive lives here.
+serde.workspace = true
+
+[dev-dependencies]
+# Round-trip test for the persisted Settings struct (#52).
+serde_json.workspace = true
 
 # Web (WASM) build only — the browser entry point + canvas wiring + the bundled
 # demo board (embedded at compile time; the board itself is gitignored).
