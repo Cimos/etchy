@@ -60,7 +60,7 @@ mod native {
                 return ExitCode::from(2);
             }
         };
-        let app = ViewApp::new(diff, label(&old_dir), label(&new_dir));
+        let (old_lbl, new_lbl) = (label(&old_dir), label(&new_dir));
         // No window icon: the in-app "etchy" wordmark is the single logo on both
         // surfaces (#18). Setting a window icon here gave native a second logo.
         let viewport = egui::ViewportBuilder::default()
@@ -73,7 +73,13 @@ mod native {
             multisampling: 4,
             ..Default::default()
         };
-        match eframe::run_native("etchy", native_options, Box::new(|_cc| Ok(Box::new(app)))) {
+        // Move the labels + diff into the creation closure so persisted settings
+        // (#52) restore from `cc.storage` before the first frame.
+        match eframe::run_native(
+            "etchy",
+            native_options,
+            Box::new(move |cc| Ok(Box::new(ViewApp::from_cc(cc, diff, old_lbl, new_lbl)))),
+        ) {
             Ok(()) => ExitCode::from(0),
             Err(e) => {
                 eprintln!("etchy-gui: window error: {e}");
@@ -172,14 +178,21 @@ fn main() {
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("canvas element #the_canvas_id");
         // The bundled demo board is the public Mad_RP2040 (v0.0.0 -> v0.0.1), from
-        // its GitHub release fab packs — label it accordingly.
-        let app = ViewApp::new(
-            demo_diff(),
-            "Mad_RP2040 v0.0.0".into(),
-            "Mad_RP2040 v0.0.1".into(),
-        );
+        // its GitHub release fab packs — label it accordingly. The creation closure
+        // restores persisted settings from localStorage via `cc.storage` (#52).
         eframe::WebRunner::new()
-            .start(canvas, web_options, Box::new(|_cc| Ok(Box::new(app))))
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| {
+                    Ok(Box::new(ViewApp::from_cc(
+                        cc,
+                        demo_diff(),
+                        "Mad_RP2040 v0.0.0".into(),
+                        "Mad_RP2040 v0.0.1".into(),
+                    )))
+                }),
+            )
             .await
             .expect("failed to start eframe web runner");
     });
@@ -456,6 +469,12 @@ struct ViewApp {
     /// brand green/red; a "Colors" popover edits them.
     col_added: Color32,
     col_removed: Color32,
+    /// Canvas (board background) colour (#53). Defaults to the brand board-dark;
+    /// editable in the Colors window and persisted (#52). Used wherever the canvas
+    /// is cleared instead of the fixed `chrome().canvas`.
+    canvas_color: Color32,
+    /// Grid colour (#53). Faint copper by default; persisted (#52).
+    grid_color: Color32,
     /// Per-layer base/context colour overrides, keyed by the layer's index in
     /// `diff.layers` (default = layer_type_color for that kind) (#21).
     base_overrides: Vec<(usize, Color32)>,
@@ -508,6 +527,8 @@ impl ViewApp {
             base_level: BaseLevel::Faint,
             col_added: C_ADDED,
             col_removed: C_REMOVED,
+            canvas_color: C_CANVAS,
+            grid_color: C_GRID_DEFAULT,
             base_overrides: Vec::new(),
             show_colors: false,
             min_area_mm2: MIN_AREA_MM2,
@@ -781,6 +802,9 @@ const C_CREAM: Color32 = Color32::from_rgb(0xf4, 0xf1, 0xe8); // #f4f1e8
 /// Faint copper for the board-outline reference on every layer (G10) — reads as
 /// chrome, not diff content. Premultiply-safe via from_rgba_unmultiplied.
 const C_OUTLINE_FAINT: Color32 = Color32::from_rgba_premultiplied(0x38, 0x27, 0x0e, 0x3c);
+/// Default grid colour (#53): a faint copper, readable on the board-dark canvas
+/// without competing with diff content. User-overridable + persisted (#52).
+const C_GRID_DEFAULT: Color32 = Color32::from_rgba_premultiplied(0x1f, 0x16, 0x08, 0x22);
 
 /// Light or dark theme (G — dark/light mode).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -847,25 +871,188 @@ const MARKER_PX: f32 = 3.0;
 /// but the count is always surfaced in the caption, never silently.
 const MIN_AREA_MM2: f64 = 0.0004;
 
+// ===========================================================================
+// Persisted user settings (#52). eframe's built-in storage saves these to a RON
+// config file on native and to localStorage on web — no new external crate. The
+// struct mirrors the user-tunable view state on `ViewApp`; `Color32` isn't
+// `Serialize`, so colours are stored as `[u8; 4]` (unmultiplied sRGBA).
+// ===========================================================================
+
+/// Theme persists as a stable string so the on-disk form survives enum reordering.
+impl serde::Serialize for Theme {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for Theme {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "light" => Theme::Light,
+            _ => Theme::Dark,
+        })
+    }
+}
+
+/// Base level persists as a stable string (same rationale as `Theme`).
+impl serde::Serialize for BaseLevel {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            BaseLevel::Off => "off",
+            BaseLevel::Faint => "faint",
+            BaseLevel::Strong => "strong",
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for BaseLevel {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "off" => BaseLevel::Off,
+            "strong" => BaseLevel::Strong,
+            _ => BaseLevel::Faint,
+        })
+    }
+}
+
+/// `Color32` -> unmultiplied sRGBA bytes, for storage (Color32 isn't Serialize).
+fn color_to_rgba(c: Color32) -> [u8; 4] {
+    c.to_srgba_unmultiplied()
+}
+/// The inverse of [`color_to_rgba`].
+fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color32 {
+    Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// The user-tunable view state, persisted via eframe storage (#52). Colours are
+/// `[u8; 4]` because `Color32` isn't `Serialize`; everything round-trips through
+/// [`ViewApp::to_settings`] / [`ViewApp::apply_settings`].
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+struct Settings {
+    theme: Theme,
+    base_level: BaseLevel,
+    /// Per-layer base-colour overrides, keyed by layer index (#21).
+    base_overrides: Vec<(usize, [u8; 4])>,
+    min_area_mm2: f64,
+    col_added: [u8; 4],
+    col_removed: [u8; 4],
+    /// Canvas + grid colours (#53).
+    canvas_color: [u8; 4],
+    grid_color: [u8; 4],
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: Theme::Dark,
+            base_level: BaseLevel::Faint,
+            base_overrides: Vec::new(),
+            min_area_mm2: MIN_AREA_MM2,
+            col_added: color_to_rgba(C_ADDED),
+            col_removed: color_to_rgba(C_REMOVED),
+            canvas_color: color_to_rgba(C_CANVAS),
+            grid_color: color_to_rgba(C_GRID_DEFAULT),
+        }
+    }
+}
+
+impl ViewApp {
+    /// Build the app and restore any persisted settings from eframe storage (#52).
+    /// The creation closure for both `run_native` and the web `WebRunner` routes
+    /// through here so saved preferences apply identically on both surfaces.
+    fn from_cc(
+        cc: &eframe::CreationContext<'_>,
+        diff: BoardDiff,
+        old_label: String,
+        new_label: String,
+    ) -> Self {
+        let mut app = Self::new(diff, old_label, new_label);
+        if let Some(storage) = cc.storage {
+            if let Some(settings) = eframe::get_value::<Settings>(storage, eframe::APP_KEY) {
+                app.apply_settings(settings);
+            }
+        }
+        app
+    }
+
+    /// Snapshot the user-tunable state for persistence (#52).
+    fn to_settings(&self) -> Settings {
+        Settings {
+            theme: self.theme,
+            base_level: self.base_level,
+            base_overrides: self
+                .base_overrides
+                .iter()
+                .map(|(i, c)| (*i, color_to_rgba(*c)))
+                .collect(),
+            min_area_mm2: self.min_area_mm2,
+            col_added: color_to_rgba(self.col_added),
+            col_removed: color_to_rgba(self.col_removed),
+            canvas_color: color_to_rgba(self.canvas_color),
+            grid_color: color_to_rgba(self.grid_color),
+        }
+    }
+
+    /// Apply persisted settings onto a freshly-built app (#52). Diff geometry and
+    /// the layer order are NOT touched — only view preferences.
+    fn apply_settings(&mut self, s: Settings) {
+        self.theme = s.theme;
+        self.applied_theme = None; // force re-applying the egui visuals next frame
+        self.base_level = s.base_level;
+        self.base_overrides = s
+            .base_overrides
+            .into_iter()
+            .map(|(i, c)| (i, rgba_to_color(c)))
+            .collect();
+        self.min_area_mm2 = s.min_area_mm2;
+        self.col_added = rgba_to_color(s.col_added);
+        self.col_removed = rgba_to_color(s.col_removed);
+        self.canvas_color = rgba_to_color(s.canvas_color);
+        self.grid_color = rgba_to_color(s.grid_color);
+    }
+}
+
 impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
-        // lives in the host HTML), so these are always safe to read.
-        let (toggle_base, fit, overlay, before, after, next, prev, toggle_outline, escape) = ui
-            .input(|i| {
-                use egui::Key;
-                (
-                    i.key_pressed(Key::S),
-                    i.key_pressed(Key::F),
-                    i.key_pressed(Key::O),
-                    i.key_pressed(Key::B),
-                    i.key_pressed(Key::A),
-                    i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
-                    i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
-                    i.key_pressed(Key::E),
-                    i.key_pressed(Key::Escape),
-                )
-            });
+        // Keyboard shortcuts. Suppressed while a text field has focus (e.g. the
+        // numeric noise-filter DragValue while it's being edited) so typing digits
+        // doesn't also switch the diff mode (#55).
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        let (
+            toggle_base,
+            fit,
+            mode_overlay,
+            mode_before,
+            mode_after,
+            mode_split,
+            next,
+            prev,
+            toggle_outline,
+            escape,
+        ) = ui.input(|i| {
+            use egui::Key;
+            if typing {
+                return (
+                    false, false, false, false, false, false, false, false, false, false,
+                );
+            }
+            (
+                i.key_pressed(Key::S),
+                i.key_pressed(Key::F),
+                // Mode hotkeys (#55): 1=Overlay 2=Before 3=After 4=Split, plus the
+                // letter aliases O/B/A (S is taken by the base-level toggle).
+                i.key_pressed(Key::Num1) || i.key_pressed(Key::O),
+                i.key_pressed(Key::Num2) || i.key_pressed(Key::B),
+                i.key_pressed(Key::Num3) || i.key_pressed(Key::A),
+                i.key_pressed(Key::Num4),
+                i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
+                i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
+                i.key_pressed(Key::E),
+                i.key_pressed(Key::Escape),
+            )
+        });
         if escape {
             // Esc clears the ruler and leaves measure mode (#22).
             self.measure_pts.clear();
@@ -880,14 +1067,17 @@ impl eframe::App for ViewApp {
         if fit {
             self.cam.fitted = false;
         }
-        if overlay {
+        if mode_overlay {
             self.mode = Mode::Overlay;
         }
-        if before {
+        if mode_before {
             self.mode = Mode::Before;
         }
-        if after {
+        if mode_after {
             self.mode = Mode::After;
+        }
+        if mode_split {
+            self.mode = Mode::Split;
         }
         if next {
             self.step_layer(1);
@@ -1101,10 +1291,16 @@ impl eframe::App for ViewApp {
         // popup works; a menu_button closed on the first click inside it.
         if self.show_colors {
             let mut open = true;
+            // Open centered on the screen (#56): pin the first-frame position to the
+            // viewport centre via a CENTER_CENTER pivot. egui remembers the dragged
+            // position afterwards, so it stays movable.
+            let center = ui.ctx().content_rect().center();
             egui::Window::new("Colors")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
+                .default_pos(center)
+                .pivot(egui::Align2::CENTER_CENTER)
                 .show(ui.ctx(), |ui| {
                     ui.label(egui::RichText::new("Diff colours").strong());
                     ui.horizontal(|ui| {
@@ -1116,6 +1312,19 @@ impl eframe::App for ViewApp {
                     if ui.button("reset diff to brand").clicked() {
                         self.col_added = C_ADDED;
                         self.col_removed = C_REMOVED;
+                    }
+                    ui.separator();
+                    // Canvas + grid colours (#53) — persisted via #52.
+                    ui.label(egui::RichText::new("Canvas & grid").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Canvas");
+                        ui.color_edit_button_srgba(&mut self.canvas_color);
+                        ui.label("Grid");
+                        ui.color_edit_button_srgba(&mut self.grid_color);
+                    });
+                    if ui.button("reset canvas & grid to default").clicked() {
+                        self.canvas_color = C_CANVAS;
+                        self.grid_color = C_GRID_DEFAULT;
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Layer base colours").strong());
@@ -1175,7 +1384,14 @@ impl eframe::App for ViewApp {
     /// Clear the native framebuffer to the brand board-dark, so the window reads
     /// as #0b0f0e (not the default near-black) and matches the web page.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        chrome(self.theme).canvas.to_normalized_gamma_f32()
+        self.canvas_color.to_normalized_gamma_f32()
+    }
+
+    /// Persist the user-tunable view state (#52). eframe calls this periodically
+    /// and on shutdown; it writes to a RON config file on native and localStorage
+    /// on web. Restored in the constructor via `eframe::get_value`.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, &self.to_settings());
     }
 }
 
@@ -1189,7 +1405,9 @@ impl ViewApp {
             self.show_colors = false;
         }
         let rect = response.rect;
-        painter.rect_filled(rect, 0.0, chrome(self.theme).canvas);
+        // The board background uses the user-configurable canvas colour (#53),
+        // defaulting to the brand board-dark.
+        painter.rect_filled(rect, 0.0, self.canvas_color);
 
         // Fit on first show / layer change.
         if !self.cam.fitted {
@@ -1295,8 +1513,7 @@ impl ViewApp {
             let mut rmesh = egui::epaint::Mesh::default();
             // Base boards honour the base-level (faint/strong dimming) — #44; the
             // board outline (Side::Full) is drawn into BOTH halves for orientation — #45.
-            let base_col =
-                base_display_color(base_color, chrome(self.theme).canvas, self.base_level);
+            let base_col = base_display_color(base_color, self.canvas_color, self.base_level);
             for item in &cache.items {
                 match item.side {
                     Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, lr, base_col),
@@ -1344,7 +1561,7 @@ impl ViewApp {
                 rect,
                 self.base_level,
                 base_color,
-                chrome(self.theme).canvas,
+                self.canvas_color,
                 self.col_added,
                 self.col_removed,
                 min_area_nm2,
@@ -1855,7 +2072,7 @@ mod tests {
         base_display_color, build_geom_key, cycle_base, distance_mm, geom_cache_dirty,
         group_layers, layer_group, outline_legend_visible, pick_outline_index, region_screen_px,
         scroll_to_camera_action, short_layer_name, step_in_order, warning_phase, BaseLevel,
-        CameraAction, LayerGroup, Mode, WarningPhase,
+        CameraAction, LayerGroup, Mode, Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
 
@@ -2250,5 +2467,63 @@ mod tests {
         assert_eq!(step_in_order(&order, 99, 1), 0);
         // empty order is a no-op (returns the input)
         assert_eq!(step_in_order(&[], 5, 1), 5);
+    }
+
+    #[test]
+    fn settings_serde_round_trips() {
+        use super::{color_to_rgba, rgba_to_color, Settings};
+        use egui::Color32;
+        let s = Settings {
+            theme: Theme::Light,
+            base_level: BaseLevel::Strong,
+            base_overrides: vec![(0, [1, 2, 3, 4]), (3, [255, 0, 128, 255])],
+            min_area_mm2: 0.0123,
+            col_added: [10, 20, 30, 255],
+            col_removed: [200, 50, 60, 255],
+            canvas_color: [11, 15, 14, 255],
+            grid_color: [56, 39, 14, 60],
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        let back: Settings = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(s, back);
+        // Color32 <-> [u8;4] is a faithful round trip.
+        let c = Color32::from_rgba_unmultiplied(56, 39, 14, 60);
+        assert_eq!(rgba_to_color(color_to_rgba(c)), c);
+    }
+
+    /// A minimal empty diff for constructing a `ViewApp` in tests (no layers).
+    fn empty_diff() -> super::BoardDiff {
+        super::BoardDiff {
+            report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
+            layers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn viewapp_to_settings_and_back_preserves_fields() {
+        use super::ViewApp;
+        use egui::Color32;
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.theme = Theme::Light;
+        app.base_level = BaseLevel::Strong;
+        app.min_area_mm2 = 0.05;
+        app.col_added = Color32::from_rgb(1, 2, 3);
+        app.col_removed = Color32::from_rgb(4, 5, 6);
+        app.canvas_color = Color32::from_rgb(7, 8, 9);
+        app.grid_color = Color32::from_rgba_unmultiplied(10, 11, 12, 40);
+        app.base_overrides = vec![(0, Color32::from_rgb(20, 21, 22))];
+
+        let settings = app.to_settings();
+        // A fresh app gets the saved settings applied; every tunable field matches.
+        let mut fresh = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        fresh.apply_settings(settings);
+        assert_eq!(fresh.theme, app.theme);
+        assert_eq!(fresh.base_level, app.base_level);
+        assert_eq!(fresh.min_area_mm2, app.min_area_mm2);
+        assert_eq!(fresh.col_added, app.col_added);
+        assert_eq!(fresh.col_removed, app.col_removed);
+        assert_eq!(fresh.canvas_color, app.canvas_color);
+        assert_eq!(fresh.grid_color, app.grid_color);
+        assert_eq!(fresh.base_overrides, app.base_overrides);
     }
 }
