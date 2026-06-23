@@ -1,7 +1,57 @@
 # etchy — handoff (resume on another machine)
 
-**Branch:** **`gui-web-wasm-v2`** = **PR #10** (supersedes #7, now closed).
-**As of:** 2026-06-22. Pick up by `git fetch && git checkout gui-web-wasm-v2`.
+**As of:** 2026-06-24. Everything is on **`main`**; `git fetch && git checkout main`.
+
+## Latest (2026-06-24) — feedback round + #49 Phase 1–2 merged; main is integrated & green
+
+**State of `main`:** builds + tests green locally (native + wasm, clippy clean,
+fmt clean). Integrates, this session:
+- **Render correctness:** #46 (zoom-stable LOD + marker dots), #48 (track→pad notch
+  fix), and **#66 (pour-clearances regression fix** — #48's winding normalization had
+  over-applied in `push()` and filled filled-region holes solid; now `wind()` is
+  applied only to the macro Outline primitive, regions keep their holes). Visually
+  verified on the FMU board (junctions solid; pours render with clearances).
+- **#49 Phase 1 (#64):** measure-tool upgrades (crosshairs, sticky, off-line copper-chip
+  label, mm/inch/mil units, Ctrl+M, Esc-clear, right/middle-drag pan in measure mode)
+  + grid overlay (toggle, spacing, snap-to-grid with live cursor snap).
+- **#49 Phase 2 (#65 + #69/#54):** persistent settings via eframe (native RON + web
+  localStorage, no new deps); configurable canvas/grid colour; mode hotkeys 1/2/3/4;
+  centered Colors window; per-ECAD input presets (EtchyDefault/KiCad/Altium → pan button).
+
+**Merged PRs this session:** #45, #46, #47, #48, #43, #10 (earlier) → then #66, #65, #64,
+#69 (=#54, superseded the auto-closed #67). All squash-merged; branches deleted.
+
+**⚠️ GitHub Actions CI is failing repo-wide** — every run fails in ~5–18s with **no failed
+step** (a startup/infra/billing issue, NOT our code; verified by building every merge
+green locally). **Check the repo's Actions minutes/billing.** Until fixed, CI can't gate.
+
+**Headless visual verification now works** (this box, no sudo): Playwright + Chromium in
+`~/.cache/etchy-shot-venv`; `~/.cache/etchy-shot-venv/bin/python ~/.cache/etchy-shot-venv/shot.py <url> <out.png> [wait_ms] [w] [h]`
+screenshots the web viewer (serve a build, shot localhost). Used it to catch + confirm
+the pour regression and verify the measure/grid features. Native egui window still can't
+be captured. (See `~/.claude` memory `verify-native-gui-visuals`.)
+
+### For Simon (your workflow: you verify + close issues)
+- **Verify & close** the implemented issues — render: #12/#14 (diagnosed/fixed), #13
+  (notch, verified); the fixed-pending set #28–#42; and the #49 Phase 1–2 issues now
+  shipped: #50 #51 #52 #53 #55 #56 #54. (Fixing PRs used `Refs`, so they stayed open.)
+- **Measure feedback** Ctrl+M / Esc / right-click-pan are implemented but only
+  `pans_on`/`snap` kernels are unit-tested — **confirm those interactions live**.
+- The earlier #15–#27/#44 backlog issues were already closed.
+
+### Remaining #49 plan (NOT done — next up)
+- **Phase 3:** #58 (hide a layer group — quick win) · #61 (swipe/curtain compare view) ·
+  #59 (multi-layer view + highlight — large/future).
+- **Phase 4:** #60 (export SVG/PNG for current/all layers + copper-area; PNG needs a
+  deny.toml-cleared raster crate e.g. tiny-skia) · #57 (UI polish + top-bar wireframes).
+- **Phase 5:** #62 (drill Excellon/NC parsing).
+- **Follow-ups:** #54 full per-key remapper; #68 (feedback widget → pre-filled GitHub issue).
+
+---
+
+## Earlier — PR #10 era (history)
+
+**Branch:** `gui-web-wasm-v2` = PR #10 (merged). Original resume notes below.
 
 ## Latest (2026-06-22) — #10 gate cleared: public demo board + web CI, all green
 
