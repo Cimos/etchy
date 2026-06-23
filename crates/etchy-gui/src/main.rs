@@ -490,6 +490,14 @@ struct ViewApp {
     measure_mode: bool,
     /// The last (up to) two world-space points of the ruler.
     measure_pts: Vec<[f64; 2]>,
+    /// Unit the measure label is shown in (#50): mm / inch / mil.
+    measure_unit: Unit,
+    /// Grid overlay on (#51): faint world-spaced lines over the canvas.
+    show_grid: bool,
+    /// Grid spacing in mm (#51); the DragValue edits this.
+    grid_mm: f64,
+    /// Snap measure clicks to the nearest grid intersection (#51).
+    snap_grid: bool,
 }
 
 impl ViewApp {
@@ -522,6 +530,10 @@ impl ViewApp {
             cache: None,
             measure_mode: false,
             measure_pts: Vec::new(),
+            measure_unit: Unit::Mm,
+            show_grid: false,
+            grid_mm: 1.0,
+            snap_grid: false,
         }
     }
 
@@ -781,6 +793,12 @@ const C_CREAM: Color32 = Color32::from_rgb(0xf4, 0xf1, 0xe8); // #f4f1e8
 /// Faint copper for the board-outline reference on every layer (G10) — reads as
 /// chrome, not diff content. Premultiply-safe via from_rgba_unmultiplied.
 const C_OUTLINE_FAINT: Color32 = Color32::from_rgba_premultiplied(0x38, 0x27, 0x0e, 0x3c);
+/// Faint grey for the reference grid (#51) — a fixed faint default; configurable
+/// grid colour is deferred to #53. Translucent so it reads under the geometry.
+const C_GRID: Color32 = Color32::from_rgba_premultiplied(0x4a, 0x50, 0x52, 0x38);
+/// Faint copper for the measure crosshairs (#50) — visible against the board but
+/// clearly chrome, not diff content.
+const C_CROSSHAIR: Color32 = Color32::from_rgba_premultiplied(0x70, 0x55, 0x22, 0x80);
 
 /// Light or dark theme (G — dark/light mode).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -851,25 +869,44 @@ impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
         // lives in the host HTML), so these are always safe to read.
-        let (toggle_base, fit, overlay, before, after, next, prev, toggle_outline, escape) = ui
-            .input(|i| {
-                use egui::Key;
-                (
-                    i.key_pressed(Key::S),
-                    i.key_pressed(Key::F),
-                    i.key_pressed(Key::O),
-                    i.key_pressed(Key::B),
-                    i.key_pressed(Key::A),
-                    i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
-                    i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
-                    i.key_pressed(Key::E),
-                    i.key_pressed(Key::Escape),
-                )
-            });
+        let (
+            toggle_base,
+            fit,
+            overlay,
+            before,
+            after,
+            next,
+            prev,
+            toggle_outline,
+            escape,
+            cycle_unit,
+            toggle_grid,
+        ) = ui.input(|i| {
+            use egui::Key;
+            (
+                i.key_pressed(Key::S),
+                i.key_pressed(Key::F),
+                i.key_pressed(Key::O),
+                i.key_pressed(Key::B),
+                i.key_pressed(Key::A),
+                i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
+                i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
+                i.key_pressed(Key::E),
+                i.key_pressed(Key::Escape),
+                i.key_pressed(Key::U),
+                i.key_pressed(Key::G),
+            )
+        });
         if escape {
-            // Esc clears the ruler and leaves measure mode (#22).
+            // Esc clears the current measurement but stays in measure mode (#50);
+            // the Measure button is what exits + clears.
             self.measure_pts.clear();
-            self.measure_mode = false;
+        }
+        if cycle_unit {
+            self.measure_unit = self.measure_unit.next();
+        }
+        if toggle_grid {
+            self.show_grid = !self.show_grid;
         }
         if toggle_base {
             self.base_level = cycle_base(self.base_level);
@@ -968,7 +1005,9 @@ impl eframe::App for ViewApp {
                 if ui
                     .selectable_label(self.measure_mode, "Measure")
                     .on_hover_text(
-                        "Click two points on the canvas to measure the distance in mm. Esc clears.",
+                        "Click two points on the canvas to measure the distance. The result \
+                         stays drawn (Esc clears it but keeps measuring); the next click after \
+                         two points starts a fresh measurement. Toggle off to exit + clear.",
                     )
                     .clicked()
                 {
@@ -977,6 +1016,33 @@ impl eframe::App for ViewApp {
                         self.measure_pts.clear();
                     }
                 }
+                // Units toggle (#50): click to cycle mm → inch → mil (hotkey: U).
+                if ui
+                    .selectable_label(true, format!("units: {}", self.measure_unit.label()))
+                    .on_hover_text("Distance unit for the measure label — click or press U to cycle mm / inch / mil.")
+                    .clicked()
+                {
+                    self.measure_unit = self.measure_unit.next();
+                }
+                ui.separator();
+                // Grid overlay (#51). Colour is a fixed faint default for now —
+                // configurable grid colour is deferred to #53.
+                if ui
+                    .selectable_label(self.show_grid, "Grid")
+                    .on_hover_text("Overlay a faint reference grid (hotkey: G). Grid colour is configurable later (#53).")
+                    .clicked()
+                {
+                    self.show_grid = !self.show_grid;
+                }
+                ui.add(
+                    egui::DragValue::new(&mut self.grid_mm)
+                        .speed(0.1)
+                        .range(0.01..=100.0)
+                        .suffix(" mm"),
+                )
+                .on_hover_text("Grid spacing in mm.");
+                ui.checkbox(&mut self.snap_grid, "snap")
+                    .on_hover_text("Snap measure clicks to the nearest grid intersection.");
                 ui.separator();
                 // Dark/light toggle. ASCII label — egui's default font has no
                 // sun/moon glyph (it rendered as tofu). Re-applied live in ui().
@@ -1204,7 +1270,15 @@ impl ViewApp {
         if self.measure_mode {
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    let w = screen_to_world(&self.cam, pos, rect);
+                    let mut w = screen_to_world(&self.cam, pos, rect);
+                    // Snap to the nearest grid intersection when enabled (#51):
+                    // world coords are nm; snap in mm then convert back.
+                    if self.snap_grid {
+                        let mm = etchy_core::NM_PER_MM as f64;
+                        w[0] = snap_to_grid_mm(w[0] / mm, self.grid_mm) * mm;
+                        w[1] = snap_to_grid_mm(w[1] / mm, self.grid_mm) * mm;
+                    }
+                    // A completed pair persists; the next click starts a fresh one (#50).
                     if self.measure_pts.len() >= 2 {
                         self.measure_pts.clear();
                     }
@@ -1258,6 +1332,12 @@ impl ViewApp {
             CameraAction::PanX(dx) => self.cam.center[0] -= dx / self.cam.scale,
             CameraAction::PanY(dy) => self.cam.center[1] += dy / self.cam.scale,
             CameraAction::None => {}
+        }
+
+        // Grid overlay (#51): faint world-spaced lines, drawn UNDER the geometry.
+        // Skip if the on-screen spacing is too dense (< 6 px) so it never fills solid.
+        if self.show_grid {
+            draw_grid(&painter, &self.cam, rect, self.grid_mm);
         }
 
         // Build the shapes to draw, per mode.
@@ -1415,8 +1495,8 @@ impl ViewApp {
             );
         }
 
-        // Measure tool overlay (#22): the ruler points, the segment between them,
-        // and a midpoint label with the distance in mm.
+        // Measure tool overlay (#22/#50): crosshairs at the cursor, the ruler points,
+        // the segment, and a sticky distance label offset off the line.
         if self.measure_mode {
             // World [f64;2] → screen, matching world_to_screen's float transform.
             let w2s = |w: [f64; 2]| -> Pos2 {
@@ -1424,6 +1504,25 @@ impl ViewApp {
                 let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
                 Pos2::new(x as f32, y as f32)
             };
+            // Crosshairs at the hover position to aid alignment (#50). Faint, clipped
+            // to the canvas rect (full width + full height through the cursor).
+            if let Some(ptr) = response.hover_pos() {
+                let cross = Stroke::new(1.0, C_CROSSHAIR);
+                painter.line_segment(
+                    [
+                        Pos2::new(rect.left(), ptr.y),
+                        Pos2::new(rect.right(), ptr.y),
+                    ],
+                    cross,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(ptr.x, rect.top()),
+                        Pos2::new(ptr.x, rect.bottom()),
+                    ],
+                    cross,
+                );
+            }
             for w in &self.measure_pts {
                 painter.circle_filled(w2s(*w), 3.0, C_COPPER);
             }
@@ -1431,21 +1530,24 @@ impl ViewApp {
                 let (a, b) = (self.measure_pts[0], self.measure_pts[1]);
                 let (sa, sb) = (w2s(a), w2s(b));
                 painter.line_segment([sa, sb], Stroke::new(1.5, C_COPPER));
+                // Label OFF the line (#50): offset ~14 px perpendicular to the
+                // segment, on a filled copper chip with dark text for legibility.
                 let mid = Pos2::new((sa.x + sb.x) / 2.0, (sa.y + sb.y) / 2.0);
-                let dist = distance_mm(a, b);
-                painter.text(
-                    mid + egui::vec2(0.0, -10.0),
-                    egui::Align2::CENTER_BOTTOM,
-                    format!("{dist:.4} mm"),
-                    egui::FontId::proportional(13.0),
-                    C_COPPER,
+                let (dx, dy) = (sb.x - sa.x, sb.y - sa.y);
+                let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                let off = egui::vec2(-dy / len, dx / len) * 14.0;
+                let dist_mm = distance_mm(a, b);
+                measure_label(
+                    &painter,
+                    mid + off,
+                    &format_distance(dist_mm, self.measure_unit),
                 );
             }
             // Hint at the bottom-left.
             painter.text(
                 rect.left_bottom() + egui::vec2(8.0, -8.0),
                 egui::Align2::LEFT_BOTTOM,
-                "measure: click two points · Esc to clear",
+                "measure: click two points · U units · Esc clears · toggle off to exit",
                 egui::FontId::proportional(12.0),
                 C_COPPER,
             );
@@ -1784,10 +1886,109 @@ fn distance_mm(a: [f64; 2], b: [f64; 2]) -> f64 {
     (dx * dx + dy * dy).sqrt() / etchy_core::NM_PER_MM as f64
 }
 
+/// Unit the measure tool reports distances in (#50). Cycles mm → inch → mil.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    Mm,
+    Inch,
+    Mil,
+}
+
+impl Unit {
+    /// Next unit in the cycle (mm → inch → mil → mm), for the hotkey/toggle.
+    fn next(self) -> Unit {
+        match self {
+            Unit::Mm => Unit::Inch,
+            Unit::Inch => Unit::Mil,
+            Unit::Mil => Unit::Mm,
+        }
+    }
+
+    /// Short label for the controls-row toggle.
+    fn label(self) -> &'static str {
+        match self {
+            Unit::Mm => "mm",
+            Unit::Inch => "in",
+            Unit::Mil => "mil",
+        }
+    }
+}
+
+/// Format a millimetre distance for display in the chosen unit (#50) — the pure
+/// kernel behind the measure label. 25.4 mm == 1 in == 1000 mil. Decimals are
+/// tuned per unit so the precision is sensible at each scale.
+fn format_distance(mm: f64, unit: Unit) -> String {
+    match unit {
+        Unit::Mm => format!("{mm:.3} mm"),
+        Unit::Inch => format!("{:.4} in", mm / 25.4),
+        Unit::Mil => format!("{:.1} mil", mm / 25.4 * 1000.0),
+    }
+}
+
+/// Snap a millimetre coordinate to the nearest grid multiple (#51) — the pure
+/// kernel behind snap-to-grid. `grid_mm <= 0` (or non-finite) leaves it unchanged.
+/// Rounds half away from zero so the behaviour is symmetric across the origin.
+fn snap_to_grid_mm(coord_mm: f64, grid_mm: f64) -> f64 {
+    if !grid_mm.is_finite() || grid_mm <= 0.0 {
+        return coord_mm;
+    }
+    (coord_mm / grid_mm).round() * grid_mm
+}
+
 fn screen_to_world(cam: &Camera, s: Pos2, rect: Rect) -> [f64; 2] {
     let wx = cam.center[0] + (s.x - rect.center().x) as f64 / cam.scale;
     let wy = cam.center[1] - (s.y - rect.center().y) as f64 / cam.scale;
     [wx, wy]
+}
+
+/// Draw the reference grid (#51) at `grid_mm` world spacing across the canvas.
+/// Skips drawing if the on-screen spacing would be < 6 px (too dense → solid fill).
+fn draw_grid(painter: &egui::Painter, cam: &Camera, rect: Rect, grid_mm: f64) {
+    if !grid_mm.is_finite() || grid_mm <= 0.0 {
+        return;
+    }
+    let step_nm = grid_mm * etchy_core::NM_PER_MM as f64;
+    let px_per_line = step_nm * cam.scale; // screen px between adjacent grid lines
+    if !px_per_line.is_finite() || px_per_line < 6.0 {
+        return;
+    }
+    let stroke = Stroke::new(1.0, C_GRID);
+    // World coords visible at the rect edges (y is flipped on screen).
+    let left = screen_to_world(cam, Pos2::new(rect.left(), rect.center().y), rect)[0];
+    let right = screen_to_world(cam, Pos2::new(rect.right(), rect.center().y), rect)[0];
+    let bottom = screen_to_world(cam, Pos2::new(rect.center().x, rect.bottom()), rect)[1];
+    let top = screen_to_world(cam, Pos2::new(rect.center().x, rect.top()), rect)[1];
+    // Vertical lines at each grid X within view.
+    let mut i = (left / step_nm).ceil() as i64;
+    while (i as f64 * step_nm) <= right {
+        let sx = rect.center().x + ((i as f64 * step_nm - cam.center[0]) * cam.scale) as f32;
+        painter.line_segment(
+            [Pos2::new(sx, rect.top()), Pos2::new(sx, rect.bottom())],
+            stroke,
+        );
+        i += 1;
+    }
+    // Horizontal lines at each grid Y within view.
+    let mut j = (bottom / step_nm).ceil() as i64;
+    while (j as f64 * step_nm) <= top {
+        let sy = rect.center().y - ((j as f64 * step_nm - cam.center[1]) * cam.scale) as f32;
+        painter.line_segment(
+            [Pos2::new(rect.left(), sy), Pos2::new(rect.right(), sy)],
+            stroke,
+        );
+        j += 1;
+    }
+}
+
+/// Draw the measure distance label as text on a filled copper chip with dark text
+/// (#50), centred at `at` — legible instead of bare text over the copper line.
+fn measure_label(painter: &egui::Painter, at: Pos2, text: &str) {
+    let font = egui::FontId::proportional(13.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, C_CANVAS);
+    let pad = egui::vec2(5.0, 3.0);
+    let rect = Rect::from_center_size(at, galley.size() + pad * 2.0);
+    painter.rect_filled(rect, 3.0, C_COPPER);
+    painter.galley(rect.min + pad, galley, C_CANVAS);
 }
 
 fn fit(cam: &mut Camera, bb: [i64; 4], rect: Rect) {
@@ -2250,5 +2451,34 @@ mod tests {
         assert_eq!(step_in_order(&order, 99, 1), 0);
         // empty order is a no-op (returns the input)
         assert_eq!(step_in_order(&[], 5, 1), 5);
+    }
+
+    #[test]
+    fn format_distance_per_unit() {
+        use super::{format_distance, Unit};
+        // 25.4 mm == 1 inch == 1000 mil — a known conversion.
+        assert_eq!(format_distance(25.4, Unit::Mm), "25.400 mm");
+        assert_eq!(format_distance(25.4, Unit::Inch), "1.0000 in");
+        assert_eq!(format_distance(25.4, Unit::Mil), "1000.0 mil");
+        // Zero in every unit.
+        assert_eq!(format_distance(0.0, Unit::Mm), "0.000 mm");
+        assert_eq!(format_distance(0.0, Unit::Inch), "0.0000 in");
+        assert_eq!(format_distance(0.0, Unit::Mil), "0.0 mil");
+    }
+
+    #[test]
+    fn snap_to_grid_rounds_to_nearest_multiple() {
+        use super::snap_to_grid_mm;
+        // Nearest multiple of the grid spacing.
+        assert_eq!(snap_to_grid_mm(0.6, 0.5), 0.5);
+        assert_eq!(snap_to_grid_mm(0.8, 0.5), 1.0);
+        assert_eq!(snap_to_grid_mm(2.4, 1.0), 2.0);
+        assert_eq!(snap_to_grid_mm(2.5, 1.0), 3.0); // round half up (away from zero)
+                                                    // Negative coords snap symmetrically.
+        assert_eq!(snap_to_grid_mm(-0.6, 0.5), -0.5);
+        assert_eq!(snap_to_grid_mm(-0.8, 0.5), -1.0);
+        // grid <= 0 leaves the coord unchanged (guard).
+        assert_eq!(snap_to_grid_mm(1.234, 0.0), 1.234);
+        assert_eq!(snap_to_grid_mm(1.234, -1.0), 1.234);
     }
 }
