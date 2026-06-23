@@ -674,6 +674,12 @@ impl<'a> Machine<'a> {
             return;
         }
         let is_dark = self.polarity_dark == exposure;
+        // Normalize winding by polarity (dark→CCW, clear→CW) so the NonZero union
+        // adds overlapping same-polarity primitives instead of cancelling them. An
+        // exporter is free to wind a macro Outline/Polygon either way; a CW dark pad
+        // would otherwise punch a hole where a CCW track overlaps it (the notch at a
+        // track→pad junction — issue #13).
+        let c = crate::geo::wind(c, is_dark);
         match self.spans.last_mut() {
             Some((d, run)) if *d == is_dark => run.push(c),
             _ => self.spans.push((is_dark, vec![c])),
@@ -777,6 +783,32 @@ mod tests {
         let a = area_mm2(g);
         let ideal = 0.2 * 1.0 + std::f64::consts::PI * 0.1 * 0.1;
         assert!((a / ideal - 1.0).abs() < 0.02, "stroke area {a} vs {ideal}");
+    }
+
+    #[test]
+    fn cw_macro_outline_pad_unions_solid_with_track() {
+        // A custom pad defined as a macro Outline wound CLOCKWISE (exporters are free
+        // to), 1×1 mm, with a 0.2 mm track drawn straight through it. The dark pad and
+        // dark track overlap; under a NonZero union the CW pad (winding −1) and CCW
+        // track (winding +1) cancel to 0 in the overlap and punch a hole — the notch
+        // at a track→pad junction (#13). After winding-normalization the union is one
+        // solid region with NO hole.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n\
+                 %AMSQ*\n4,1,4,-0.5,-0.5,-0.5,0.5,0.5,0.5,0.5,-0.5,-0.5,-0.5,0*%\n\
+                 %ADD10SQ*%\n%ADD11C,0.2*%\n\
+                 D10*\nX0Y0D03*\n\
+                 D11*\nX-2000000Y0D02*\nG01*\nX2000000Y0D01*\n\
+                 M02*\n";
+        let ps = resolve_layer(g.as_bytes()).unwrap();
+        // One connected solid (pad + track), and crucially NO holes (no notch).
+        assert_eq!(ps.shapes.len(), 1, "pad+track should be one connected region");
+        assert_eq!(
+            ps.shapes[0].len(),
+            1,
+            "track→pad junction must be solid copper, not a notched hole"
+        );
+        // Sanity: area exceeds the 1 mm² pad alone (the track adds copper).
+        assert!(ps.area_mm2() > 1.2, "area {} too small", ps.area_mm2());
     }
 
     #[test]

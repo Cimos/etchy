@@ -218,6 +218,20 @@ fn shoelace_2x_nm2(c: &[Pt]) -> i128 {
     s
 }
 
+/// Return `c` wound CCW (`ccw == true`) or CW (`ccw == false`), reversing it in
+/// place if needed. Dark copper must be CCW and clearances CW so the NonZero
+/// union/difference *adds* overlapping same-polarity primitives instead of
+/// cancelling them: a CW-wound dark macro-outline pad would otherwise sum to
+/// winding 0 where a CCW track overlaps it and punch a hole (the notch at a
+/// track→pad junction). A degenerate (zero-area) ring is returned unchanged.
+pub(crate) fn wind(mut c: Contour, ccw: bool) -> Contour {
+    let a = shoelace_2x_nm2(&c);
+    if a != 0 && (a > 0) != ccw {
+        c.reverse();
+    }
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
