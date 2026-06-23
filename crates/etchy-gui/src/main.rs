@@ -219,6 +219,32 @@ enum BaseLevel {
     Strong,
 }
 
+/// Input scheme matching the user's ECAD tool (#54). MVP: it only controls which
+/// mouse button pans the canvas (the real differentiator between tools) — scroll
+/// stays zoom-to-cursor for all three. A full per-key remapper is a follow-up.
+/// Persisted via #52 with a stable serde string repr (like `Theme`/`BaseLevel`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum InputPreset {
+    /// etchy's own scheme: primary (left) drag pans. The current behaviour.
+    #[default]
+    EtchyDefault,
+    /// KiCad: middle OR right drag pans.
+    KiCad,
+    /// Altium: right drag pans.
+    Altium,
+}
+
+/// Whether `button` drags should pan the canvas under the given preset (#54). Pure
+/// → unit-testable; the only per-preset difference in the MVP.
+fn pans_on(preset: InputPreset, button: egui::PointerButton) -> bool {
+    use egui::PointerButton::{Middle, Primary, Secondary};
+    match preset {
+        InputPreset::EtchyDefault => button == Primary,
+        InputPreset::KiCad => button == Middle || button == Secondary,
+        InputPreset::Altium => button == Secondary,
+    }
+}
+
 /// What a scroll gesture should do to the camera (G7b #12). Pan amounts are in
 /// screen px; Zoom is a multiplicative scale factor.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -509,6 +535,9 @@ struct ViewApp {
     measure_mode: bool,
     /// The last (up to) two world-space points of the ruler.
     measure_pts: Vec<[f64; 2]>,
+    /// Input scheme matching the user's ECAD tool (#54). MVP: controls which mouse
+    /// button pans the canvas. Persisted via #52.
+    input_preset: InputPreset,
 }
 
 impl ViewApp {
@@ -543,6 +572,7 @@ impl ViewApp {
             cache: None,
             measure_mode: false,
             measure_pts: Vec::new(),
+            input_preset: InputPreset::default(),
         }
     }
 
@@ -916,6 +946,26 @@ impl<'de> serde::Deserialize<'de> for BaseLevel {
     }
 }
 
+/// Input preset persists as a stable string (same rationale as `Theme`).
+impl serde::Serialize for InputPreset {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            InputPreset::EtchyDefault => "etchy",
+            InputPreset::KiCad => "kicad",
+            InputPreset::Altium => "altium",
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for InputPreset {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "kicad" => InputPreset::KiCad,
+            "altium" => InputPreset::Altium,
+            _ => InputPreset::EtchyDefault,
+        })
+    }
+}
+
 /// `Color32` -> unmultiplied sRGBA bytes, for storage (Color32 isn't Serialize).
 fn color_to_rgba(c: Color32) -> [u8; 4] {
     c.to_srgba_unmultiplied()
@@ -941,6 +991,8 @@ struct Settings {
     /// Canvas + grid colours (#53).
     canvas_color: [u8; 4],
     grid_color: [u8; 4],
+    /// Input scheme matching the user's ECAD tool (#54).
+    input_preset: InputPreset,
 }
 
 impl Default for Settings {
@@ -954,6 +1006,7 @@ impl Default for Settings {
             col_removed: color_to_rgba(C_REMOVED),
             canvas_color: color_to_rgba(C_CANVAS),
             grid_color: color_to_rgba(C_GRID_DEFAULT),
+            input_preset: InputPreset::default(),
         }
     }
 }
@@ -992,6 +1045,7 @@ impl ViewApp {
             col_removed: color_to_rgba(self.col_removed),
             canvas_color: color_to_rgba(self.canvas_color),
             grid_color: color_to_rgba(self.grid_color),
+            input_preset: self.input_preset,
         }
     }
 
@@ -1011,6 +1065,7 @@ impl ViewApp {
         self.col_removed = rgba_to_color(s.col_removed);
         self.canvas_color = rgba_to_color(s.canvas_color);
         self.grid_color = rgba_to_color(s.grid_color);
+        self.input_preset = s.input_preset;
     }
 }
 
@@ -1167,6 +1222,30 @@ impl eframe::App for ViewApp {
                         self.measure_pts.clear();
                     }
                 }
+                ui.separator();
+                // Input scheme matching the user's ECAD tool (#54). MVP: picks
+                // which mouse button pans the canvas; persisted via #52.
+                let preset_label = |p: InputPreset| match p {
+                    InputPreset::EtchyDefault => "etchy",
+                    InputPreset::KiCad => "KiCad",
+                    InputPreset::Altium => "Altium",
+                };
+                egui::ComboBox::from_id_salt("input_preset")
+                    .selected_text(format!("input: {}", preset_label(self.input_preset)))
+                    .show_ui(ui, |ui| {
+                        for p in [
+                            InputPreset::EtchyDefault,
+                            InputPreset::KiCad,
+                            InputPreset::Altium,
+                        ] {
+                            ui.selectable_value(&mut self.input_preset, p, preset_label(p));
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Pan mouse button by ECAD tool: etchy = left-drag, \
+                         KiCad = middle/right-drag, Altium = right-drag.",
+                    );
                 ui.separator();
                 // Dark/light toggle. ASCII label — egui's default font has no
                 // sun/moon glyph (it rendered as tofu). Re-applied live in ui().
@@ -1396,6 +1475,15 @@ impl eframe::App for ViewApp {
 }
 
 impl ViewApp {
+    /// Is the canvas being dragged with a button the current input preset assigns
+    /// to panning (#54)? Maps egui's per-button drag state through `pans_on`.
+    fn dragging_pans(&self, response: &egui::Response) -> bool {
+        use egui::PointerButton::{Middle, Primary, Secondary};
+        [Primary, Middle, Secondary]
+            .into_iter()
+            .any(|b| pans_on(self.input_preset, b) && response.dragged_by(b))
+    }
+
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
         let layer = &self.diff.layers[self.selected];
         let size = ui.available_size();
@@ -1429,8 +1517,9 @@ impl ViewApp {
                     self.measure_pts.push(w);
                 }
             }
-        } else if response.dragged() {
-            // Pan (only when not measuring).
+        } else if self.dragging_pans(&response) {
+            // Pan (only when not measuring), on the button(s) the input preset
+            // assigns to panning (#54).
             let d = response.drag_delta();
             self.cam.center[0] -= d.x as f64 / self.cam.scale;
             self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
@@ -2070,9 +2159,9 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 mod tests {
     use super::{
         base_display_color, build_geom_key, cycle_base, distance_mm, geom_cache_dirty,
-        group_layers, layer_group, outline_legend_visible, pick_outline_index, region_screen_px,
-        scroll_to_camera_action, short_layer_name, step_in_order, warning_phase, BaseLevel,
-        CameraAction, LayerGroup, Mode, Theme, WarningPhase,
+        group_layers, layer_group, outline_legend_visible, pans_on, pick_outline_index,
+        region_screen_px, scroll_to_camera_action, short_layer_name, step_in_order, warning_phase,
+        BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
 
@@ -2470,6 +2559,43 @@ mod tests {
     }
 
     #[test]
+    fn pans_on_matches_each_preset() {
+        use egui::PointerButton::{Middle, Primary, Secondary};
+        // etchy default: primary (left) drag only.
+        assert!(pans_on(InputPreset::EtchyDefault, Primary));
+        assert!(!pans_on(InputPreset::EtchyDefault, Middle));
+        assert!(!pans_on(InputPreset::EtchyDefault, Secondary));
+        // KiCad: middle OR right, not primary.
+        assert!(!pans_on(InputPreset::KiCad, Primary));
+        assert!(pans_on(InputPreset::KiCad, Middle));
+        assert!(pans_on(InputPreset::KiCad, Secondary));
+        // Altium: right only.
+        assert!(!pans_on(InputPreset::Altium, Primary));
+        assert!(!pans_on(InputPreset::Altium, Middle));
+        assert!(pans_on(InputPreset::Altium, Secondary));
+        // Default preset is etchy's.
+        assert_eq!(InputPreset::default(), InputPreset::EtchyDefault);
+    }
+
+    #[test]
+    fn input_preset_serde_round_trips() {
+        for p in [
+            InputPreset::EtchyDefault,
+            InputPreset::KiCad,
+            InputPreset::Altium,
+        ] {
+            let json = serde_json::to_string(&p).expect("serialize");
+            let back: InputPreset = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(p, back);
+        }
+        // Unknown / legacy strings fall back to the default, never error.
+        assert_eq!(
+            serde_json::from_str::<InputPreset>("\"bogus\"").expect("deserialize"),
+            InputPreset::EtchyDefault,
+        );
+    }
+
+    #[test]
     fn settings_serde_round_trips() {
         use super::{color_to_rgba, rgba_to_color, Settings};
         use egui::Color32;
@@ -2482,6 +2608,7 @@ mod tests {
             col_removed: [200, 50, 60, 255],
             canvas_color: [11, 15, 14, 255],
             grid_color: [56, 39, 14, 60],
+            input_preset: InputPreset::KiCad,
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
@@ -2512,6 +2639,7 @@ mod tests {
         app.canvas_color = Color32::from_rgb(7, 8, 9);
         app.grid_color = Color32::from_rgba_unmultiplied(10, 11, 12, 40);
         app.base_overrides = vec![(0, Color32::from_rgb(20, 21, 22))];
+        app.input_preset = InputPreset::Altium;
 
         let settings = app.to_settings();
         // A fresh app gets the saved settings applied; every tunable field matches.
@@ -2525,5 +2653,6 @@ mod tests {
         assert_eq!(fresh.canvas_color, app.canvas_color);
         assert_eq!(fresh.grid_color, app.grid_color);
         assert_eq!(fresh.base_overrides, app.base_overrides);
+        assert_eq!(fresh.input_preset, app.input_preset);
     }
 }
