@@ -558,6 +558,12 @@ impl<'a> Machine<'a> {
                         let (rx, ry) = geom::rotate(lx, ly, ang);
                         c.push(Pt::new(snap_nm(ax + rx)?, snap_nm(ay + ry)?));
                     }
+                    // A macro Outline's winding is the exporter's choice; normalize
+                    // it by polarity (dark→CCW, clear→CW) so a CW dark pad doesn't
+                    // cancel against an overlapping CCW track under the NonZero union
+                    // (the track→pad notch — #13). Every other primitive is already
+                    // correctly wound, so only this one is normalized.
+                    let c = crate::geo::wind(c, self.polarity_dark == exp);
                     self.push(c, exp);
                 }
                 MacroContent::VectorLine(v) => {
@@ -674,12 +680,12 @@ impl<'a> Machine<'a> {
             return;
         }
         let is_dark = self.polarity_dark == exposure;
-        // Normalize winding by polarity (dark→CCW, clear→CW) so the NonZero union
-        // adds overlapping same-polarity primitives instead of cancelling them. An
-        // exporter is free to wind a macro Outline/Polygon either way; a CW dark pad
-        // would otherwise punch a hole where a CCW track overlaps it (the notch at a
-        // track→pad junction — issue #13).
-        let c = crate::geo::wind(c, is_dark);
+        // NOTE: contours arrive correctly wound — our geom builders emit CCW solids,
+        // and region fills come CCW-outer/CW-holes from fill_even_odd. Do NOT
+        // re-wind here: forcing every contour to the polarity flips a region's holes
+        // solid (filling pour clearances — the pour-render regression). The one
+        // exception (a macro Outline, whose winding is the exporter's choice) is
+        // normalized at its own call site, not here.
         match self.spans.last_mut() {
             Some((d, run)) if *d == is_dark => run.push(c),
             _ => self.spans.push((is_dark, vec![c])),
@@ -821,6 +827,23 @@ mod tests {
         let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\nX0Y0D02*\nG01*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y2000000D01*\nX0Y0D01*\nG37*\nM02*\n";
         let a = area_mm2(g);
         assert!((a - 4.0).abs() < 0.001, "region area {a} vs 4.0");
+    }
+
+    #[test]
+    fn region_with_inner_loop_keeps_the_hole() {
+        // A 4×4 mm filled region with a 2×2 mm inner loop (a pour clearance) → the
+        // even-odd fill makes the inner loop a hole: 16 − 4 = 12 mm². Regression guard
+        // for the pour-render bug: winding normalization must NOT flip a region's hole
+        // solid (which filled every pour clearance → solid copper). See #13 follow-up.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\n\
+                 X0Y0D02*\nG01*\nX4000000Y0D01*\nX4000000Y4000000D01*\nX0Y4000000D01*\nX0Y0D01*\n\
+                 X1000000Y1000000D02*\nX3000000Y1000000D01*\nX3000000Y3000000D01*\nX1000000Y3000000D01*\nX1000000Y1000000D01*\n\
+                 G37*\nM02*\n";
+        let a = area_mm2(g);
+        assert!(
+            (a - 12.0).abs() < 0.01,
+            "region-with-hole area {a}, expected 12 (4×4 minus 2×2 hole) — hole was filled solid?"
+        );
     }
 
     #[test]
