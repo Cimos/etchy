@@ -362,6 +362,40 @@ mod tests {
         assert_eq!(sum2 / 2, net, "triangulation must exclude the hole");
     }
 
+    #[test]
+    fn triangulate_antipad_no_triangle_inside_hole() {
+        // #13 probe: an anti-pad (square copper with a square clearance hole — the
+        // "square in a footprint" case). Beyond matching the net area, assert no
+        // triangle's centroid lands inside the hole, so the hole reads as empty and
+        // a hole-blind fan can't sneak a spike across the clearance.
+        let s = 2_000_000;
+        let (hx0, hy0, hx1, hy1) = (700_000, 700_000, 1_300_000, 1_300_000);
+        let shape: Shape = vec![
+            vec![Pt::new(0, 0), Pt::new(s, 0), Pt::new(s, s), Pt::new(0, s)],
+            // hole wound CW (i_overlay hole convention)
+            vec![
+                Pt::new(hx0, hy0),
+                Pt::new(hx0, hy1),
+                Pt::new(hx1, hy1),
+                Pt::new(hx1, hy0),
+            ],
+        ];
+        let tris = triangulate_shape(&shape);
+        assert!(!tris.is_empty(), "expected a triangulation");
+        for t in &tris {
+            let cx = (t[0].x + t[1].x + t[2].x) / 3;
+            let cy = (t[0].y + t[1].y + t[2].y) / 3;
+            assert!(
+                !(cx > hx0 && cx < hx1 && cy > hy0 && cy < hy1),
+                "triangle centroid ({cx},{cy}) fell inside the anti-pad hole"
+            );
+        }
+        // And exact net area (outer − hole), as a second guard.
+        let sum2: i128 = tris.iter().map(tri_abs_area2).sum();
+        let net = PolygonSet::new(vec![shape.clone()]).area_nm2();
+        assert_eq!(sum2 / 2, net, "triangulation must net out to outer − hole");
+    }
+
     /// Twice the unsigned area of a triangle, in nm² (i128).
     fn tri_abs_area2(t: &[Pt; 3]) -> i128 {
         ((t[1].x as i128 - t[0].x as i128) * (t[2].y as i128 - t[0].y as i128)

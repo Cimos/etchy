@@ -9,6 +9,39 @@
 
 use etchy_core::Pt;
 
+/// How a diff region draws at a given on-screen size (#14). The kernel below maps a
+/// region's screen-px size + its noise verdict to exactly one of these, so the cull
+/// (genuine noise) and the LOD fade (real-but-tiny) are no longer entangled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Lod {
+    /// Genuine noise (area below the absolute min) — dropped at every zoom.
+    Cull,
+    /// A real diff too small to draw to scale — show a fixed-size marker dot so it
+    /// stays visible instead of phantoming.
+    Marker,
+    /// Draw the geometry to scale at this opacity (1.0 = full).
+    Fade(f32),
+}
+
+/// Decide how a diff region renders from its on-screen width `px`, the fade band
+/// `[lo, hi]`, and whether it is genuine noise (area below the absolute min).
+///
+/// - `is_noise` → [`Lod::Cull`] (the only cull path; surfaced in the caption).
+/// - else `px <= lo` → [`Lod::Marker`] (real but sub-pixel — a fixed dot, never gone).
+/// - else → [`Lod::Fade`] with [`geometry_alpha`] (≥ `hi` clamps to full).
+///
+/// This keeps a real diff visible (as a dot) at all zooms — the fix for the #14
+/// phantom diff that vanished when zoomed out.
+pub fn lod_render(px: f32, lo: f32, hi: f32, is_noise: bool) -> Lod {
+    if is_noise {
+        Lod::Cull
+    } else if px <= lo {
+        Lod::Marker
+    } else {
+        Lod::Fade(geometry_alpha(px, lo, hi))
+    }
+}
+
 /// Geometry opacity for a feature `px` wide on screen: 0 at/below `lo`, 1 at/above
 /// `hi`, linear between. Below `lo` the feature is simply not drawn, so tiny changes
 /// fade out as you zoom out rather than clamping to a fixed size.
@@ -41,6 +74,50 @@ pub fn ring_area_nm2(ring: &[Pt]) -> f64 {
 mod tests {
     use super::*;
     use etchy_core::Pt;
+
+    #[test]
+    fn lod_render_genuine_noise_is_culled() {
+        // #14: a region below the absolute min-area (is_noise = true) is dropped at
+        // every zoom — even when it would render large on screen. This is the ONLY
+        // path that culls; it's surfaced in the caption, never a silent miss.
+        assert_eq!(lod_render(0.2, 1.5, 5.0, true), Lod::Cull);
+        assert_eq!(lod_render(100.0, 1.5, 5.0, true), Lod::Cull);
+    }
+
+    #[test]
+    fn lod_render_below_lo_is_a_marker_not_culled() {
+        // A real diff (not noise) that renders sub-pixel must show as a fixed-size
+        // MARKER dot, never vanish (the #14 phantom/all-green bug).
+        assert_eq!(lod_render(0.0, 1.5, 5.0, false), Lod::Marker);
+        assert_eq!(lod_render(1.5, 1.5, 5.0, false), Lod::Marker); // at lo: still a marker
+        assert_eq!(lod_render(0.3, 1.5, 5.0, false), Lod::Marker); // deep sub-pixel
+    }
+
+    #[test]
+    fn lod_render_mid_fades() {
+        // Between lo and hi: fade with the same ramp as geometry_alpha.
+        match lod_render(3.25, 1.5, 5.0, false) {
+            Lod::Fade(a) => assert!((a - 0.5).abs() < 1e-6, "expected ~0.5, got {a}"),
+            other => panic!("expected Fade in the ramp band, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lod_render_large_is_full_geometry() {
+        // At/above hi: full opaque geometry (Fade(1.0)).
+        assert_eq!(lod_render(5.0, 1.5, 5.0, false), Lod::Fade(1.0));
+        assert_eq!(lod_render(50.0, 1.5, 5.0, false), Lod::Fade(1.0));
+    }
+
+    #[test]
+    fn lod_render_fade_band_is_continuous_with_geometry_alpha() {
+        // The Fade branch must agree with geometry_alpha across the band, so wiring
+        // it in can't change mid-zoom appearance.
+        for &px in &[1.6_f32, 2.0, 3.0, 4.0, 4.9] {
+            let a = geometry_alpha(px, 1.5, 5.0);
+            assert_eq!(lod_render(px, 1.5, 5.0, false), Lod::Fade(a));
+        }
+    }
 
     #[test]
     fn geometry_alpha_ramps_and_clamps() {
