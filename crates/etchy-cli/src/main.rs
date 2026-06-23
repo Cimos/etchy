@@ -10,7 +10,10 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use etchy_core::{compare, coordinate_mismatch_warning, Board, DiffReport, GerberFormat, Layer};
+use etchy_core::{
+    compare_detailed, coordinate_mismatch_warning, layer_svg, Board, DiffReport, GerberFormat,
+    Layer, LayerStatus,
+};
 
 /// etchy's CI exit-code contract.
 #[repr(i32)]
@@ -45,6 +48,11 @@ struct Cli {
     /// Deprecated alias for `--format json`.
     #[arg(long)]
     json: bool,
+    /// Write a per-layer SVG of the diff into this directory: one `<layer>.svg`
+    /// per changed layer (base faint grey, removed red, added green). The
+    /// directory is created if it does not exist.
+    #[arg(long, value_name = "DIR")]
+    svg: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -78,11 +86,17 @@ fn run(cli: &Cli) -> Result<DiffReport> {
     let (new, nf) = load_board(&cli.new)
         .with_context(|| format!("loading new revision {}", cli.new.display()))?;
 
-    let mut report = compare(&old, &new).context("comparing revisions")?;
+    let diff = compare_detailed(&old, &new).context("comparing revisions")?;
+    let mut report = diff.report.clone();
     if let (Some(o), Some(n)) = (of, nf) {
         if let Some(w) = coordinate_mismatch_warning(&o, &n) {
             report.warnings.push(w);
         }
+    }
+
+    // Optional SVG export: one file per changed layer (headless render).
+    if let Some(dir) = &cli.svg {
+        write_svgs(&diff, dir).with_context(|| format!("writing SVGs to {}", dir.display()))?;
     }
 
     // `--json` is the deprecated alias for `--format json`.
@@ -135,6 +149,28 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
         });
     }
     Ok((Board { layers }, fmt))
+}
+
+/// Write one SVG per *changed* layer into `dir` (created if missing). Filenames
+/// are the layer's display name (e.g. `top-copper.svg`); the geometry → SVG
+/// rendering itself is the pure `etchy_core::layer_svg`.
+fn write_svgs(diff: &etchy_core::BoardDiff, dir: &Path) -> Result<usize> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating output directory {}", dir.display()))?;
+    let mut written = 0;
+    for (i, layer) in diff.layers.iter().enumerate() {
+        if layer.status == LayerStatus::Unchanged {
+            continue;
+        }
+        let svg = layer_svg(layer);
+        // Prefix with the stack index so two layers that share a display name
+        // (e.g. two `other` layers) never clobber each other's file.
+        let path = dir.join(format!("{i:02}-{}.svg", layer.name()));
+        std::fs::write(&path, svg).with_context(|| format!("writing {}", path.display()))?;
+        eprintln!("etchy: wrote {}", path.display());
+        written += 1;
+    }
+    Ok(written)
 }
 
 /// Human-readable summary table to stdout (changed layers first).
