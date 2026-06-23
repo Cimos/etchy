@@ -867,8 +867,11 @@ const MIN_AREA_MM2: f64 = 0.0004;
 
 impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Keyboard shortcuts. The egui UI has no text inputs (the feedback widget
-        // lives in the host HTML), so these are always safe to read.
+        // Keyboard shortcuts. The grid-spacing DragValue is text-editable, so skip
+        // shortcuts while a widget has keyboard focus (don't hijack typing / let
+        // egui's own Esc-to-defocus win). Ctrl+M is modifier-aware (#52, fix #4) so
+        // it can't collide with any plain-letter binding.
+        let typing = ui.ctx().egui_wants_keyboard_input();
         let (
             toggle_base,
             fit,
@@ -881,6 +884,7 @@ impl eframe::App for ViewApp {
             escape,
             cycle_unit,
             toggle_grid,
+            toggle_measure,
         ) = ui.input(|i| {
             use egui::Key;
             (
@@ -895,11 +899,20 @@ impl eframe::App for ViewApp {
                 i.key_pressed(Key::Escape),
                 i.key_pressed(Key::U),
                 i.key_pressed(Key::G),
+                i.modifiers.ctrl && i.key_pressed(Key::M),
             )
         });
-        if escape {
-            // Esc clears the current measurement but stays in measure mode (#50);
-            // the Measure button is what exits + clears.
+        if toggle_measure && !typing {
+            // Ctrl+M toggles measure mode (#52, fix #4), mirroring the button.
+            self.measure_mode = !self.measure_mode;
+            if !self.measure_mode {
+                self.measure_pts.clear();
+            }
+        }
+        if escape && !typing {
+            // Esc clears the current measurement but stays in measure mode (#50,
+            // fix #5); the Measure button is what exits + clears. Skipped while a
+            // field is focused so egui can use Esc to defocus it.
             self.measure_pts.clear();
         }
         if cycle_unit {
@@ -1265,18 +1278,18 @@ impl ViewApp {
             self.cam.fitted = true;
         }
 
-        // Measure tool (#22): record clicks as world points (keep the last 2);
-        // while active, suppress panning so a drag doesn't move the board.
+        // Measure tool (#22): record clicks as world points (keep the last 2).
+        // In measure mode only a PRIMARY click places a point; secondary
+        // (right) and middle drags still pan the board (#52, fix #2) so the user
+        // can reposition mid-measure. Outside measure mode, any drag pans.
         if self.measure_mode {
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let mut w = screen_to_world(&self.cam, pos, rect);
-                    // Snap to the nearest grid intersection when enabled (#51):
-                    // world coords are nm; snap in mm then convert back.
+                    // Snap the placed point to the nearest grid intersection when
+                    // enabled (#51) — the click follows the already-snapped cursor.
                     if self.snap_grid {
-                        let mm = etchy_core::NM_PER_MM as f64;
-                        w[0] = snap_to_grid_mm(w[0] / mm, self.grid_mm) * mm;
-                        w[1] = snap_to_grid_mm(w[1] / mm, self.grid_mm) * mm;
+                        w = snap_world_to_grid(w, self.grid_mm);
                     }
                     // A completed pair persists; the next click starts a fresh one (#50).
                     if self.measure_pts.len() >= 2 {
@@ -1285,8 +1298,17 @@ impl ViewApp {
                     self.measure_pts.push(w);
                 }
             }
+            // Pan with secondary/middle drag while measuring (#52, fix #2):
+            // primary-drag stays reserved for point placement.
+            if response.dragged_by(egui::PointerButton::Secondary)
+                || response.dragged_by(egui::PointerButton::Middle)
+            {
+                let d = response.drag_delta();
+                self.cam.center[0] -= d.x as f64 / self.cam.scale;
+                self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
+            }
         } else if response.dragged() {
-            // Pan (only when not measuring).
+            // Pan (any button) when not measuring.
             let d = response.drag_delta();
             self.cam.center[0] -= d.x as f64 / self.cam.scale;
             self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
@@ -1506,19 +1528,28 @@ impl ViewApp {
             };
             // Crosshairs at the hover position to aid alignment (#50). Faint, clipped
             // to the canvas rect (full width + full height through the cursor).
+            // With snap on (#52, fix #3) the crosshair locks LIVE to the nearest
+            // grid intersection as the mouse moves, so the user sees where the next
+            // click will land; the placed point just follows this snapped cursor.
             if let Some(ptr) = response.hover_pos() {
+                let cross_at = if self.snap_grid {
+                    let w = screen_to_world(&self.cam, ptr, rect);
+                    w2s(snap_world_to_grid(w, self.grid_mm))
+                } else {
+                    ptr
+                };
                 let cross = Stroke::new(1.0, C_CROSSHAIR);
                 painter.line_segment(
                     [
-                        Pos2::new(rect.left(), ptr.y),
-                        Pos2::new(rect.right(), ptr.y),
+                        Pos2::new(rect.left(), cross_at.y),
+                        Pos2::new(rect.right(), cross_at.y),
                     ],
                     cross,
                 );
                 painter.line_segment(
                     [
-                        Pos2::new(ptr.x, rect.top()),
-                        Pos2::new(ptr.x, rect.bottom()),
+                        Pos2::new(cross_at.x, rect.top()),
+                        Pos2::new(cross_at.x, rect.bottom()),
                     ],
                     cross,
                 );
@@ -1933,6 +1964,16 @@ fn snap_to_grid_mm(coord_mm: f64, grid_mm: f64) -> f64 {
         return coord_mm;
     }
     (coord_mm / grid_mm).round() * grid_mm
+}
+
+/// Snap a world point (nm) to the nearest grid intersection (#51/#52). World
+/// coords are nm; snap in mm then convert back. `grid_mm <= 0` leaves it as-is.
+fn snap_world_to_grid(w: [f64; 2], grid_mm: f64) -> [f64; 2] {
+    let mm = etchy_core::NM_PER_MM as f64;
+    [
+        snap_to_grid_mm(w[0] / mm, grid_mm) * mm,
+        snap_to_grid_mm(w[1] / mm, grid_mm) * mm,
+    ]
 }
 
 fn screen_to_world(cam: &Camera, s: Pos2, rect: Rect) -> [f64; 2] {
@@ -2480,5 +2521,20 @@ mod tests {
         // grid <= 0 leaves the coord unchanged (guard).
         assert_eq!(snap_to_grid_mm(1.234, 0.0), 1.234);
         assert_eq!(snap_to_grid_mm(1.234, -1.0), 1.234);
+    }
+
+    #[test]
+    fn snap_world_to_grid_snaps_both_axes_in_nm() {
+        use super::snap_world_to_grid;
+        let mm = etchy_core::NM_PER_MM as f64;
+        // 0.6 mm, 2.4 mm in nm; 1 mm grid → 1 mm, 2 mm.
+        let snapped = snap_world_to_grid([0.6 * mm, 2.4 * mm], 1.0);
+        assert_eq!(snapped, [1.0 * mm, 2.0 * mm]);
+        // Half-mm grid, negative axis snaps symmetrically.
+        let snapped = snap_world_to_grid([0.8 * mm, -0.6 * mm], 0.5);
+        assert_eq!(snapped, [1.0 * mm, -0.5 * mm]);
+        // grid <= 0 leaves the point unchanged (passes the guard through).
+        let raw = [1.234 * mm, 5.678 * mm];
+        assert_eq!(snap_world_to_grid(raw, 0.0), raw);
     }
 }
