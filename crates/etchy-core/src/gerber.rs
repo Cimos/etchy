@@ -801,7 +801,11 @@ mod tests {
                  M02*\n";
         let ps = resolve_layer(g.as_bytes()).unwrap();
         // One connected solid (pad + track), and crucially NO holes (no notch).
-        assert_eq!(ps.shapes.len(), 1, "pad+track should be one connected region");
+        assert_eq!(
+            ps.shapes.len(),
+            1,
+            "pad+track should be one connected region"
+        );
         assert_eq!(
             ps.shapes[0].len(),
             1,
