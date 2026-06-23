@@ -61,14 +61,11 @@ mod native {
             }
         };
         let app = ViewApp::new(diff, label(&old_dir), label(&new_dir));
-        let mut viewport = egui::ViewportBuilder::default()
+        // No window icon: the in-app "etchy" wordmark is the single logo on both
+        // surfaces (#18). Setting a window icon here gave native a second logo.
+        let viewport = egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 760.0])
             .with_title("etchy — PCB diff viewer");
-        if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!(
-            "../../../assets/brand/png/etchy-app-icon-512.png"
-        )) {
-            viewport = viewport.with_icon(icon);
-        }
         let native_options = eframe::NativeOptions {
             viewport,
             // 4x MSAA so sub-pixel slivers (thin track/pad junctions, shared edges)
@@ -339,7 +336,33 @@ fn layer_type_color(kind: etchy_core::LayerKind, theme: Theme) -> Color32 {
     // (dark, light) per family — light variants are darker so they read on a
     // cream board (e.g. silk's cream would vanish on a light canvas) (#57).
     let (dark, light) = match kind {
-        TopCopper | BottomCopper | InnerCopper(_) => (C_COPPER, C_COPPER),
+        // Per-layer copper defaults in the spirit of KiCad/Altium so flipping
+        // layers reads by colour, not all one gold (#20). Top = F.Cu red,
+        // bottom = B.Cu blue, inners cycle through distinct muted tones.
+        TopCopper => (
+            Color32::from_rgb(0xc8, 0x34, 0x34),
+            Color32::from_rgb(0xa3, 0x2a, 0x2a),
+        ),
+        BottomCopper => (
+            Color32::from_rgb(0x4d, 0x7f, 0xc4),
+            Color32::from_rgb(0x36, 0x5c, 0x94),
+        ),
+        InnerCopper(n) => {
+            let inner = [
+                (0x4f_u8, 0x9c_u8, 0x4f_u8), // green
+                (0x9c, 0x8a, 0x3a),          // olive
+                (0x7a, 0x5c, 0xa8),          // violet
+                (0x3a, 0x9c, 0x94),          // teal
+                (0xb0, 0x6a, 0x3a),          // burnt orange
+                (0x8a, 0x4f, 0x6a),          // mauve
+            ];
+            let (r, g, b) = inner[(n as usize).saturating_sub(1) % inner.len()];
+            let darker = |v: u8| (v as f32 * 0.78) as u8;
+            (
+                Color32::from_rgb(r, g, b),
+                Color32::from_rgb(darker(r), darker(g), darker(b)),
+            )
+        }
         TopSilk | BottomSilk => (C_CREAM, Color32::from_rgb(0x6b, 0x64, 0x56)),
         TopMask | BottomMask => (
             Color32::from_rgb(0x2e, 0x7d, 0x4f),
@@ -362,29 +385,18 @@ fn layer_type_color(kind: etchy_core::LayerKind, theme: Theme) -> Color32 {
     }
 }
 
-/// Distinct layer kinds in first-seen order — drives the Colors window's
-/// per-layer rows so every kind on the board can be coloured.
-fn present_layer_kinds(
-    kinds: impl Iterator<Item = etchy_core::LayerKind>,
-) -> Vec<etchy_core::LayerKind> {
-    let mut seen = Vec::new();
-    for k in kinds {
-        if !seen.contains(&k) {
-            seen.push(k);
-        }
-    }
-    seen
-}
-
-/// The base colour for `kind`: a user override if set, else the type default.
+/// The base colour for the layer at `index` (with kind `kind`): a per-layer user
+/// override if set, else the per-kind type default. Overrides are keyed by the
+/// layer's index in `diff.layers` so two layers of the same kind colour apart (#21).
 fn resolve_base_color(
+    index: usize,
     kind: etchy_core::LayerKind,
-    overrides: &[(etchy_core::LayerKind, Color32)],
+    overrides: &[(usize, Color32)],
     theme: Theme,
 ) -> Color32 {
     overrides
         .iter()
-        .find(|(k, _)| *k == kind)
+        .find(|(i, _)| *i == index)
         .map(|(_, c)| *c)
         .unwrap_or_else(|| layer_type_color(kind, theme))
 }
@@ -444,8 +456,9 @@ struct ViewApp {
     /// brand green/red; a "Colors" popover edits them.
     col_added: Color32,
     col_removed: Color32,
-    /// Per-layer-kind base/context colour overrides (default = layer_type_color).
-    base_overrides: Vec<(etchy_core::LayerKind, Color32)>,
+    /// Per-layer base/context colour overrides, keyed by the layer's index in
+    /// `diff.layers` (default = layer_type_color for that kind) (#21).
+    base_overrides: Vec<(usize, Color32)>,
     /// The Colors editor window is open. A real window (not a menu) so the nested
     /// colour-picker popup works — a menu_button closed on the first inner click.
     show_colors: bool,
@@ -913,8 +926,8 @@ impl eframe::App for ViewApp {
             ui.add_space(4.0);
             // Controls row: larger hit targets than the egui default.
             ui.horizontal(|ui| {
-                ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
-                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.spacing_mut().button_padding = egui::vec2(14.0, 10.0);
+                ui.spacing_mut().item_spacing.x = 10.0;
                 ui.selectable_value(&mut self.mode, Mode::Overlay, "Overlay");
                 ui.selectable_value(&mut self.mode, Mode::Before, "Before");
                 ui.selectable_value(&mut self.mode, Mode::After, "After");
@@ -990,16 +1003,50 @@ impl eframe::App for ViewApp {
                         );
                         for idx in idxs {
                             let l = &self.diff.layers[idx];
-                            // Just the layer name — no per-layer figures (#7) and no
-                            // status glyph (#11; ●/○ render as tofu in the web font).
-                            // Changed layers read strong, unchanged are dimmed.
-                            let name = short_layer_name(l.kind);
-                            let label = if l.is_changed() {
-                                egui::RichText::new(name).strong()
-                            } else {
-                                egui::RichText::new(name).weak()
-                            };
-                            if ui.selectable_label(idx == self.selected, label).clicked() {
+                            // Row: a small colour swatch (painted rect, not a font
+                            // glyph — the default font lacks ● and renders tofu, #16),
+                            // the layer name, then a compact change micro-label (#25).
+                            let kind = l.kind;
+                            let changed = l.is_changed();
+                            let added = l.change.added_area_mm2();
+                            let removed = l.change.removed_area_mm2();
+                            let name = short_layer_name(kind);
+                            let swatch =
+                                resolve_base_color(idx, kind, &self.base_overrides, self.theme);
+                            let resp = ui
+                                .horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(12.0, 12.0),
+                                        Sense::hover(),
+                                    );
+                                    ui.painter().rect_filled(rect, 2.0, swatch);
+                                    let label = if changed {
+                                        egui::RichText::new(&name).strong()
+                                    } else {
+                                        egui::RichText::new(&name).weak()
+                                    };
+                                    let r = ui.selectable_label(idx == self.selected, label);
+                                    // Compact +A/-B mm² micro-label on changed layers.
+                                    // No old/base area is exposed by etchy-core, so a
+                                    // percent isn't available — show the deltas instead.
+                                    if changed {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "+{added:.3} −{removed:.3}"
+                                                    ))
+                                                    .small()
+                                                    .weak(),
+                                                );
+                                            },
+                                        );
+                                    }
+                                    r
+                                })
+                                .inner;
+                            if resp.clicked() {
                                 self.select(idx);
                             }
                         }
@@ -1014,7 +1061,6 @@ impl eframe::App for ViewApp {
         // Colors editor — a real Window (not a menu) so the nested colour-picker
         // popup works; a menu_button closed on the first click inside it.
         if self.show_colors {
-            let kinds = present_layer_kinds(self.diff.layers.iter().map(|l| l.kind));
             let mut open = true;
             egui::Window::new("Colors")
                 .open(&mut open)
@@ -1034,28 +1080,39 @@ impl eframe::App for ViewApp {
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Layer base colours").strong());
-                    // One row per layer kind present on the board (#5/#10).
-                    for kind in kinds {
-                        ui.horizontal(|ui| {
-                            let mut base =
-                                resolve_base_color(kind, &self.base_overrides, self.theme);
-                            if ui.color_edit_button_srgba(&mut base).changed() {
-                                if let Some(e) =
-                                    self.base_overrides.iter_mut().find(|(k, _)| *k == kind)
-                                {
-                                    e.1 = base;
-                                } else {
-                                    self.base_overrides.push((kind, base));
-                                }
-                            }
-                            ui.label(short_layer_name(kind));
-                            if self.base_overrides.iter().any(|(k, _)| *k == kind)
-                                && ui.small_button("reset").clicked()
-                            {
-                                self.base_overrides.retain(|(k, _)| *k != kind);
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            // One row per LAYER (by index), so two layers of the same
+                            // kind can be coloured apart (#21).
+                            for idx in 0..self.diff.layers.len() {
+                                let kind = self.diff.layers[idx].kind;
+                                let label = self.diff.layers[idx].name();
+                                ui.horizontal(|ui| {
+                                    let mut base = resolve_base_color(
+                                        idx,
+                                        kind,
+                                        &self.base_overrides,
+                                        self.theme,
+                                    );
+                                    if ui.color_edit_button_srgba(&mut base).changed() {
+                                        if let Some(e) =
+                                            self.base_overrides.iter_mut().find(|(i, _)| *i == idx)
+                                        {
+                                            e.1 = base;
+                                        } else {
+                                            self.base_overrides.push((idx, base));
+                                        }
+                                    }
+                                    ui.label(label);
+                                    if self.base_overrides.iter().any(|(i, _)| *i == idx)
+                                        && ui.small_button("reset").clicked()
+                                    {
+                                        self.base_overrides.retain(|(i, _)| *i != idx);
+                                    }
+                                });
                             }
                         });
-                    }
                 });
             self.show_colors = open;
         }
@@ -1088,6 +1145,10 @@ impl ViewApp {
         let layer = &self.diff.layers[self.selected];
         let size = ui.available_size();
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+        // Clicking the board dismisses the Colors window (#19).
+        if self.show_colors && response.clicked() {
+            self.show_colors = false;
+        }
         let rect = response.rect;
         painter.rect_filled(rect, 0.0, chrome(self.theme).canvas);
 
@@ -1166,6 +1227,7 @@ impl ViewApp {
         let min_area_nm2 =
             self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
         let base_color = resolve_base_color(
+            self.selected,
             self.diff.layers[self.selected].kind,
             &self.base_overrides,
             self.theme,
@@ -1771,40 +1833,44 @@ mod tests {
     }
 
     #[test]
-    fn present_layer_kinds_dedupes_in_order() {
-        use super::present_layer_kinds;
-        let kinds = [
-            LayerKind::TopCopper,
-            LayerKind::InnerCopper(1),
-            LayerKind::TopCopper,
-            LayerKind::BottomMask,
-            LayerKind::InnerCopper(1),
-        ];
-        assert_eq!(
-            present_layer_kinds(kinds.iter().copied()),
-            vec![
-                LayerKind::TopCopper,
-                LayerKind::InnerCopper(1),
-                LayerKind::BottomMask
-            ]
-        );
-    }
-
-    #[test]
     fn layer_type_color_is_distinct_per_family() {
-        use super::{layer_type_color, Theme, C_COPPER, C_CREAM};
+        use super::{layer_type_color, Theme, C_CREAM};
         let d = Theme::Dark;
-        assert_eq!(layer_type_color(LayerKind::TopCopper, d), C_COPPER);
-        assert_eq!(layer_type_color(LayerKind::InnerCopper(2), d), C_COPPER);
         assert_eq!(layer_type_color(LayerKind::BottomSilk, d), C_CREAM);
-        // mask, paste, copper read as different families
+        // Copper kinds now default to distinct per-layer colours (#20): top vs
+        // bottom differ, and inner coppers are distinct from both and each other.
+        assert_ne!(
+            layer_type_color(LayerKind::TopCopper, d),
+            layer_type_color(LayerKind::BottomCopper, d)
+        );
+        assert_ne!(
+            layer_type_color(LayerKind::InnerCopper(1), d),
+            layer_type_color(LayerKind::TopCopper, d)
+        );
+        assert_ne!(
+            layer_type_color(LayerKind::InnerCopper(1), d),
+            layer_type_color(LayerKind::BottomCopper, d)
+        );
+        assert_ne!(
+            layer_type_color(LayerKind::InnerCopper(1), d),
+            layer_type_color(LayerKind::InnerCopper(2), d)
+        );
+        // copper kinds are distinct from mask and paste
         assert_ne!(
             layer_type_color(LayerKind::TopMask, d),
             layer_type_color(LayerKind::TopCopper, d)
         );
         assert_ne!(
+            layer_type_color(LayerKind::TopMask, d),
+            layer_type_color(LayerKind::BottomCopper, d)
+        );
+        assert_ne!(
             layer_type_color(LayerKind::TopPaste, d),
             layer_type_color(LayerKind::TopMask, d)
+        );
+        assert_ne!(
+            layer_type_color(LayerKind::TopPaste, d),
+            layer_type_color(LayerKind::TopCopper, d)
         );
         // light-mode silk is darker than dark-mode silk so it reads on a cream board
         let lum = |c: egui::Color32| c.r() as u16 + c.g() as u16 + c.b() as u16;
@@ -1819,14 +1885,20 @@ mod tests {
         use super::{layer_type_color, resolve_base_color, Theme};
         use egui::Color32;
         let d = Theme::Dark;
-        let ovr = [(LayerKind::TopCopper, Color32::from_rgb(1, 2, 3))];
+        // Overrides are keyed by the layer's index, not its kind (#21).
+        let ovr = [(0usize, Color32::from_rgb(1, 2, 3))];
         assert_eq!(
-            resolve_base_color(LayerKind::TopCopper, &ovr, d),
+            resolve_base_color(0, LayerKind::TopCopper, &ovr, d),
             Color32::from_rgb(1, 2, 3)
         );
-        // no override for this kind -> the type default
+        // a different index with the same kind falls back to the per-kind default
         assert_eq!(
-            resolve_base_color(LayerKind::TopSilk, &ovr, d),
+            resolve_base_color(1, LayerKind::TopCopper, &ovr, d),
+            layer_type_color(LayerKind::TopCopper, d)
+        );
+        // no override for this index -> the type default
+        assert_eq!(
+            resolve_base_color(2, LayerKind::TopSilk, &ovr, d),
             layer_type_color(LayerKind::TopSilk, d)
         );
     }
