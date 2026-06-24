@@ -333,26 +333,78 @@ fn cycle_base(level: BaseLevel) -> BaseLevel {
 /// stale and shows the wrong thing (a silent miss the project forbids).
 #[derive(Clone, PartialEq, Debug)]
 struct GeomKey {
-    selected: usize,
+    /// Indices (into `diff.layers`) of every VISIBLE layer (#58/#59). The cache
+    /// triangulates each one, so the merged mesh must rebuild whenever this set
+    /// changes. Highlight/dim and colours are applied per frame, so they're NOT here.
+    visible: Vec<usize>,
     mode: Mode,
     base_on: bool,
     outline_effective: bool,
 }
 
-/// Build the cache key from the current selection inputs.
+/// Build the cache key from the current view inputs. `visible` is the set of layer
+/// indices to draw (one merged mesh over all of them).
 fn build_geom_key(
-    selected: usize,
+    visible: &[usize],
     mode: Mode,
     base_level: BaseLevel,
     show_outline: bool,
     outline: Option<usize>,
 ) -> GeomKey {
     GeomKey {
-        selected,
+        visible: visible.to_vec(),
         mode,
         base_on: base_level != BaseLevel::Off,
-        outline_effective: outline_legend_visible(show_outline, outline, selected),
+        // The outline reference draws whenever it's enabled and exists; with several
+        // layers shown there's no single "selected" layer to suppress it for.
+        outline_effective: show_outline && outline.is_some(),
     }
+}
+
+/// Set visibility for every index in `idxs` (a layer group) at once (#58). Indices
+/// outside `visible` are ignored, so a stale group list can't panic.
+fn set_group_visibility(visible: &mut [bool], idxs: &[usize], show: bool) {
+    for &i in idxs {
+        if let Some(v) = visible.get_mut(i) {
+            *v = show;
+        }
+    }
+}
+
+/// Whether every layer in `idxs` is currently visible — drives a group's
+/// show/hide-all toggle state (#58). An empty group reads as "all visible".
+fn group_all_visible(visible: &[bool], idxs: &[usize]) -> bool {
+    idxs.iter()
+        .all(|&i| visible.get(i).copied().unwrap_or(false))
+}
+
+/// Visibility vector that shows only the changed layers ("Show changed", #58),
+/// from a per-index changed-flag slice.
+fn visible_from_changed(changed: &[bool]) -> Vec<bool> {
+    changed.to_vec()
+}
+
+/// Rebuild a per-layer visibility vector of length `n` from saved visible indices
+/// (#52). Out-of-range indices (the layer count shrank between sessions) are
+/// dropped rather than panicking.
+fn restore_visibility(saved: &[usize], n: usize) -> Vec<bool> {
+    let mut vis = vec![false; n];
+    for &i in saved {
+        if let Some(v) = vis.get_mut(i) {
+            *v = true;
+        }
+    }
+    vis
+}
+
+/// The indices of the set bits in a visibility vector, in order (for the GeomKey
+/// and for persistence).
+fn visible_indices(visible: &[bool]) -> Vec<usize> {
+    visible
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &v)| v.then_some(i))
+        .collect()
 }
 
 /// Rebuild the tessellation cache when there's none yet or the key changed.
@@ -496,7 +548,11 @@ struct ViewApp {
     old_label: String,
     new_label: String,
     order: Vec<usize>, // indices into diff.layers, changed-first
-    selected: usize,   // index into diff.layers
+    selected: usize,   // active/highlighted layer; index into diff.layers
+    /// Per-layer visibility, indexed the same as `diff.layers` (#58/#59). Several
+    /// layers can be drawn at once; the `selected` one is highlighted and the rest
+    /// are dimmed at draw time. Persisted via #52.
+    visible_layers: Vec<bool>,
     mode: Mode,
     /// Always-available faint base behind the diff (G3): Off / Faint / Strong.
     base_level: BaseLevel,
@@ -565,12 +621,20 @@ impl ViewApp {
         order.sort_by_key(|&i| !diff.layers[i].is_changed()); // changed first, stable
         let selected = order.first().copied().unwrap_or(0);
         let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
+        // Default visibility (#59): show every changed layer, and always keep the
+        // selected layer visible so a board with no diff still renders something.
+        let mut visible_layers: Vec<bool> = diff.layers.iter().map(|l| l.is_changed()).collect();
+        if let Some(v) = visible_layers.get_mut(selected) {
+            *v = true;
+        }
+        // No changed layers and an empty board -> nothing to force on; fine.
         Self {
             diff,
             old_label,
             new_label,
             order,
             selected,
+            visible_layers,
             mode: Mode::Overlay,
             base_level: BaseLevel::Faint,
             col_added: C_ADDED,
@@ -666,6 +730,12 @@ impl ViewApp {
     }
 
     fn select(&mut self, idx: usize) {
+        // Selecting a layer also makes it visible — you can't highlight what isn't
+        // drawn. Visibility alone (the per-row toggle) never moves the camera; only
+        // a genuine selection change refits.
+        if let Some(v) = self.visible_layers.get_mut(idx) {
+            *v = true;
+        }
         if idx != self.selected {
             self.selected = idx;
             self.cam.fitted = false; // refit on layer change
@@ -1045,6 +1115,9 @@ struct Settings {
     grid_light: [u8; 4],
     /// Input scheme matching the user's ECAD tool (#54).
     input_preset: InputPreset,
+    /// Indices of the layers that were visible (#58/#59), restored on next open
+    /// (#52). Empty = fall back to the on-load default (changed layers + selected).
+    visible_layers: Vec<usize>,
 }
 
 impl Default for Settings {
@@ -1061,6 +1134,7 @@ impl Default for Settings {
             grid_dark: color_to_rgba(C_GRID_DEFAULT),
             grid_light: color_to_rgba(C_GRID_DEFAULT_LIGHT),
             input_preset: InputPreset::default(),
+            visible_layers: Vec::new(),
         }
     }
 }
@@ -1102,6 +1176,7 @@ impl ViewApp {
             grid_dark: color_to_rgba(self.grid_dark),
             grid_light: color_to_rgba(self.grid_light),
             input_preset: self.input_preset,
+            visible_layers: visible_indices(&self.visible_layers),
         }
     }
 
@@ -1124,6 +1199,16 @@ impl ViewApp {
         self.grid_dark = rgba_to_color(s.grid_dark);
         self.grid_light = rgba_to_color(s.grid_light);
         self.input_preset = s.input_preset;
+        // Restore the visible set (#58/#59) over the current layer count, dropping
+        // stale indices. An empty saved set keeps the on-load default.
+        if !s.visible_layers.is_empty() {
+            self.visible_layers = restore_visibility(&s.visible_layers, self.visible_layers.len());
+            // The selected layer must stay visible so its highlight has something
+            // to draw.
+            if let Some(v) = self.visible_layers.get_mut(self.selected) {
+                *v = true;
+            }
+        }
     }
 }
 
@@ -1404,7 +1489,42 @@ impl eframe::App for ViewApp {
             .show_inside(ui, |ui| {
                 ui.heading("Layers");
                 ui.label(egui::RichText::new("changed first").weak().small());
+                // Quick visibility actions (#58): show/hide every layer, or only the
+                // changed ones. They never move the selection or camera.
+                ui.horizontal(|ui| {
+                    if ui.small_button("Show all").clicked() {
+                        for v in self.visible_layers.iter_mut() {
+                            *v = true;
+                        }
+                    }
+                    if ui.small_button("Hide all").clicked() {
+                        for v in self.visible_layers.iter_mut() {
+                            *v = false;
+                        }
+                        // Keep the active layer drawn so its highlight isn't blank.
+                        if let Some(v) = self.visible_layers.get_mut(self.selected) {
+                            *v = true;
+                        }
+                    }
+                    if ui
+                        .small_button("Show changed")
+                        .on_hover_text("Show only the layers that changed")
+                        .clicked()
+                    {
+                        let changed: Vec<bool> =
+                            self.diff.layers.iter().map(|l| l.is_changed()).collect();
+                        self.visible_layers = visible_from_changed(&changed);
+                        if let Some(v) = self.visible_layers.get_mut(self.selected) {
+                            *v = true;
+                        }
+                    }
+                });
                 ui.separator();
+                // Actions deferred so the per-frame group iteration doesn't borrow
+                // self mutably while it's borrowed for the group list.
+                let mut select: Option<usize> = None;
+                let mut toggle: Option<(usize, bool)> = None; // (layer, show)
+                let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     // Group into sections (copper / mask / silk / …) in fixed order,
                     // changed-first within each (G5).
@@ -1412,29 +1532,52 @@ impl eframe::App for ViewApp {
                         group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
                     for (group, idxs) in groups {
                         ui.add_space(4.0);
-                        // Collapsible group header (#36): a disclosure triangle that
-                        // rotates down (expanded) / right (collapsed) — click it to
-                        // hide the whole section, leaving just the header. egui (with
-                        // eframe persistence) remembers each group's open state by id.
-                        let header = egui::RichText::new(group.title())
-                            .small()
-                            .color(Color32::from_rgb(0xe8, 0xa3, 0x3d));
-                        let mut clicked_idx = None;
-                        egui::CollapsingHeader::new(header)
-                            .id_salt(group.title())
-                            .default_open(true)
-                            .show_unindented(ui, |ui| {
-                                for idx in idxs {
+                        // Group header (#36 collapse + #58 show/hide-all): a
+                        // CollapsingState lets the header carry BOTH the disclosure
+                        // triangle (rotates down=open / right=collapsed) AND a group
+                        // show/hide-all checkbox; the body holds the layer rows. egui
+                        // (with eframe persistence) remembers each group's open state.
+                        let gid = ui.make_persistent_id(("layer-group", group.title()));
+                        let state =
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                gid,
+                                true,
+                            );
+                        state
+                            .show_header(ui, |ui| {
+                                // Show/hide every layer in the group (#58). Separate
+                                // from collapsing, which only hides the list rows.
+                                let mut all = group_all_visible(&self.visible_layers, &idxs);
+                                if ui
+                                    .checkbox(&mut all, "")
+                                    .on_hover_text("Show / hide every layer in this group")
+                                    .changed()
+                                {
+                                    group_set = Some((idxs.clone(), all));
+                                }
+                                ui.label(
+                                    egui::RichText::new(group.title())
+                                        .small()
+                                        .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
+                                );
+                            })
+                            .body_unindented(|ui| {
+                                for idx in &idxs {
+                                    let idx = *idx;
                                     let l = &self.diff.layers[idx];
-                                    // Row: a small colour swatch (painted rect, not a
-                                    // font glyph — the default font lacks ● and renders
-                                    // tofu, #16), the layer name, then a compact change
+                                    // Row: a per-layer visibility checkbox, a small
+                                    // colour swatch (painted rect, not a font glyph —
+                                    // the default font lacks ● and renders tofu,
+                                    // #16), the layer name, then a compact change
                                     // micro-label (#25).
                                     let kind = l.kind;
                                     let changed = l.is_changed();
                                     let added = l.change.added_area_mm2();
                                     let removed = l.change.removed_area_mm2();
                                     let name = short_layer_name(kind);
+                                    let visible =
+                                        self.visible_layers.get(idx).copied().unwrap_or(false);
                                     let swatch = resolve_base_color(
                                         idx,
                                         kind,
@@ -1443,15 +1586,28 @@ impl eframe::App for ViewApp {
                                     );
                                     let resp = ui
                                         .horizontal(|ui| {
+                                            // Per-layer visibility toggle, separate from
+                                            // the click-to-select label (#58).
+                                            let mut vis = visible;
+                                            if ui
+                                                .checkbox(&mut vis, "")
+                                                .on_hover_text("Show / hide this layer")
+                                                .changed()
+                                            {
+                                                toggle = Some((idx, vis));
+                                            }
                                             let (rect, _) = ui.allocate_exact_size(
                                                 egui::vec2(12.0, 12.0),
                                                 Sense::hover(),
                                             );
                                             ui.painter().rect_filled(rect, 2.0, swatch);
-                                            let label = if changed {
-                                                egui::RichText::new(&name).strong()
-                                            } else {
-                                                egui::RichText::new(&name).weak()
+                                            // Visible layers read brighter; hidden grey.
+                                            let label = match (visible, changed) {
+                                                (true, true) => egui::RichText::new(&name).strong(),
+                                                (true, false) => egui::RichText::new(&name),
+                                                (false, _) => egui::RichText::new(&name)
+                                                    .weak()
+                                                    .color(Color32::GRAY),
                                             };
                                             let r =
                                                 ui.selectable_label(idx == self.selected, label);
@@ -1479,15 +1635,24 @@ impl eframe::App for ViewApp {
                                         })
                                         .inner;
                                     if resp.clicked() {
-                                        clicked_idx = Some(idx);
+                                        select = Some(idx);
                                     }
                                 }
                             });
-                        if let Some(idx) = clicked_idx {
-                            self.select(idx);
-                        }
                     }
                 });
+                // Apply deferred actions.
+                if let Some((idxs, show)) = group_set {
+                    set_group_visibility(&mut self.visible_layers, &idxs, show);
+                }
+                if let Some((idx, show)) = toggle {
+                    if let Some(v) = self.visible_layers.get_mut(idx) {
+                        *v = show;
+                    }
+                }
+                if let Some(idx) = select {
+                    self.select(idx);
+                }
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -1766,8 +1931,21 @@ impl ViewApp {
         // cheap world→screen transform + colour/alpha/min-area cull run per frame,
         // so pan/zoom and colour edits never re-triangulate. The cache rebuilds only
         // when the GeomKey (selection inputs) changes.
+        // The visible set: every layer the user has shown (#58/#59). Split renders
+        // the active layer only (a stacked old|new of many layers reads as mud), so
+        // it keys off just the selected layer and falls back to it when nothing is on.
+        let visible = if self.mode == Mode::Split {
+            vec![self.selected]
+        } else {
+            let v = visible_indices(&self.visible_layers);
+            if v.is_empty() {
+                vec![self.selected]
+            } else {
+                v
+            }
+        };
         let key = build_geom_key(
-            self.selected,
+            &visible,
             self.mode,
             self.base_level,
             self.show_outline,
@@ -1778,12 +1956,12 @@ impl ViewApp {
         }
         let min_area_nm2 =
             self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
-        let base_color = resolve_base_color(
-            self.selected,
-            self.diff.layers[self.selected].kind,
-            &self.base_overrides,
-            self.theme,
-        );
+        // Per-layer base/context colour resolver (#21) — used for both the stacked
+        // overlay and the split halves.
+        let theme = self.theme;
+        let base_overrides = &self.base_overrides;
+        let layers = &self.diff.layers;
+        let base_of = |li: usize| resolve_base_color(li, layers[li].kind, base_overrides, theme);
         let cache = self.cache.as_ref().expect("cache built above");
         let n;
         if self.mode == Mode::Split {
@@ -1796,8 +1974,13 @@ impl ViewApp {
             let mut rmesh = egui::epaint::Mesh::default();
             // Base boards honour the base-level (faint/strong dimming) — #44; the
             // board outline (Side::Full) is drawn into BOTH halves for orientation — #45.
-            let base_col = base_display_color(base_color, self.canvas_color(), self.base_level);
+            // Split shows the active layer only, so its base colour is per-item.
             for item in &cache.items {
+                let base_col = base_display_color(
+                    base_of(item.layer_index),
+                    self.canvas_color(),
+                    self.base_level,
+                );
                 match item.side {
                     Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, lr, base_col),
                     Side::Right => append_tris(&mut rmesh, &item.tris, &self.cam, rr, base_col),
@@ -1843,7 +2026,8 @@ impl ViewApp {
                 &self.cam,
                 rect,
                 self.base_level,
-                base_color,
+                self.selected,
+                base_of,
                 self.canvas_color(),
                 self.col_added,
                 self.col_removed,
@@ -2007,12 +2191,20 @@ enum Role {
 struct CachedItem {
     role: Role,
     side: Side,
+    /// Source layer index in `diff.layers` (#59) — drives the highlight/dim: items
+    /// from a layer other than the selected one draw at reduced alpha. The outline
+    /// reference isn't tied to one layer, so it uses `usize::MAX` (never dimmed).
+    layer_index: usize,
     tris: Vec<[Pt; 3]>,
     /// World bbox [minx, miny, maxx, maxy] — for off-screen culling per frame.
     bbox: [i64; 4],
     extent_nm: i64,
     area_nm2: f64,
 }
+
+/// Sentinel `layer_index` for items not tied to a single layer (the board outline
+/// reference); they're never dimmed by the highlight/dim pass.
+const NO_LAYER: usize = usize::MAX;
 
 /// World bbox of a ring as [minx, miny, maxx, maxy].
 fn ring_bbox(ring: &[Pt]) -> [i64; 4] {
@@ -2032,7 +2224,13 @@ struct TessCache {
     items: Vec<CachedItem>,
 }
 
-fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role, side: Side) {
+fn push_context_items(
+    items: &mut Vec<CachedItem>,
+    set: &PolygonSet,
+    role: Role,
+    side: Side,
+    layer_index: usize,
+) {
     for shape in &set.shapes {
         let Some(outer) = shape.first() else { continue };
         if outer.len() < 3 {
@@ -2043,6 +2241,7 @@ fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role,
             items.push(CachedItem {
                 role,
                 side,
+                layer_index,
                 tris,
                 bbox: ring_bbox(outer),
                 extent_nm: 0,
@@ -2052,7 +2251,7 @@ fn push_context_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role,
     }
 }
 
-fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
+fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role, layer_index: usize) {
     for shape in &set.shapes {
         let Some(outer) = shape.first() else { continue };
         if outer.len() < 3 {
@@ -2066,6 +2265,7 @@ fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
             items.push(CachedItem {
                 role,
                 side: Side::Full,
+                layer_index,
                 tris,
                 bbox: bb,
                 extent_nm,
@@ -2076,9 +2276,19 @@ fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role) {
 }
 
 /// Triangulate the geometry selected by `key` into world-space items, once.
+///
+/// Multi-layer (#58/#59): every VISIBLE layer is triangulated and pushed, each item
+/// tagged with its source layer so the per-frame pass can highlight the selected
+/// layer and dim the rest. Split shows the active (selected) layer only — a
+/// stacked old|new of many layers reads as mud — so it never grows past one layer.
+///
+/// Perf note (#59 MVP): a board with many large visible layers merges into one big
+/// mesh. The per-frame off-screen cull keeps draw cheap, but there's no adaptive
+/// LOD across the merged set yet — a known follow-up if very dense packs stutter.
 fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessCache {
     let mut items = Vec::new();
-    // Outline first (drawn underneath), in all modes (G10).
+    // Outline first (drawn underneath), in all modes (G10). Not tied to a layer, so
+    // it never dims.
     if key.outline_effective {
         if let Some(oi) = outline {
             let lo = &diff.layers[oi];
@@ -2087,26 +2297,38 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
             } else {
                 &lo.old
             };
-            push_context_items(&mut items, set, Role::Outline, Side::Full);
+            push_context_items(&mut items, set, Role::Outline, Side::Full, NO_LAYER);
         }
     }
-    let layer = &diff.layers[key.selected];
-    match key.mode {
-        Mode::Before => push_context_items(&mut items, &layer.old, Role::Base, Side::Full),
-        Mode::After => push_context_items(&mut items, &layer.new, Role::Base, Side::Full),
-        Mode::Overlay => {
+    if key.mode == Mode::Split {
+        // Split: active layer only (the selected layer is the first visible one the
+        // shell records; see draw_canvas). Keep it the single-layer old|new view.
+        if let Some(&li) = key.visible.first() {
+            let layer = &diff.layers[li];
             if key.base_on {
-                push_context_items(&mut items, &layer.new, Role::Base, Side::Full);
+                push_context_items(&mut items, &layer.old, Role::Base, Side::Left, li);
+                push_context_items(&mut items, &layer.new, Role::Base, Side::Right, li);
             }
-            push_diff_items(&mut items, &layer.removed, Role::Removed);
-            push_diff_items(&mut items, &layer.added, Role::Added);
         }
-        Mode::Split => {
-            // Base honours the base-level control (Off omits the boards) — #44.
-            if key.base_on {
-                push_context_items(&mut items, &layer.old, Role::Base, Side::Left);
-                push_context_items(&mut items, &layer.new, Role::Base, Side::Right);
+        return TessCache {
+            key: key.clone(),
+            items,
+        };
+    }
+    // Overlay / Before / After: stack every visible layer.
+    for &li in &key.visible {
+        let layer = &diff.layers[li];
+        match key.mode {
+            Mode::Before => push_context_items(&mut items, &layer.old, Role::Base, Side::Full, li),
+            Mode::After => push_context_items(&mut items, &layer.new, Role::Base, Side::Full, li),
+            Mode::Overlay => {
+                if key.base_on {
+                    push_context_items(&mut items, &layer.new, Role::Base, Side::Full, li);
+                }
+                push_diff_items(&mut items, &layer.removed, Role::Removed, li);
+                push_diff_items(&mut items, &layer.added, Role::Added, li);
             }
+            Mode::Split => unreachable!("split handled above"),
         }
     }
     TessCache {
@@ -2115,16 +2337,34 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
     }
 }
 
+/// Alpha multiplier for visible-but-not-selected layers (#59, Altium "dim"
+/// default). The selected (active) layer stays full opacity so it reads on top.
+const DIM_ALPHA: f32 = 0.4;
+
+/// Opacity multiplier for an item from `layer_index` given the active `selected`
+/// layer: 1.0 for the selected layer (and for layer-less items like the outline),
+/// `DIM_ALPHA` for the other visible layers (#59).
+fn dim_factor(layer_index: usize, selected: usize) -> f32 {
+    if layer_index == NO_LAYER || layer_index == selected {
+        1.0
+    } else {
+        DIM_ALPHA
+    }
+}
+
 /// Per-frame: transform cached world items to screen meshes, applying colour, the
-/// LOD fade (diff only), and the min-area cull (returns the hidden count). No
-/// triangulation here — this is the cheap part that runs every frame.
+/// highlight/dim (#59), the LOD fade (diff only), and the min-area cull (returns the
+/// hidden count). No triangulation here — this is the cheap part that runs every
+/// frame. `base_of` resolves each layer's base/context colour by its index, so
+/// stacked layers read by their own colour.
 #[allow(clippy::too_many_arguments)]
 fn transform_cache(
     cache: &TessCache,
     cam: &Camera,
     rect: Rect,
     base_level: BaseLevel,
-    base_color: Color32,
+    selected: usize,
+    base_of: impl Fn(usize) -> Color32,
     canvas: Color32,
     col_added: Color32,
     col_removed: Color32,
@@ -2141,12 +2381,22 @@ fn transform_cache(
         if !bbox_visible(item.bbox, cam, rect) {
             continue; // off-screen: not a threshold "hidden", just nothing to draw
         }
+        // Highlight/dim (#59): the active layer at full opacity, the other visible
+        // layers dimmed; layer-less items (outline) never dim.
+        let dim = dim_factor(item.layer_index, selected);
         let (mut color, is_diff) = match item.role {
-            Role::Base => (base_display_color(base_color, canvas, base_level), false),
+            Role::Base => (
+                base_display_color(base_of(item.layer_index), canvas, base_level),
+                false,
+            ),
             Role::Outline => (C_OUTLINE_FAINT, false),
             Role::Added => (col_added, true),
             Role::Removed => (col_removed, true),
         };
+        if !is_diff && dim < 1.0 {
+            // Dim the base/context layers by scaling their existing alpha.
+            color = with_alpha(color, (color.a() as f32 / 255.0) * dim);
+        }
         if is_diff {
             // Fade by on-screen THICKNESS, not extent: a long thin crescent has a
             // large extent but is sub-pixel thick — fading by thickness stops it
@@ -2167,10 +2417,12 @@ fn transform_cache(
                     let cx = (item.bbox[0] + item.bbox[2]) / 2;
                     let cy = (item.bbox[1] + item.bbox[3]) / 2;
                     let at = world_to_screen(cam, Pt::new(cx, cy), rect);
-                    push_screen_quad(&mut mesh, at, MARKER_PX, color);
+                    push_screen_quad(&mut mesh, at, MARKER_PX, with_alpha(color, dim));
                     continue;
                 }
-                lod::Lod::Fade(alpha) => color = with_alpha(color, alpha),
+                // Combine the LOD fade with the per-layer dim so a non-selected
+                // layer's diffs sit behind the active layer's.
+                lod::Lod::Fade(alpha) => color = with_alpha(color, alpha * dim),
             }
         }
         for tri in &item.tris {
@@ -2493,9 +2745,11 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 mod tests {
     use super::{
         base_display_color, build_geom_key, cycle_base, distance_mm, geom_cache_dirty,
-        group_layers, layer_group, outline_legend_visible, pans_on, pick_outline_index,
-        region_screen_px, scroll_to_camera_action, short_layer_name, step_in_order, warning_phase,
-        BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, Theme, WarningPhase,
+        group_all_visible, group_layers, layer_group, outline_legend_visible, pans_on,
+        pick_outline_index, region_screen_px, restore_visibility, scroll_to_camera_action,
+        set_group_visibility, short_layer_name, step_in_order, visible_from_changed,
+        visible_indices, warning_phase, BaseLevel, CameraAction, InputPreset, LayerGroup, Mode,
+        Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
 
@@ -2542,39 +2796,40 @@ mod tests {
 
     #[test]
     fn geom_key_tracks_selection_inputs_only() {
-        let base = build_geom_key(0, Mode::Overlay, BaseLevel::Faint, true, Some(1));
+        let base = build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, true, Some(1));
         // base Faint vs Strong is a colour, not geometry -> same key (no rebuild)
         assert_eq!(
             base,
-            build_geom_key(0, Mode::Overlay, BaseLevel::Strong, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, BaseLevel::Strong, true, Some(1))
         );
         // base Off flips base_on -> different key (the base mesh joins/leaves the draw)
         assert_ne!(
             base,
-            build_geom_key(0, Mode::Overlay, BaseLevel::Off, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, BaseLevel::Off, true, Some(1))
         );
-        // selected / mode changes -> different key
+        // visible set / mode changes -> different key
         assert_ne!(
             base,
-            build_geom_key(2, Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[2], Mode::Overlay, BaseLevel::Faint, true, Some(1))
         );
         assert_ne!(
             base,
-            build_geom_key(0, Mode::Before, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0], Mode::Before, BaseLevel::Faint, true, Some(1))
         );
-        // viewing the outline layer itself -> outline not drawn -> different key
+        // With multiple layers shown, the outline still draws (it's enabled and
+        // exists), so a visible-set change is what flips the key.
         assert_ne!(
             base,
-            build_geom_key(1, Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 1], Mode::Overlay, BaseLevel::Faint, true, Some(1))
         );
     }
 
     #[test]
     fn geom_cache_dirty_on_none_or_change() {
-        let k = build_geom_key(0, Mode::Overlay, BaseLevel::Faint, false, None);
+        let k = build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, false, None);
         assert!(geom_cache_dirty(None, &k));
         assert!(!geom_cache_dirty(Some(&k), &k));
-        let k2 = build_geom_key(2, Mode::Overlay, BaseLevel::Faint, false, None);
+        let k2 = build_geom_key(&[2], Mode::Overlay, BaseLevel::Faint, false, None);
         assert!(geom_cache_dirty(Some(&k), &k2));
     }
 
@@ -2986,6 +3241,7 @@ mod tests {
             grid_dark: [56, 39, 14, 60],
             grid_light: [138, 102, 34, 70],
             input_preset: InputPreset::KiCad,
+            visible_layers: vec![0, 2, 5],
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
@@ -3101,5 +3357,114 @@ mod tests {
         assert_eq!(fresh.grid_dark, app.grid_dark);
         assert_eq!(fresh.base_overrides, app.base_overrides);
         assert_eq!(fresh.input_preset, app.input_preset);
+    }
+
+    #[test]
+    fn set_group_visibility_flips_only_the_group() {
+        use super::set_group_visibility;
+        let mut vis = vec![true, true, true, true];
+        // Hide just indices 1 and 3.
+        set_group_visibility(&mut vis, &[1, 3], false);
+        assert_eq!(vis, vec![true, false, true, false]);
+        // Show them again.
+        set_group_visibility(&mut vis, &[1, 3], true);
+        assert_eq!(vis, vec![true, true, true, true]);
+        // Out-of-range indices are ignored (guard against stale group lists).
+        set_group_visibility(&mut vis, &[99], false);
+        assert_eq!(vis, vec![true, true, true, true]);
+    }
+
+    #[test]
+    fn group_all_visible_reports_whole_group_state() {
+        use super::group_all_visible;
+        let vis = vec![true, false, true, true];
+        // Group {0,2,3} all visible.
+        assert!(group_all_visible(&vis, &[0, 2, 3]));
+        // Group {0,1} not all visible (1 is hidden).
+        assert!(!group_all_visible(&vis, &[0, 1]));
+        // Empty group counts as "all visible" (nothing hidden).
+        assert!(group_all_visible(&vis, &[]));
+        // Out-of-range index doesn't crash and reads as not-visible.
+        assert!(!group_all_visible(&vis, &[99]));
+    }
+
+    #[test]
+    fn visible_from_changed_shows_only_changed_layers() {
+        use super::visible_from_changed;
+        // changed flags per layer index.
+        let changed = [false, true, false, true];
+        assert_eq!(
+            visible_from_changed(&changed),
+            vec![false, true, false, true]
+        );
+        // No changed layers -> nothing visible (caller decides whether to keep the
+        // selection visible separately).
+        assert_eq!(visible_from_changed(&[false, false]), vec![false, false]);
+    }
+
+    #[test]
+    fn restore_visibility_rebuilds_from_indices_guarding_count() {
+        use super::restore_visibility;
+        // Saved indices {0, 2} over 4 layers.
+        assert_eq!(
+            restore_visibility(&[0, 2], 4),
+            vec![true, false, true, false]
+        );
+        // Out-of-range saved indices (layer count shrank) are dropped, not panicking.
+        assert_eq!(restore_visibility(&[0, 9], 2), vec![true, false]);
+        // No saved indices -> all hidden vector of the right length.
+        assert_eq!(restore_visibility(&[], 3), vec![false, false, false]);
+        // Zero layers -> empty.
+        assert_eq!(restore_visibility(&[0, 1], 0), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn visible_indices_lists_set_bits_in_order() {
+        use super::visible_indices;
+        assert_eq!(visible_indices(&[true, false, true, true]), vec![0, 2, 3]);
+        assert_eq!(visible_indices(&[false, false]), Vec::<usize>::new());
+        assert_eq!(visible_indices(&[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn geom_key_tracks_the_visible_set() {
+        let base = build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Faint, true, Some(1));
+        // Same visible set + same other inputs -> equal (no rebuild).
+        assert_eq!(
+            base,
+            build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+        );
+        // A different visible set -> different key (the merged mesh changes).
+        assert_ne!(
+            base,
+            build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+        );
+        assert_ne!(
+            base,
+            build_geom_key(&[0, 2, 3], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+        );
+        // base-off and mode still flip the key.
+        assert_ne!(
+            base,
+            build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Off, true, Some(1))
+        );
+        assert_ne!(
+            base,
+            build_geom_key(&[0, 2], Mode::Before, BaseLevel::Faint, true, Some(1))
+        );
+    }
+
+    #[test]
+    fn viewapp_visibility_round_trips_through_settings() {
+        use super::ViewApp;
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        // Pretend a 4-layer board: drive the visible set directly.
+        app.visible_layers = vec![true, false, true, false];
+        let settings = app.to_settings();
+        assert_eq!(settings.visible_layers, vec![0, 2]);
+        let mut fresh = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        fresh.visible_layers = vec![false, false, false, false];
+        fresh.apply_settings(settings);
+        assert_eq!(fresh.visible_layers, vec![true, false, true, false]);
     }
 }
