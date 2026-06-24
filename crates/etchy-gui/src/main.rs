@@ -382,7 +382,9 @@ fn group_all_visible(visible: &[bool], idxs: &[usize]) -> bool {
 }
 
 /// Visibility vector that shows only the changed layers ("Show changed", #58),
-/// from a per-index changed-flag slice.
+/// from a per-index changed-flag slice. The UI button was hidden per feedback #8,
+/// but the capability is kept (and tested) so it can be re-surfaced later.
+#[allow(dead_code)]
 fn visible_from_changed(changed: &[bool]) -> Vec<bool> {
     changed.to_vec()
 }
@@ -756,12 +758,11 @@ impl ViewApp {
     }
 
     fn select(&mut self, idx: usize) {
-        // Selecting a layer also makes it visible — you can't highlight what isn't
-        // drawn. Visibility alone (the per-row toggle) never moves the camera; only
-        // a genuine selection change refits.
-        if let Some(v) = self.visible_layers.get_mut(idx) {
-            *v = true;
-        }
+        // Selection (highlight) is independent of visibility (#2): clicking a layer
+        // name highlights it but does NOT tick it on — the per-row checkbox is the
+        // only thing that toggles visibility. Split/Swipe force the selected layer
+        // visible regardless, so a highlight is never blank there. Only a genuine
+        // selection change refits the camera.
         if idx != self.selected {
             self.selected = idx;
             self.cam.fitted = false; // refit on layer change
@@ -1466,7 +1467,7 @@ impl eframe::App for ViewApp {
                     InputPreset::Altium => "Altium",
                 };
                 egui::ComboBox::from_id_salt("input_preset")
-                    .selected_text(format!("input: {}", preset_label(self.input_preset)))
+                    .selected_text(preset_label(self.input_preset))
                     .show_ui(ui, |ui| {
                         for p in [InputPreset::Altium, InputPreset::KiCad] {
                             ui.selectable_value(&mut self.input_preset, p, preset_label(p));
@@ -1544,18 +1545,9 @@ impl eframe::App for ViewApp {
                             *v = true;
                         }
                     }
-                    if ui
-                        .small_button("Show changed")
-                        .on_hover_text("Show only the layers that changed")
-                        .clicked()
-                    {
-                        let changed: Vec<bool> =
-                            self.diff.layers.iter().map(|l| l.is_changed()).collect();
-                        self.visible_layers = visible_from_changed(&changed);
-                        if let Some(v) = self.visible_layers.get_mut(self.selected) {
-                            *v = true;
-                        }
-                    }
+                    // "Show changed" button hidden per feedback #8 — the capability
+                    // stays in `visible_from_changed` (still unit-tested) so it can be
+                    // re-surfaced later, but the button is removed from the row.
                 });
                 ui.separator();
                 // Actions deferred so the per-frame group iteration doesn't borrow
@@ -2008,7 +2000,7 @@ impl ViewApp {
         // The visible set: every layer the user has shown (#58/#59). Split renders
         // the active layer only (a stacked old|new of many layers reads as mud), so
         // it keys off just the selected layer and falls back to it when nothing is on.
-        let visible = if self.mode == Mode::Split {
+        let visible = if self.mode == Mode::Split || self.mode == Mode::Swipe {
             vec![self.selected]
         } else {
             let v = visible_indices(&self.visible_layers);
@@ -2035,7 +2027,18 @@ impl ViewApp {
         let theme = self.theme;
         let base_overrides = &self.base_overrides;
         let layers = &self.diff.layers;
-        let base_of = |li: usize| resolve_base_color(li, layers[li].kind, base_overrides, theme);
+        // Guard the outline sentinel (NO_LAYER): the Side::Full outline item isn't
+        // tied to a real layer, so never index `layers` with it. The Split/Swipe
+        // render path runs base_of over every item (outline included) and would panic
+        // on `layers[usize::MAX]` (#61 swipe froze the app here). The outline is drawn
+        // C_OUTLINE_FAINT regardless, so the returned colour is unused for it.
+        let base_of = |li: usize| {
+            if li == NO_LAYER {
+                C_BASE
+            } else {
+                resolve_base_color(li, layers[li].kind, base_overrides, theme)
+            }
+        };
         let cache = self.cache.as_ref().expect("cache built above");
         let n;
         if self.mode == Mode::Split || self.mode == Mode::Swipe {
