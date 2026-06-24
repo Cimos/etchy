@@ -225,21 +225,19 @@ enum BaseLevel {
 /// Persisted via #52 with a stable serde string repr (like `Theme`/`BaseLevel`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum InputPreset {
-    /// etchy's own scheme: primary (left) drag pans. The current behaviour.
-    #[default]
-    EtchyDefault,
     /// KiCad: middle OR right drag pans.
     KiCad,
-    /// Altium: right drag pans.
+    /// Altium: right drag pans. The default (alphabetically first of the supported
+    /// ECAD tools) (#54/#55).
+    #[default]
     Altium,
 }
 
 /// Whether `button` drags should pan the canvas under the given preset (#54). Pure
 /// → unit-testable; the only per-preset difference in the MVP.
 fn pans_on(preset: InputPreset, button: egui::PointerButton) -> bool {
-    use egui::PointerButton::{Middle, Primary, Secondary};
+    use egui::PointerButton::{Middle, Secondary};
     match preset {
-        InputPreset::EtchyDefault => button == Primary,
         InputPreset::KiCad => button == Middle || button == Secondary,
         InputPreset::Altium => button == Secondary,
     }
@@ -306,6 +304,17 @@ fn base_display_color(layer: Color32, canvas: Color32, level: BaseLevel) -> Colo
         mix(layer.g(), canvas.g()),
         mix(layer.b(), canvas.b()),
     )
+}
+
+/// Resolve an Esc press for the measure tool (#50). Esc cascades: while a measurement
+/// is in progress it clears the points but keeps measure mode on; a second Esc (nothing
+/// left to clear) exits measure mode. Returns `(next_measure_mode, clear_points)`.
+fn measure_escape(measure_mode: bool, has_points: bool) -> (bool, bool) {
+    if has_points {
+        (measure_mode, true) // clear the in-progress measurement, stay in the tool
+    } else {
+        (false, false) // nothing to clear -> leave measure mode (no-op if already off)
+    }
 }
 
 /// Cycle Off → Faint → Strong → Off (the `S` key / base selector).
@@ -495,12 +504,14 @@ struct ViewApp {
     /// brand green/red; a "Colors" popover edits them.
     col_added: Color32,
     col_removed: Color32,
-    /// Canvas (board background) colour (#53). Defaults to the brand board-dark;
-    /// editable in the Colors window and persisted (#52). Used wherever the canvas
-    /// is cleared instead of the fixed `chrome().canvas`.
-    canvas_color: Color32,
-    /// Grid colour (#53). Faint copper by default; persisted (#52).
-    grid_color: Color32,
+    /// Canvas (board background) colour (#53), kept per-theme so a dark board tuned
+    /// in dark mode never leaks into light mode (#31). Resolved via `canvas_color()`;
+    /// editable in the Colors window (active theme) and persisted (#52).
+    canvas_dark: Color32,
+    canvas_light: Color32,
+    /// Grid colour (#53), per-theme for the same reason as the canvas (#31).
+    grid_dark: Color32,
+    grid_light: Color32,
     /// Per-layer base/context colour overrides, keyed by the layer's index in
     /// `diff.layers` (default = layer_type_color for that kind) (#21).
     base_overrides: Vec<(usize, Color32)>,
@@ -564,8 +575,10 @@ impl ViewApp {
             base_level: BaseLevel::Faint,
             col_added: C_ADDED,
             col_removed: C_REMOVED,
-            canvas_color: C_CANVAS,
-            grid_color: C_GRID_DEFAULT,
+            canvas_dark: C_CANVAS,
+            canvas_light: C_CANVAS_LIGHT,
+            grid_dark: C_GRID_DEFAULT,
+            grid_light: C_GRID_DEFAULT_LIGHT,
             base_overrides: Vec::new(),
             show_colors: false,
             min_area_mm2: MIN_AREA_MM2,
@@ -848,6 +861,28 @@ const C_OUTLINE_FAINT: Color32 = Color32::from_rgba_premultiplied(0x38, 0x27, 0x
 /// without competing with diff content. User-overridable + persisted (#52); the
 /// grid (#51) draws with the live `grid_color`, this is just its default.
 const C_GRID_DEFAULT: Color32 = Color32::from_rgba_premultiplied(0x1f, 0x16, 0x08, 0x22);
+/// Light-theme default canvas: the paper-cream board (matches `chrome(Light)`), so a
+/// dark canvas tuned in dark mode never carries into light mode and vice versa (#31).
+const C_CANVAS_LIGHT: Color32 = Color32::from_rgb(0xf4, 0xf1, 0xe8);
+/// Light-theme default grid: a faint copper-brown that reads on the cream board (the
+/// dark default is far too light to see there) (#31).
+const C_GRID_DEFAULT_LIGHT: Color32 = Color32::from_rgba_premultiplied(0x26, 0x1c, 0x09, 0x46);
+
+/// Default canvas colour for a theme (#31) — the per-theme reset target.
+fn default_canvas(theme: Theme) -> Color32 {
+    match theme {
+        Theme::Dark => C_CANVAS,
+        Theme::Light => C_CANVAS_LIGHT,
+    }
+}
+
+/// Default grid colour for a theme (#31) — the per-theme reset target.
+fn default_grid(theme: Theme) -> Color32 {
+    match theme {
+        Theme::Dark => C_GRID_DEFAULT,
+        Theme::Light => C_GRID_DEFAULT_LIGHT,
+    }
+}
 /// Faint copper for the measure crosshairs (#50) — visible against the board but
 /// clearly chrome, not diff content.
 const C_CROSSHAIR: Color32 = Color32::from_rgba_premultiplied(0x70, 0x55, 0x22, 0x80);
@@ -966,7 +1001,6 @@ impl<'de> serde::Deserialize<'de> for BaseLevel {
 impl serde::Serialize for InputPreset {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         s.serialize_str(match self {
-            InputPreset::EtchyDefault => "etchy",
             InputPreset::KiCad => "kicad",
             InputPreset::Altium => "altium",
         })
@@ -974,10 +1008,10 @@ impl serde::Serialize for InputPreset {
 }
 impl<'de> serde::Deserialize<'de> for InputPreset {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        // Unknown / legacy values (incl. the removed "etchy") fall back to the default.
         Ok(match String::deserialize(d)?.as_str() {
             "kicad" => InputPreset::KiCad,
-            "altium" => InputPreset::Altium,
-            _ => InputPreset::EtchyDefault,
+            _ => InputPreset::Altium,
         })
     }
 }
@@ -1004,9 +1038,11 @@ struct Settings {
     min_area_mm2: f64,
     col_added: [u8; 4],
     col_removed: [u8; 4],
-    /// Canvas + grid colours (#53).
-    canvas_color: [u8; 4],
-    grid_color: [u8; 4],
+    /// Canvas + grid colours (#53), per-theme so light/dark keep separate boards (#31).
+    canvas_dark: [u8; 4],
+    canvas_light: [u8; 4],
+    grid_dark: [u8; 4],
+    grid_light: [u8; 4],
     /// Input scheme matching the user's ECAD tool (#54).
     input_preset: InputPreset,
 }
@@ -1020,8 +1056,10 @@ impl Default for Settings {
             min_area_mm2: MIN_AREA_MM2,
             col_added: color_to_rgba(C_ADDED),
             col_removed: color_to_rgba(C_REMOVED),
-            canvas_color: color_to_rgba(C_CANVAS),
-            grid_color: color_to_rgba(C_GRID_DEFAULT),
+            canvas_dark: color_to_rgba(C_CANVAS),
+            canvas_light: color_to_rgba(C_CANVAS_LIGHT),
+            grid_dark: color_to_rgba(C_GRID_DEFAULT),
+            grid_light: color_to_rgba(C_GRID_DEFAULT_LIGHT),
             input_preset: InputPreset::default(),
         }
     }
@@ -1059,8 +1097,10 @@ impl ViewApp {
             min_area_mm2: self.min_area_mm2,
             col_added: color_to_rgba(self.col_added),
             col_removed: color_to_rgba(self.col_removed),
-            canvas_color: color_to_rgba(self.canvas_color),
-            grid_color: color_to_rgba(self.grid_color),
+            canvas_dark: color_to_rgba(self.canvas_dark),
+            canvas_light: color_to_rgba(self.canvas_light),
+            grid_dark: color_to_rgba(self.grid_dark),
+            grid_light: color_to_rgba(self.grid_light),
             input_preset: self.input_preset,
         }
     }
@@ -1079,8 +1119,10 @@ impl ViewApp {
         self.min_area_mm2 = s.min_area_mm2;
         self.col_added = rgba_to_color(s.col_added);
         self.col_removed = rgba_to_color(s.col_removed);
-        self.canvas_color = rgba_to_color(s.canvas_color);
-        self.grid_color = rgba_to_color(s.grid_color);
+        self.canvas_dark = rgba_to_color(s.canvas_dark);
+        self.canvas_light = rgba_to_color(s.canvas_light);
+        self.grid_dark = rgba_to_color(s.grid_dark);
+        self.grid_light = rgba_to_color(s.grid_light);
         self.input_preset = s.input_preset;
     }
 }
@@ -1138,8 +1180,14 @@ impl eframe::App for ViewApp {
             }
         }
         if escape {
-            // Esc clears the current measurement but stays in measure mode (#50, fix #5).
-            self.measure_pts.clear();
+            // Esc cascades (#50): first clear the in-progress measurement, then a
+            // second Esc (nothing to clear) turns the measure tool off.
+            let (next_mode, clear) =
+                measure_escape(self.measure_mode, !self.measure_pts.is_empty());
+            if clear {
+                self.measure_pts.clear();
+            }
+            self.measure_mode = next_mode;
         }
         if cycle_unit {
             self.measure_unit = self.measure_unit.next();
@@ -1193,7 +1241,9 @@ impl eframe::App for ViewApp {
                 );
                 ui.add_space(8.0);
                 ui.label(
-                    egui::RichText::new(format!("{}  →  {}", self.old_label, self.new_label))
+                    // ASCII "->" — egui's default font has no arrow glyph (→ renders
+                    // as tofu, #30).
+                    egui::RichText::new(format!("{}  ->  {}", self.old_label, self.new_label))
                         .size(15.0)
                         .color(C_CREAM),
                 );
@@ -1289,25 +1339,20 @@ impl eframe::App for ViewApp {
                 // Input scheme matching the user's ECAD tool (#54). MVP: picks
                 // which mouse button pans the canvas; persisted via #52.
                 let preset_label = |p: InputPreset| match p {
-                    InputPreset::EtchyDefault => "etchy",
                     InputPreset::KiCad => "KiCad",
                     InputPreset::Altium => "Altium",
                 };
                 egui::ComboBox::from_id_salt("input_preset")
                     .selected_text(format!("input: {}", preset_label(self.input_preset)))
                     .show_ui(ui, |ui| {
-                        for p in [
-                            InputPreset::EtchyDefault,
-                            InputPreset::KiCad,
-                            InputPreset::Altium,
-                        ] {
+                        for p in [InputPreset::Altium, InputPreset::KiCad] {
                             ui.selectable_value(&mut self.input_preset, p, preset_label(p));
                         }
                     })
                     .response
                     .on_hover_text(
-                        "Pan mouse button by ECAD tool: etchy = left-drag, \
-                         KiCad = middle/right-drag, Altium = right-drag.",
+                        "Pan mouse button by ECAD tool: \
+                         Altium = right-drag, KiCad = middle/right-drag.",
                     );
                 ui.separator();
                 // Dark/light toggle. ASCII label — egui's default font has no
@@ -1367,59 +1412,79 @@ impl eframe::App for ViewApp {
                         group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
                     for (group, idxs) in groups {
                         ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(group.title())
-                                .small()
-                                .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
-                        );
-                        for idx in idxs {
-                            let l = &self.diff.layers[idx];
-                            // Row: a small colour swatch (painted rect, not a font
-                            // glyph — the default font lacks ● and renders tofu, #16),
-                            // the layer name, then a compact change micro-label (#25).
-                            let kind = l.kind;
-                            let changed = l.is_changed();
-                            let added = l.change.added_area_mm2();
-                            let removed = l.change.removed_area_mm2();
-                            let name = short_layer_name(kind);
-                            let swatch =
-                                resolve_base_color(idx, kind, &self.base_overrides, self.theme);
-                            let resp = ui
-                                .horizontal(|ui| {
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(12.0, 12.0),
-                                        Sense::hover(),
+                        // Collapsible group header (#36): a disclosure triangle that
+                        // rotates down (expanded) / right (collapsed) — click it to
+                        // hide the whole section, leaving just the header. egui (with
+                        // eframe persistence) remembers each group's open state by id.
+                        let header = egui::RichText::new(group.title())
+                            .small()
+                            .color(Color32::from_rgb(0xe8, 0xa3, 0x3d));
+                        let mut clicked_idx = None;
+                        egui::CollapsingHeader::new(header)
+                            .id_salt(group.title())
+                            .default_open(true)
+                            .show_unindented(ui, |ui| {
+                                for idx in idxs {
+                                    let l = &self.diff.layers[idx];
+                                    // Row: a small colour swatch (painted rect, not a
+                                    // font glyph — the default font lacks ● and renders
+                                    // tofu, #16), the layer name, then a compact change
+                                    // micro-label (#25).
+                                    let kind = l.kind;
+                                    let changed = l.is_changed();
+                                    let added = l.change.added_area_mm2();
+                                    let removed = l.change.removed_area_mm2();
+                                    let name = short_layer_name(kind);
+                                    let swatch = resolve_base_color(
+                                        idx,
+                                        kind,
+                                        &self.base_overrides,
+                                        self.theme,
                                     );
-                                    ui.painter().rect_filled(rect, 2.0, swatch);
-                                    let label = if changed {
-                                        egui::RichText::new(&name).strong()
-                                    } else {
-                                        egui::RichText::new(&name).weak()
-                                    };
-                                    let r = ui.selectable_label(idx == self.selected, label);
-                                    // Compact +A/-B mm² micro-label on changed layers.
-                                    // No old/base area is exposed by etchy-core, so a
-                                    // percent isn't available — show the deltas instead.
-                                    if changed {
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "+{added:.3} −{removed:.3}"
-                                                    ))
-                                                    .small()
-                                                    .weak(),
+                                    let resp = ui
+                                        .horizontal(|ui| {
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                egui::vec2(12.0, 12.0),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(rect, 2.0, swatch);
+                                            let label = if changed {
+                                                egui::RichText::new(&name).strong()
+                                            } else {
+                                                egui::RichText::new(&name).weak()
+                                            };
+                                            let r =
+                                                ui.selectable_label(idx == self.selected, label);
+                                            // Compact +A/-B mm² micro-label on changed
+                                            // layers. No old/base area is exposed by
+                                            // etchy-core, so a percent isn't available —
+                                            // show the deltas instead.
+                                            if changed {
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "+{added:.3} −{removed:.3}"
+                                                            ))
+                                                            .small()
+                                                            .weak(),
+                                                        );
+                                                    },
                                                 );
-                                            },
-                                        );
+                                            }
+                                            r
+                                        })
+                                        .inner;
+                                    if resp.clicked() {
+                                        clicked_idx = Some(idx);
                                     }
-                                    r
-                                })
-                                .inner;
-                            if resp.clicked() {
-                                self.select(idx);
-                            }
+                                }
+                            });
+                        if let Some(idx) = clicked_idx {
+                            self.select(idx);
                         }
                     }
                 });
@@ -1456,17 +1521,27 @@ impl eframe::App for ViewApp {
                         self.col_removed = C_REMOVED;
                     }
                     ui.separator();
-                    // Canvas + grid colours (#53) — persisted via #52.
-                    ui.label(egui::RichText::new("Canvas & grid").strong());
+                    // Canvas + grid colours (#53) — per-theme (#31), persisted (#52).
+                    // The pickers edit the ACTIVE theme; switch dark/light to tune the
+                    // other, so a charcoal canvas never bleeds into light mode.
+                    let theme_name = match self.theme {
+                        Theme::Dark => "dark",
+                        Theme::Light => "light",
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("Canvas & grid ({theme_name} mode)")).strong(),
+                    );
                     ui.horizontal(|ui| {
                         ui.label("Canvas");
-                        ui.color_edit_button_srgba(&mut self.canvas_color);
+                        ui.color_edit_button_srgba(self.canvas_color_mut());
                         ui.label("Grid");
-                        ui.color_edit_button_srgba(&mut self.grid_color);
+                        ui.color_edit_button_srgba(self.grid_color_mut());
                     });
                     if ui.button("reset canvas & grid to default").clicked() {
-                        self.canvas_color = C_CANVAS;
-                        self.grid_color = C_GRID_DEFAULT;
+                        self.canvas_dark = default_canvas(Theme::Dark);
+                        self.canvas_light = default_canvas(Theme::Light);
+                        self.grid_dark = default_grid(Theme::Dark);
+                        self.grid_light = default_grid(Theme::Light);
                     }
                     ui.separator();
                     ui.label(egui::RichText::new("Layer base colours").strong());
@@ -1526,7 +1601,7 @@ impl eframe::App for ViewApp {
     /// Clear the native framebuffer to the brand board-dark, so the window reads
     /// as #0b0f0e (not the default near-black) and matches the web page.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        self.canvas_color.to_normalized_gamma_f32()
+        self.canvas_color().to_normalized_gamma_f32()
     }
 
     /// Persist the user-tunable view state (#52). eframe calls this periodically
@@ -1538,6 +1613,39 @@ impl eframe::App for ViewApp {
 }
 
 impl ViewApp {
+    /// Active-theme canvas colour (#31). The board paints with this, so light mode
+    /// keeps its own background independent of any dark-mode tuning.
+    fn canvas_color(&self) -> Color32 {
+        match self.theme {
+            Theme::Dark => self.canvas_dark,
+            Theme::Light => self.canvas_light,
+        }
+    }
+
+    /// Mutable handle to the active-theme canvas colour, for the colour picker (#31).
+    fn canvas_color_mut(&mut self) -> &mut Color32 {
+        match self.theme {
+            Theme::Dark => &mut self.canvas_dark,
+            Theme::Light => &mut self.canvas_light,
+        }
+    }
+
+    /// Active-theme grid colour (#31).
+    fn grid_color(&self) -> Color32 {
+        match self.theme {
+            Theme::Dark => self.grid_dark,
+            Theme::Light => self.grid_light,
+        }
+    }
+
+    /// Mutable handle to the active-theme grid colour, for the colour picker (#31).
+    fn grid_color_mut(&mut self) -> &mut Color32 {
+        match self.theme {
+            Theme::Dark => &mut self.grid_dark,
+            Theme::Light => &mut self.grid_light,
+        }
+    }
+
     /// Is the canvas being dragged with a button the current input preset assigns
     /// to panning (#54)? Maps egui's per-button drag state through `pans_on`.
     fn dragging_pans(&self, response: &egui::Response) -> bool {
@@ -1558,7 +1666,7 @@ impl ViewApp {
         let rect = response.rect;
         // The board background uses the user-configurable canvas colour (#53),
         // defaulting to the brand board-dark.
-        painter.rect_filled(rect, 0.0, self.canvas_color);
+        painter.rect_filled(rect, 0.0, self.canvas_color());
 
         // Fit on first show / layer change.
         if !self.cam.fitted {
@@ -1650,7 +1758,7 @@ impl ViewApp {
         // Grid overlay (#51): faint world-spaced lines, drawn UNDER the geometry.
         // Skip if the on-screen spacing is too dense (< 6 px) so it never fills solid.
         if self.show_grid {
-            draw_grid(&painter, &self.cam, rect, self.grid_mm, self.grid_color);
+            draw_grid(&painter, &self.cam, rect, self.grid_mm, self.grid_color());
         }
 
         // Build the shapes to draw, per mode.
@@ -1688,7 +1796,7 @@ impl ViewApp {
             let mut rmesh = egui::epaint::Mesh::default();
             // Base boards honour the base-level (faint/strong dimming) — #44; the
             // board outline (Side::Full) is drawn into BOTH halves for orientation — #45.
-            let base_col = base_display_color(base_color, self.canvas_color, self.base_level);
+            let base_col = base_display_color(base_color, self.canvas_color(), self.base_level);
             for item in &cache.items {
                 match item.side {
                     Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, lr, base_col),
@@ -1736,7 +1844,7 @@ impl ViewApp {
                 rect,
                 self.base_level,
                 base_color,
-                self.canvas_color,
+                self.canvas_color(),
                 self.col_added,
                 self.col_removed,
                 min_area_nm2,
@@ -2831,10 +2939,6 @@ mod tests {
     #[test]
     fn pans_on_matches_each_preset() {
         use egui::PointerButton::{Middle, Primary, Secondary};
-        // etchy default: primary (left) drag only.
-        assert!(pans_on(InputPreset::EtchyDefault, Primary));
-        assert!(!pans_on(InputPreset::EtchyDefault, Middle));
-        assert!(!pans_on(InputPreset::EtchyDefault, Secondary));
         // KiCad: middle OR right, not primary.
         assert!(!pans_on(InputPreset::KiCad, Primary));
         assert!(pans_on(InputPreset::KiCad, Middle));
@@ -2843,25 +2947,26 @@ mod tests {
         assert!(!pans_on(InputPreset::Altium, Primary));
         assert!(!pans_on(InputPreset::Altium, Middle));
         assert!(pans_on(InputPreset::Altium, Secondary));
-        // Default preset is etchy's.
-        assert_eq!(InputPreset::default(), InputPreset::EtchyDefault);
+        // Default preset is Altium (alphabetically first of the supported tools, #55).
+        assert_eq!(InputPreset::default(), InputPreset::Altium);
     }
 
     #[test]
     fn input_preset_serde_round_trips() {
-        for p in [
-            InputPreset::EtchyDefault,
-            InputPreset::KiCad,
-            InputPreset::Altium,
-        ] {
+        for p in [InputPreset::KiCad, InputPreset::Altium] {
             let json = serde_json::to_string(&p).expect("serialize");
             let back: InputPreset = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(p, back);
         }
-        // Unknown / legacy strings fall back to the default, never error.
+        // Unknown / legacy strings (incl. the removed "etchy") fall back to the
+        // default, never error.
+        assert_eq!(
+            serde_json::from_str::<InputPreset>("\"etchy\"").expect("deserialize"),
+            InputPreset::Altium,
+        );
         assert_eq!(
             serde_json::from_str::<InputPreset>("\"bogus\"").expect("deserialize"),
-            InputPreset::EtchyDefault,
+            InputPreset::Altium,
         );
     }
 
@@ -2876,8 +2981,10 @@ mod tests {
             min_area_mm2: 0.0123,
             col_added: [10, 20, 30, 255],
             col_removed: [200, 50, 60, 255],
-            canvas_color: [11, 15, 14, 255],
-            grid_color: [56, 39, 14, 60],
+            canvas_dark: [11, 15, 14, 255],
+            canvas_light: [244, 241, 232, 255],
+            grid_dark: [56, 39, 14, 60],
+            grid_light: [138, 102, 34, 70],
             input_preset: InputPreset::KiCad,
         };
         let json = serde_json::to_string(&s).expect("serialize");
@@ -2886,6 +2993,76 @@ mod tests {
         // Color32 <-> [u8;4] is a faithful round trip.
         let c = Color32::from_rgba_unmultiplied(56, 39, 14, 60);
         assert_eq!(rgba_to_color(color_to_rgba(c)), c);
+    }
+
+    #[test]
+    fn measure_escape_clears_then_exits() {
+        use super::measure_escape;
+        // In measure mode with an in-progress measurement: first Esc clears the
+        // points but stays in measure mode (#50).
+        assert_eq!(measure_escape(true, true), (true, true));
+        // In measure mode with nothing to clear: a second Esc exits measure mode.
+        assert_eq!(measure_escape(true, false), (false, false));
+        // Not in measure mode: Esc is a no-op.
+        assert_eq!(measure_escape(false, false), (false, false));
+    }
+
+    #[test]
+    fn canvas_and_grid_colours_are_per_theme() {
+        use super::ViewApp;
+        use egui::Color32;
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+
+        // Defaults differ by theme, so light mode is never a dark canvas (#31).
+        app.theme = Theme::Dark;
+        let dark_default = app.canvas_color();
+        app.theme = Theme::Light;
+        let light_default = app.canvas_color();
+        assert_ne!(
+            dark_default, light_default,
+            "light canvas default must differ from dark"
+        );
+
+        // Editing the canvas in one theme must not bleed into the other (#31).
+        app.theme = Theme::Dark;
+        *app.canvas_color_mut() = Color32::from_rgb(1, 2, 3);
+        app.theme = Theme::Light;
+        assert_eq!(
+            app.canvas_color(),
+            light_default,
+            "light canvas unchanged by a dark-mode edit"
+        );
+        *app.canvas_color_mut() = Color32::from_rgb(4, 5, 6);
+        app.theme = Theme::Dark;
+        assert_eq!(
+            app.canvas_color(),
+            Color32::from_rgb(1, 2, 3),
+            "dark canvas kept its own edit"
+        );
+
+        // Grid colour is per-theme the same way.
+        app.theme = Theme::Dark;
+        *app.grid_color_mut() = Color32::from_rgb(7, 8, 9);
+        app.theme = Theme::Light;
+        assert_ne!(app.grid_color(), Color32::from_rgb(7, 8, 9));
+    }
+
+    #[test]
+    fn per_theme_colours_round_trip_through_settings() {
+        use super::ViewApp;
+        use egui::Color32;
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.canvas_dark = Color32::from_rgb(1, 1, 1);
+        app.canvas_light = Color32::from_rgb(250, 250, 250);
+        app.grid_dark = Color32::from_rgba_unmultiplied(2, 2, 2, 30);
+        app.grid_light = Color32::from_rgba_unmultiplied(200, 200, 200, 30);
+
+        let mut fresh = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        fresh.apply_settings(app.to_settings());
+        assert_eq!(fresh.canvas_dark, app.canvas_dark);
+        assert_eq!(fresh.canvas_light, app.canvas_light);
+        assert_eq!(fresh.grid_dark, app.grid_dark);
+        assert_eq!(fresh.grid_light, app.grid_light);
     }
 
     /// A minimal empty diff for constructing a `ViewApp` in tests (no layers).
@@ -2906,8 +3083,8 @@ mod tests {
         app.min_area_mm2 = 0.05;
         app.col_added = Color32::from_rgb(1, 2, 3);
         app.col_removed = Color32::from_rgb(4, 5, 6);
-        app.canvas_color = Color32::from_rgb(7, 8, 9);
-        app.grid_color = Color32::from_rgba_unmultiplied(10, 11, 12, 40);
+        app.canvas_dark = Color32::from_rgb(7, 8, 9);
+        app.grid_dark = Color32::from_rgba_unmultiplied(10, 11, 12, 40);
         app.base_overrides = vec![(0, Color32::from_rgb(20, 21, 22))];
         app.input_preset = InputPreset::Altium;
 
@@ -2920,8 +3097,8 @@ mod tests {
         assert_eq!(fresh.min_area_mm2, app.min_area_mm2);
         assert_eq!(fresh.col_added, app.col_added);
         assert_eq!(fresh.col_removed, app.col_removed);
-        assert_eq!(fresh.canvas_color, app.canvas_color);
-        assert_eq!(fresh.grid_color, app.grid_color);
+        assert_eq!(fresh.canvas_dark, app.canvas_dark);
+        assert_eq!(fresh.grid_dark, app.grid_dark);
         assert_eq!(fresh.base_overrides, app.base_overrides);
         assert_eq!(fresh.input_preset, app.input_preset);
     }
