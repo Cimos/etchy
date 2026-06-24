@@ -207,6 +207,9 @@ enum Mode {
     After,
     /// Side-by-side: old board left, new board right, one shared camera (G4).
     Split,
+    /// Curtain wipe: one draggable divider, old board left of it, new board right,
+    /// one shared camera (#61). Like Split but the boundary is user-movable.
+    Swipe,
 }
 
 /// How strongly to draw the unchanged base (the new layer) behind the diff (G3).
@@ -379,7 +382,9 @@ fn group_all_visible(visible: &[bool], idxs: &[usize]) -> bool {
 }
 
 /// Visibility vector that shows only the changed layers ("Show changed", #58),
-/// from a per-index changed-flag slice.
+/// from a per-index changed-flag slice. The UI button was hidden per feedback #8,
+/// but the capability is kept (and tested) so it can be re-surfaced later.
+#[allow(dead_code)]
 fn visible_from_changed(changed: &[bool]) -> Vec<bool> {
     changed.to_vec()
 }
@@ -524,6 +529,21 @@ fn split_rects(rect: Rect, frac: f32, gutter: f32) -> (Rect, Rect, f32) {
     (left, right, div)
 }
 
+/// Keep the swipe divider within [0.1, 0.9] so neither side ever vanishes (#61).
+fn clamp_swipe_frac(frac: f32) -> f32 {
+    frac.clamp(0.1, 0.9)
+}
+
+/// Partition `rect` into left/right clip-rects meeting at a single draggable
+/// divider at `frac` (clamped); returns `(left, right, divider_x)` (#61). Unlike
+/// [`split_rects`] there is no gutter — the sides touch so the wipe is seamless.
+fn swipe_rects(rect: Rect, frac: f32) -> (Rect, Rect, f32) {
+    let div = rect.left() + rect.width() * clamp_swipe_frac(frac);
+    let left = Rect::from_min_max(rect.min, Pos2::new(div, rect.max.y));
+    let right = Rect::from_min_max(Pos2::new(div, rect.min.y), rect.max);
+    (left, right, div)
+}
+
 /// Pan/zoom camera in world (nm) space.
 struct Camera {
     center: [f64; 2], // world nm
@@ -613,6 +633,12 @@ struct ViewApp {
     /// Input scheme matching the user's ECAD tool (#54). MVP: controls which mouse
     /// button pans the canvas. Persisted via #52.
     input_preset: InputPreset,
+    /// Swipe/curtain divider position, normalized 0..1 across the canvas width
+    /// (#61). Clamped to [0.1, 0.9] on use; persisted via #52.
+    swipe_frac: f32,
+    /// Transient: the swipe divider is being dragged (#61). Not persisted — it only
+    /// holds the grab across frames so leaving the handle mid-drag keeps it.
+    swipe_drag: bool,
 }
 
 impl ViewApp {
@@ -662,6 +688,8 @@ impl ViewApp {
             grid_mm: 1.0,
             snap_grid: false,
             input_preset: InputPreset::default(),
+            swipe_frac: 0.5,
+            swipe_drag: false,
         }
     }
 
@@ -730,12 +758,11 @@ impl ViewApp {
     }
 
     fn select(&mut self, idx: usize) {
-        // Selecting a layer also makes it visible — you can't highlight what isn't
-        // drawn. Visibility alone (the per-row toggle) never moves the camera; only
-        // a genuine selection change refits.
-        if let Some(v) = self.visible_layers.get_mut(idx) {
-            *v = true;
-        }
+        // Selection (highlight) is independent of visibility (#2): clicking a layer
+        // name highlights it but does NOT tick it on — the per-row checkbox is the
+        // only thing that toggles visibility. Split/Swipe force the selected layer
+        // visible regardless, so a highlight is never blank there. Only a genuine
+        // selection change refits the camera.
         if idx != self.selected {
             self.selected = idx;
             self.cam.fitted = false; // refit on layer change
@@ -1118,6 +1145,8 @@ struct Settings {
     /// Indices of the layers that were visible (#58/#59), restored on next open
     /// (#52). Empty = fall back to the on-load default (changed layers + selected).
     visible_layers: Vec<usize>,
+    /// Swipe/curtain divider position, normalized 0..1 (#61).
+    swipe_frac: f32,
 }
 
 impl Default for Settings {
@@ -1135,6 +1164,7 @@ impl Default for Settings {
             grid_light: color_to_rgba(C_GRID_DEFAULT_LIGHT),
             input_preset: InputPreset::default(),
             visible_layers: Vec::new(),
+            swipe_frac: 0.5,
         }
     }
 }
@@ -1177,6 +1207,7 @@ impl ViewApp {
             grid_light: color_to_rgba(self.grid_light),
             input_preset: self.input_preset,
             visible_layers: visible_indices(&self.visible_layers),
+            swipe_frac: self.swipe_frac,
         }
     }
 
@@ -1209,6 +1240,7 @@ impl ViewApp {
                 *v = true;
             }
         }
+        self.swipe_frac = clamp_swipe_frac(s.swipe_frac);
     }
 }
 
@@ -1225,6 +1257,7 @@ impl eframe::App for ViewApp {
             mode_before,
             mode_after,
             mode_split,
+            mode_swipe,
             next,
             prev,
             toggle_outline,
@@ -1237,17 +1270,19 @@ impl eframe::App for ViewApp {
             if typing {
                 return (
                     false, false, false, false, false, false, false, false, false, false, false,
-                    false, false,
+                    false, false, false,
                 );
             }
             (
                 i.key_pressed(Key::S),
                 i.key_pressed(Key::F),
-                // Mode hotkeys (#55): 1=Overlay 2=Before 3=After 4=Split, + aliases O/B/A.
+                // Mode hotkeys (#55, #61): 1=Overlay 2=Before 3=After 4=Split 5=Swipe,
+                // + aliases O/B/A.
                 i.key_pressed(Key::Num1) || i.key_pressed(Key::O),
                 i.key_pressed(Key::Num2) || i.key_pressed(Key::B),
                 i.key_pressed(Key::Num3) || i.key_pressed(Key::A),
                 i.key_pressed(Key::Num4),
+                i.key_pressed(Key::Num5),
                 i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
                 i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
                 i.key_pressed(Key::E),
@@ -1265,14 +1300,22 @@ impl eframe::App for ViewApp {
             }
         }
         if escape {
-            // Esc cascades (#50): first clear the in-progress measurement, then a
-            // second Esc (nothing to clear) turns the measure tool off.
-            let (next_mode, clear) =
-                measure_escape(self.measure_mode, !self.measure_pts.is_empty());
-            if clear {
-                self.measure_pts.clear();
+            if self.show_colors {
+                // Esc backs out of the Colours window (#4). An open colour-picker
+                // popup consumes the first Esc itself (egui closes it; while its RGB
+                // field has focus our `typing` guard suppresses this handler), so the
+                // next Esc lands here and closes the window.
+                self.show_colors = false;
+            } else {
+                // Esc cascades (#50): first clear the in-progress measurement, then a
+                // second Esc (nothing to clear) turns the measure tool off.
+                let (next_mode, clear) =
+                    measure_escape(self.measure_mode, !self.measure_pts.is_empty());
+                if clear {
+                    self.measure_pts.clear();
+                }
+                self.measure_mode = next_mode;
             }
-            self.measure_mode = next_mode;
         }
         if cycle_unit {
             self.measure_unit = self.measure_unit.next();
@@ -1300,6 +1343,9 @@ impl eframe::App for ViewApp {
         }
         if mode_split {
             self.mode = Mode::Split;
+        }
+        if mode_swipe {
+            self.mode = Mode::Swipe;
         }
         if next {
             self.step_layer(1);
@@ -1355,14 +1401,17 @@ impl eframe::App for ViewApp {
                 });
             });
             ui.add_space(4.0);
-            // Controls row: larger hit targets than the egui default.
-            ui.horizontal(|ui| {
+            // Controls row: larger hit targets than the egui default. Wrapped so a
+            // narrow window flows controls onto a second line instead of running them
+            // off the right edge (#5).
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().button_padding = egui::vec2(14.0, 10.0);
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.selectable_value(&mut self.mode, Mode::Overlay, "Overlay");
                 ui.selectable_value(&mut self.mode, Mode::Before, "Before");
                 ui.selectable_value(&mut self.mode, Mode::After, "After");
                 ui.selectable_value(&mut self.mode, Mode::Split, "Split");
+                ui.selectable_value(&mut self.mode, Mode::Swipe, "Swipe");
                 ui.separator();
                 ui.label("base:");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Off, "off");
@@ -1428,7 +1477,7 @@ impl eframe::App for ViewApp {
                     InputPreset::Altium => "Altium",
                 };
                 egui::ComboBox::from_id_salt("input_preset")
-                    .selected_text(format!("input: {}", preset_label(self.input_preset)))
+                    .selected_text(preset_label(self.input_preset))
                     .show_ui(ui, |ui| {
                         for p in [InputPreset::Altium, InputPreset::KiCad] {
                             ui.selectable_value(&mut self.input_preset, p, preset_label(p));
@@ -1506,18 +1555,9 @@ impl eframe::App for ViewApp {
                             *v = true;
                         }
                     }
-                    if ui
-                        .small_button("Show changed")
-                        .on_hover_text("Show only the layers that changed")
-                        .clicked()
-                    {
-                        let changed: Vec<bool> =
-                            self.diff.layers.iter().map(|l| l.is_changed()).collect();
-                        self.visible_layers = visible_from_changed(&changed);
-                        if let Some(v) = self.visible_layers.get_mut(self.selected) {
-                            *v = true;
-                        }
-                    }
+                    // "Show changed" button hidden per feedback #8 — the capability
+                    // stays in `visible_from_changed` (still unit-tested) so it can be
+                    // re-surfaced later, but the button is removed from the row.
                 });
                 ui.separator();
                 // Actions deferred so the per-frame group iteration doesn't borrow
@@ -1525,6 +1565,7 @@ impl eframe::App for ViewApp {
                 let mut select: Option<usize> = None;
                 let mut toggle: Option<(usize, bool)> = None; // (layer, show)
                 let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
+                let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     // Group into sections (copper / mask / silk / …) in fixed order,
                     // changed-first within each (G5).
@@ -1562,7 +1603,9 @@ impl eframe::App for ViewApp {
                                         .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
                                 );
                             })
-                            .body_unindented(|ui| {
+                            // Indent the rows under the header (#1) so the group name
+                            // reads as the parent, left of its layers.
+                            .body(|ui| {
                                 for idx in &idxs {
                                     let idx = *idx;
                                     let l = &self.diff.layers[idx];
@@ -1596,11 +1639,17 @@ impl eframe::App for ViewApp {
                                             {
                                                 toggle = Some((idx, vis));
                                             }
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(12.0, 12.0),
-                                                Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(rect, 2.0, swatch);
+                                            // Clickable colour swatch (#3): opens this
+                                            // layer's colour picker; a change records a
+                                            // per-layer base override (applied below).
+                                            let mut sw = swatch;
+                                            if ui
+                                                .color_edit_button_srgba(&mut sw)
+                                                .on_hover_text("Layer colour — click to change")
+                                                .changed()
+                                            {
+                                                set_color = Some((idx, sw));
+                                            }
                                             // Visible layers read brighter; hidden grey.
                                             let label = match (visible, changed) {
                                                 (true, true) => egui::RichText::new(&name).strong(),
@@ -1652,6 +1701,14 @@ impl eframe::App for ViewApp {
                 }
                 if let Some(idx) = select {
                     self.select(idx);
+                }
+                // Per-layer colour override from the inline swatch picker (#3).
+                if let Some((idx, c)) = set_color {
+                    if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx) {
+                        e.1 = c;
+                    } else {
+                        self.base_overrides.push((idx, c));
+                    }
                 }
             });
 
@@ -1712,6 +1769,9 @@ impl eframe::App for ViewApp {
                     ui.label(egui::RichText::new("Layer base colours").strong());
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
+                        // Fill the window width so the scrollbar sits at the far right
+                        // instead of hugging the (narrow) content (#6).
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             // One row per LAYER (by index), so two layers of the same
                             // kind can be coloured apart (#21).
@@ -1754,6 +1814,7 @@ impl eframe::App for ViewApp {
             Mode::Before => "Before",
             Mode::After => "After",
             Mode::Split => "Split",
+            Mode::Swipe => "Swipe",
         };
         let zoom_pct = if self.cam.fit_scale > 0.0 {
             (self.cam.scale / self.cam.fit_scale * 100.0).round() as i32
@@ -1841,11 +1902,46 @@ impl ViewApp {
             self.cam.fitted = true;
         }
 
+        // Swipe/curtain divider (#61): a draggable vertical wipe line. Dragging it
+        // takes priority over panning, so when the pointer grabs the divider the
+        // pan logic below is skipped for this frame. The handle has a few px of
+        // grab tolerance and shows a horizontal-resize cursor on hover.
+        let mut swipe_dragging = false;
+        if self.mode == Mode::Swipe {
+            const GRAB_PX: f32 = 6.0;
+            let (_, _, div_x) = swipe_rects(rect, self.swipe_frac);
+            let near_div = response
+                .hover_pos()
+                .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX);
+            // Track an in-progress drag that started on the divider so leaving the
+            // grab band mid-drag doesn't drop it.
+            if response.drag_started_by(egui::PointerButton::Primary) && near_div {
+                self.swipe_drag = true;
+            }
+            if !response.dragged_by(egui::PointerButton::Primary) {
+                self.swipe_drag = false;
+            }
+            if self.swipe_drag {
+                if let Some(p) = response.interact_pointer_pos() {
+                    let frac = (p.x - rect.left()) / rect.width().max(1.0);
+                    self.swipe_frac = clamp_swipe_frac(frac);
+                }
+                swipe_dragging = true;
+            }
+            if near_div || self.swipe_drag {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+        } else {
+            self.swipe_drag = false;
+        }
+
         // Measure tool (#22): record clicks as world points (keep the last 2).
         // In measure mode only a PRIMARY click places a point; secondary
         // (right) and middle drags still pan the board (#52, fix #2) so the user
         // can reposition mid-measure. Outside measure mode, any drag pans.
-        if self.measure_mode {
+        if swipe_dragging {
+            // Divider drag owns the pointer this frame — no panning or measuring.
+        } else if self.measure_mode {
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let mut w = screen_to_world(&self.cam, pos, rect);
@@ -1934,7 +2030,7 @@ impl ViewApp {
         // The visible set: every layer the user has shown (#58/#59). Split renders
         // the active layer only (a stacked old|new of many layers reads as mud), so
         // it keys off just the selected layer and falls back to it when nothing is on.
-        let visible = if self.mode == Mode::Split {
+        let visible = if self.mode == Mode::Split || self.mode == Mode::Swipe {
             vec![self.selected]
         } else {
             let v = visible_indices(&self.visible_layers);
@@ -1961,13 +2057,31 @@ impl ViewApp {
         let theme = self.theme;
         let base_overrides = &self.base_overrides;
         let layers = &self.diff.layers;
-        let base_of = |li: usize| resolve_base_color(li, layers[li].kind, base_overrides, theme);
+        // Guard the outline sentinel (NO_LAYER): the Side::Full outline item isn't
+        // tied to a real layer, so never index `layers` with it. The Split/Swipe
+        // render path runs base_of over every item (outline included) and would panic
+        // on `layers[usize::MAX]` (#61 swipe froze the app here). The outline is drawn
+        // C_OUTLINE_FAINT regardless, so the returned colour is unused for it.
+        let base_of = |li: usize| {
+            if li == NO_LAYER {
+                C_BASE
+            } else {
+                resolve_base_color(li, layers[li].kind, base_overrides, theme)
+            }
+        };
         let cache = self.cache.as_ref().expect("cache built above");
         let n;
-        if self.mode == Mode::Split {
-            // Side-by-side: old (left) and new (right) halves, one shared camera,
-            // each clipped to its half so geometry can't bleed past the divider (G4).
-            let (lr, rr, div_x) = split_rects(rect, 0.5, 6.0);
+        if self.mode == Mode::Split || self.mode == Mode::Swipe {
+            // Side-by-side / curtain: old (left) and new (right), one shared camera,
+            // each clipped to its side so geometry can't bleed past the divider (G4,
+            // #61). Split fixes the boundary at 50/50 with a gutter; Swipe puts it at
+            // the draggable `swipe_frac` with no gutter (seamless wipe).
+            let swipe = self.mode == Mode::Swipe;
+            let (lr, rr, div_x) = if swipe {
+                swipe_rects(rect, self.swipe_frac)
+            } else {
+                split_rects(rect, 0.5, 6.0)
+            };
             // One mesh per side (not per item) → a single clipped draw per half,
             // matching the smooth non-split path instead of a painter per item.
             let mut lmesh = egui::epaint::Mesh::default();
@@ -1997,13 +2111,22 @@ impl ViewApp {
             if !rmesh.is_empty() {
                 painter.with_clip_rect(rr).add(Shape::from(rmesh));
             }
+            // The divider: a copper wipe line. In Swipe it's the draggable handle —
+            // drawn a touch heavier, with grab pips, so it reads as movable.
             painter.line_segment(
                 [
                     Pos2::new(div_x, rect.top()),
                     Pos2::new(div_x, rect.bottom()),
                 ],
-                Stroke::new(1.5, C_COPPER),
+                Stroke::new(if swipe { 2.5 } else { 1.5 }, C_COPPER),
             );
+            if swipe {
+                // A small grab handle at mid-height so the divider reads as draggable.
+                let mid_y = rect.center().y;
+                for dy in [-14.0, 0.0, 14.0] {
+                    painter.circle_filled(Pos2::new(div_x, mid_y + dy), 2.5, C_COPPER);
+                }
+            }
             // Labels at each half's BOTTOM-left so they don't collide with the
             // top-left per-layer caption — #48.
             for (r, txt) in [
@@ -2236,6 +2359,12 @@ fn push_context_items(
         if outer.len() < 3 {
             continue;
         }
+        // Thickness data (#9/#10): lets transform_cache LOD-cull sub-pixel base
+        // features when zoomed out, so a dense multi-layer view stays fast. Same
+        // area/extent the diff path computes.
+        let bb = ring_bbox(outer);
+        let extent_nm = (bb[2] - bb[0]).max(bb[3] - bb[1]);
+        let area_nm2 = lod::ring_area_nm2(outer);
         let tris = etchy_core::triangulate_shape(shape);
         if !tris.is_empty() {
             items.push(CachedItem {
@@ -2243,9 +2372,9 @@ fn push_context_items(
                 side,
                 layer_index,
                 tris,
-                bbox: ring_bbox(outer),
-                extent_nm: 0,
-                area_nm2: 0.0,
+                bbox: bb,
+                extent_nm,
+                area_nm2,
             });
         }
     }
@@ -2300,9 +2429,10 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
             push_context_items(&mut items, set, Role::Outline, Side::Full, NO_LAYER);
         }
     }
-    if key.mode == Mode::Split {
-        // Split: active layer only (the selected layer is the first visible one the
-        // shell records; see draw_canvas). Keep it the single-layer old|new view.
+    if key.mode == Mode::Split || key.mode == Mode::Swipe {
+        // Split & Swipe: active layer only (the selected layer is the first visible
+        // one the shell records; see draw_canvas). Single-layer old|new view; only
+        // the on-screen clip boundary differs (fixed vs draggable divider) — #61.
         if let Some(&li) = key.visible.first() {
             let layer = &diff.layers[li];
             if key.base_on {
@@ -2328,7 +2458,7 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
                 push_diff_items(&mut items, &layer.removed, Role::Removed, li);
                 push_diff_items(&mut items, &layer.added, Role::Added, li);
             }
-            Mode::Split => unreachable!("split handled above"),
+            Mode::Split | Mode::Swipe => unreachable!("split/swipe handled above"),
         }
     }
     TessCache {
@@ -2380,6 +2510,18 @@ fn transform_cache(
     for item in &cache.items {
         if !bbox_visible(item.bbox, cam, rect) {
             continue; // off-screen: not a threshold "hidden", just nothing to draw
+        }
+        // Adaptive LOD for base copper (#9/#10): a base feature thinner than a pixel
+        // on screen is invisible, so don't transform it. Large planes/pads (big
+        // area/extent) stay; thin sub-pixel traces drop out when zoomed out, which is
+        // exactly where dense multi-layer views were slow. The outline reference
+        // (Role::Outline) is deliberately never culled, and diff items keep their own
+        // marker-dot LOD below.
+        if item.role == Role::Base {
+            let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
+            if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
+                continue;
+            }
         }
         // Highlight/dim (#59): the active layer at full opacity, the other visible
         // layers dimmed; layer-less items (outline) never dim.
@@ -2885,6 +3027,34 @@ mod tests {
     }
 
     #[test]
+    fn swipe_rects_split_at_the_divider_with_no_gutter() {
+        use super::{clamp_swipe_frac, swipe_rects};
+        use egui::{pos2, Rect};
+        let r = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 50.0));
+        // The two sides meet exactly at the divider — no gutter, one wipe line.
+        let (l, rr, div) = swipe_rects(r, 0.25);
+        assert_eq!(div, 25.0);
+        assert_eq!(l.left(), 0.0);
+        assert_eq!(l.right(), 25.0);
+        assert_eq!(rr.left(), 25.0);
+        assert_eq!(rr.right(), 100.0);
+        // The clip rects keep the full canvas height.
+        assert_eq!(l.top(), 0.0);
+        assert_eq!(l.bottom(), 50.0);
+        assert_eq!(rr.top(), 0.0);
+        assert_eq!(rr.bottom(), 50.0);
+        // frac is clamped to [0.1, 0.9] so neither side ever vanishes.
+        assert_eq!(clamp_swipe_frac(0.0), 0.1);
+        assert_eq!(clamp_swipe_frac(1.0), 0.9);
+        assert_eq!(clamp_swipe_frac(0.5), 0.5);
+        // A clamped frac drives the divider position too.
+        let (_, _, div_lo) = swipe_rects(r, -1.0);
+        assert_eq!(div_lo, 10.0);
+        let (_, _, div_hi) = swipe_rects(r, 2.0);
+        assert_eq!(div_hi, 90.0);
+    }
+
+    #[test]
     fn layer_type_color_is_distinct_per_family() {
         use super::{layer_type_color, Theme, C_CREAM};
         let d = Theme::Dark;
@@ -3242,6 +3412,7 @@ mod tests {
             grid_light: [138, 102, 34, 70],
             input_preset: InputPreset::KiCad,
             visible_layers: vec![0, 2, 5],
+            swipe_frac: 0.42,
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
@@ -3343,6 +3514,7 @@ mod tests {
         app.grid_dark = Color32::from_rgba_unmultiplied(10, 11, 12, 40);
         app.base_overrides = vec![(0, Color32::from_rgb(20, 21, 22))];
         app.input_preset = InputPreset::Altium;
+        app.swipe_frac = 0.37;
 
         let settings = app.to_settings();
         // A fresh app gets the saved settings applied; every tunable field matches.
@@ -3357,6 +3529,7 @@ mod tests {
         assert_eq!(fresh.grid_dark, app.grid_dark);
         assert_eq!(fresh.base_overrides, app.base_overrides);
         assert_eq!(fresh.input_preset, app.input_preset);
+        assert_eq!(fresh.swipe_frac, app.swipe_frac);
     }
 
     #[test]
