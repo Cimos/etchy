@@ -1300,14 +1300,22 @@ impl eframe::App for ViewApp {
             }
         }
         if escape {
-            // Esc cascades (#50): first clear the in-progress measurement, then a
-            // second Esc (nothing to clear) turns the measure tool off.
-            let (next_mode, clear) =
-                measure_escape(self.measure_mode, !self.measure_pts.is_empty());
-            if clear {
-                self.measure_pts.clear();
+            if self.show_colors {
+                // Esc backs out of the Colours window (#4). An open colour-picker
+                // popup consumes the first Esc itself (egui closes it; while its RGB
+                // field has focus our `typing` guard suppresses this handler), so the
+                // next Esc lands here and closes the window.
+                self.show_colors = false;
+            } else {
+                // Esc cascades (#50): first clear the in-progress measurement, then a
+                // second Esc (nothing to clear) turns the measure tool off.
+                let (next_mode, clear) =
+                    measure_escape(self.measure_mode, !self.measure_pts.is_empty());
+                if clear {
+                    self.measure_pts.clear();
+                }
+                self.measure_mode = next_mode;
             }
-            self.measure_mode = next_mode;
         }
         if cycle_unit {
             self.measure_unit = self.measure_unit.next();
@@ -1393,8 +1401,10 @@ impl eframe::App for ViewApp {
                 });
             });
             ui.add_space(4.0);
-            // Controls row: larger hit targets than the egui default.
-            ui.horizontal(|ui| {
+            // Controls row: larger hit targets than the egui default. Wrapped so a
+            // narrow window flows controls onto a second line instead of running them
+            // off the right edge (#5).
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().button_padding = egui::vec2(14.0, 10.0);
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.selectable_value(&mut self.mode, Mode::Overlay, "Overlay");
@@ -1555,6 +1565,7 @@ impl eframe::App for ViewApp {
                 let mut select: Option<usize> = None;
                 let mut toggle: Option<(usize, bool)> = None; // (layer, show)
                 let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
+                let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     // Group into sections (copper / mask / silk / …) in fixed order,
                     // changed-first within each (G5).
@@ -1592,7 +1603,9 @@ impl eframe::App for ViewApp {
                                         .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
                                 );
                             })
-                            .body_unindented(|ui| {
+                            // Indent the rows under the header (#1) so the group name
+                            // reads as the parent, left of its layers.
+                            .body(|ui| {
                                 for idx in &idxs {
                                     let idx = *idx;
                                     let l = &self.diff.layers[idx];
@@ -1626,11 +1639,17 @@ impl eframe::App for ViewApp {
                                             {
                                                 toggle = Some((idx, vis));
                                             }
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(12.0, 12.0),
-                                                Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(rect, 2.0, swatch);
+                                            // Clickable colour swatch (#3): opens this
+                                            // layer's colour picker; a change records a
+                                            // per-layer base override (applied below).
+                                            let mut sw = swatch;
+                                            if ui
+                                                .color_edit_button_srgba(&mut sw)
+                                                .on_hover_text("Layer colour — click to change")
+                                                .changed()
+                                            {
+                                                set_color = Some((idx, sw));
+                                            }
                                             // Visible layers read brighter; hidden grey.
                                             let label = match (visible, changed) {
                                                 (true, true) => egui::RichText::new(&name).strong(),
@@ -1682,6 +1701,14 @@ impl eframe::App for ViewApp {
                 }
                 if let Some(idx) = select {
                     self.select(idx);
+                }
+                // Per-layer colour override from the inline swatch picker (#3).
+                if let Some((idx, c)) = set_color {
+                    if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx) {
+                        e.1 = c;
+                    } else {
+                        self.base_overrides.push((idx, c));
+                    }
                 }
             });
 
@@ -1742,6 +1769,9 @@ impl eframe::App for ViewApp {
                     ui.label(egui::RichText::new("Layer base colours").strong());
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
+                        // Fill the window width so the scrollbar sits at the far right
+                        // instead of hugging the (narrow) content (#6).
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                             // One row per LAYER (by index), so two layers of the same
                             // kind can be coloured apart (#21).
@@ -2329,6 +2359,12 @@ fn push_context_items(
         if outer.len() < 3 {
             continue;
         }
+        // Thickness data (#9/#10): lets transform_cache LOD-cull sub-pixel base
+        // features when zoomed out, so a dense multi-layer view stays fast. Same
+        // area/extent the diff path computes.
+        let bb = ring_bbox(outer);
+        let extent_nm = (bb[2] - bb[0]).max(bb[3] - bb[1]);
+        let area_nm2 = lod::ring_area_nm2(outer);
         let tris = etchy_core::triangulate_shape(shape);
         if !tris.is_empty() {
             items.push(CachedItem {
@@ -2336,9 +2372,9 @@ fn push_context_items(
                 side,
                 layer_index,
                 tris,
-                bbox: ring_bbox(outer),
-                extent_nm: 0,
-                area_nm2: 0.0,
+                bbox: bb,
+                extent_nm,
+                area_nm2,
             });
         }
     }
@@ -2474,6 +2510,18 @@ fn transform_cache(
     for item in &cache.items {
         if !bbox_visible(item.bbox, cam, rect) {
             continue; // off-screen: not a threshold "hidden", just nothing to draw
+        }
+        // Adaptive LOD for base copper (#9/#10): a base feature thinner than a pixel
+        // on screen is invisible, so don't transform it. Large planes/pads (big
+        // area/extent) stay; thin sub-pixel traces drop out when zoomed out, which is
+        // exactly where dense multi-layer views were slow. The outline reference
+        // (Role::Outline) is deliberately never culled, and diff items keep their own
+        // marker-dot LOD below.
+        if item.role == Role::Base {
+            let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
+            if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
+                continue;
+            }
         }
         // Highlight/dim (#59): the active layer at full opacity, the other visible
         // layers dimmed; layer-less items (outline) never dim.
