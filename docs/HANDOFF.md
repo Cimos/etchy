@@ -1,6 +1,67 @@
 # etchy — handoff (resume on another machine)
 
-**As of:** 2026-06-24. Everything is on **`main`**; `git fetch && git checkout main`.
+**As of:** 2026-06-25. Everything is on **`main`**; `git fetch && git checkout main`.
+
+## Latest (2026-06-25) — #49 Phase 3 merged (multi-layer + swipe) + review feedback; perf design doc open
+
+**State of `main`** (HEAD `1c0c30c`): builds + tests green locally (47 gui tests, clippy
+clean, fmt clean; native + wasm). Merged this session, in order:
+- **#71** viewer feedback fixes: ASCII `->` arrow (was tofu, #30), per-theme canvas/grid
+  colours (#31), collapsible layer-group headers (#36), measure Esc cascade (#50),
+  input presets trimmed to Altium/KiCad with Altium default (#54/#55).
+- **#73** Phase 3 multi-layer (#58/#59): render multiple layers at once, per-layer +
+  per-group visibility checkboxes, Show all / Hide all, selected layer highlighted /
+  others dimmed (0.4α). Group headers collapse (combined with #36 via `CollapsingState`).
+- **#74** Phase 3 swipe/curtain compare (#61): draggable vertical divider, old left /
+  new right. **Also folds in the round of review feedback** (11 items, below).
+  Superseded the auto-closed #72 (its base branch was deleted on the #73 merge).
+
+**Review feedback (11 items) — all addressed in #74, verified green + screenshot:**
+swipe freeze fixed (the outline `NO_LAYER = usize::MAX` sentinel was indexing the layer
+list in the split/swipe colour lookup → panic, wedging wasm); select no longer
+auto-ticks visibility; "Show changed" hidden (API kept); group rows indented under the
+header; top controls wrap when narrow; colour-list scrollbar to far right; inline layer
+swatch opens its colour picker; Esc backs out of the Colours window; dropped the
+"input:" dropdown prefix; adaptive base-copper LOD when zoomed out. **Simon chose "PR/
+commit trail is enough"** — no separate tracking issues opened for these.
+
+**⏳ Performance (#9/#10) — DESIGN STAGE, no code yet.** Dense multi-layer boards (real-board,
+24+ layers) are slow to pan/zoom. The base-LOD shipped in #74 **did not help at working
+zoom** (Simon confirmed "no real change") — LOD only removes already-sub-pixel features.
+Root cause: `transform_cache` re-runs the world→screen transform of every visible
+triangle on the CPU every frame (scales with layers, not zoom). **Decision: deeper
+engine work — GPU-side transform.** Design doc **`docs/PERF_GPU_TRANSFORM.md`** + **PR
+#75** are open and **awaiting Simon's review**. Hybrid plan: GPU-transform base copper
+via an egui glow `PaintCallback`, keep diff items + their LOD on CPU; local-origin
+precision fix; CPU fallback. **Four open decisions** for Simon (spike-first vs full
+build; base-copper-only scope; bake-dimming vs uniform; keep CPU fallback). **Do not
+start coding until those are answered.**
+
+**Issues still open for Simon to verify + close** (PRs used `Refs`, not `Closes`): **#58,
+#59, #61** (Phase 3 features). The #71-era issues (#30/#31/#36/#50/#54/#55) were closed
+this session after his sign-off.
+
+**Remaining roadmap:** implement perf per the #75 review → **Phase 4** (#60 export
+SVG/PNG + copper-area · #57 UI polish/top-bar) → **Phase 5** (#62 drill parsing).
+Follow-up: #68 (feedback widget → pre-filled GitHub issue).
+
+**Live demo (this box):** the web viewer is served on **`localhost:8080`** showing the
+**confidential real-board rev B → rev B** board (24/26 layers changed). That board is
+staged into the gitignored `crates/etchy-gui/assets/demo/{old,new}` and **must never be
+committed** — to rebuild: copy `…/Desktop/redacted real-board-revB/real-board-revA` and
+`real-board_rev A_B` into `assets/demo/{old,new}`, set the labels in `main.rs` (~line 191) to
+`real-board rev B`/`real-board rev B`, `bash deploy/setup.sh --build-only --serve-dir <dir>`, serve
+with `ETCHY_BIND=127.0.0.1 python3 <dir>/etchy-server.py 8080 <dir>`, then **restore**:
+`git checkout -- crates/etchy-gui/assets/demo && git clean -fd crates/etchy-gui/assets/demo`
+and revert the label edit. The committed demo board is the public Mad_RP2040.
+
+**Branches:** `main` has everything. `docs/perf-gpu-transform` (PR #75) open. Earlier
+working/agent branches are merged or superseded — safe to ignore.
+
+**CI:** GitHub Actions still failing repo-wide (infra/billing, not our code) — every
+merge verified green locally instead.
+
+---
 
 ## Latest (2026-06-24) — feedback round + #49 Phase 1–2 merged; main is integrated & green
 
