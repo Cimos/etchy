@@ -629,6 +629,14 @@ struct ViewApp {
     /// World-space tessellation cache (G6): rebuilt only when the GeomKey changes,
     /// so pan/zoom/colour edits skip re-triangulation.
     cache: Option<TessCache>,
+    /// wgpu render state (#9/#10 GPU base transform). `Some` when eframe's wgpu
+    /// renderer is active (the default); `None` falls back to the CPU transform path.
+    wgpu: Option<egui_wgpu::RenderState>,
+    /// Last baked-base key; when it changes the GPU vertex buffer is re-uploaded.
+    last_base_key: u64,
+    /// Local origin (board centre, world nm) the GPU base verts are relative to;
+    /// folded into the per-frame camera uniform.
+    base_origin: [f64; 2],
     /// Measure tool active (#22): canvas clicks drop ruler points instead of
     /// panning; Esc clears and exits.
     measure_mode: bool,
@@ -690,6 +698,9 @@ impl ViewApp {
             outline,
             show_outline: true,
             cache: None,
+            wgpu: None,
+            last_base_key: u64::MAX,
+            base_origin: [0.0, 0.0],
             measure_mode: false,
             measure_pts: Vec::new(),
             measure_unit: Unit::Mm,
@@ -1189,6 +1200,18 @@ impl ViewApp {
         new_label: String,
     ) -> Self {
         let mut app = Self::new(diff, old_label, new_label);
+        // Capture the wgpu render state for the GPU base-copper path (#9/#10) and build
+        // its pipeline/buffers once. None when the wgpu renderer isn't active -> the CPU
+        // transform path is used instead.
+        if let Some(rs) = &cc.wgpu_render_state {
+            // Guard the GL backend (WebGL2 / SwiftShader): the custom render pipeline
+            // doesn't run there and would blank the app, so fall back to the CPU path.
+            // Real GPU backends (Vulkan/Metal/DX12/WebGPU) use the GPU base transform.
+            if rs.adapter.get_info().backend != wgpu::Backend::Gl {
+                setup_base_gpu(rs);
+                app.wgpu = Some(rs.clone());
+            }
+        }
         if let Some(storage) = cc.storage {
             if let Some(settings) = eframe::get_value::<Settings>(storage, eframe::APP_KEY) {
                 app.apply_settings(settings);
@@ -2152,7 +2175,30 @@ impl ViewApp {
             }
             self.last_hidden = 0;
             n = ln + rn;
-        } else {
+        } else if self.wgpu.is_some() {
+            // GPU base + CPU diff/outline (#9/#10). Bake the base verts only when the
+            // base key changes; the WGSL vertex shader transforms them each frame so
+            // pan isn't bound by per-frame CPU work. Diff/outline draw on the CPU above.
+            let key = base_key(
+                &cache.key,
+                self.base_level,
+                self.selected,
+                self.canvas_color(),
+                base_overrides,
+                theme,
+            );
+            let (verts, origin) = if key != self.last_base_key {
+                let (v, o) = bake_base(
+                    cache,
+                    base_of,
+                    self.canvas_color(),
+                    self.base_level,
+                    self.selected,
+                );
+                (Some(v), o)
+            } else {
+                (None, self.base_origin)
+            };
             let (shapes, hidden) = transform_cache(
                 cache,
                 &self.cam,
@@ -2164,6 +2210,49 @@ impl ViewApp {
                 self.col_added,
                 self.col_removed,
                 min_area_nm2,
+                true, // skip base — the GPU draws it
+            );
+            let base_count = cache.items.iter().filter(|i| i.role == Role::Base).count();
+            // base_of / cache borrows end here; safe to mutate self.
+            self.last_base_key = key;
+            self.base_origin = origin;
+            self.last_hidden = hidden;
+            // Per-frame camera uniform: local (world - origin) -> screen points,
+            // matching world_to_screen exactly (u_scale = (scale, -scale)).
+            let scale = self.cam.scale;
+            let cam = self.cam.center;
+            let org = self.base_origin;
+            let rc = rect.center();
+            let u_scale = [scale as f32, -scale as f32];
+            let u_offset = [
+                (rc.x as f64 + (org[0] - cam[0]) * scale) as f32,
+                (rc.y as f64 - (org[1] - cam[1]) * scale) as f32,
+            ];
+            painter.add(egui_wgpu::Callback::new_paint_callback(
+                rect,
+                BaseCallback {
+                    u_scale,
+                    u_offset,
+                    verts,
+                    key,
+                },
+            ));
+            n = shapes.len() + base_count;
+            painter.extend(shapes);
+        } else {
+            // CPU fallback (no wgpu render state): transform everything on the CPU.
+            let (shapes, hidden) = transform_cache(
+                cache,
+                &self.cam,
+                rect,
+                self.base_level,
+                self.selected,
+                base_of,
+                self.canvas_color(),
+                self.col_added,
+                self.col_removed,
+                min_area_nm2,
+                false,
             );
             self.last_hidden = hidden;
             n = shapes.len();
@@ -2508,6 +2597,7 @@ fn transform_cache(
     col_added: Color32,
     col_removed: Color32,
     min_area_nm2: f64,
+    skip_base: bool,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
     // instead of one Mesh+Shape per region — the real-board top-copper layer was ~5.5k
@@ -2527,6 +2617,11 @@ fn transform_cache(
         // (Role::Outline) is deliberately never culled, and diff items keep their own
         // marker-dot LOD below.
         if item.role == Role::Base {
+            // Base copper is drawn on the GPU in the stacked modes (#9/#10); skip it
+            // here so the CPU path only builds outline + diff on top.
+            if skip_base {
+                continue;
+            }
             let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
             if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
                 continue;
@@ -2642,6 +2737,308 @@ fn bbox_visible(bbox: [i64; 4], cam: &Camera, rect: Rect) -> bool {
 /// Scale a colour's opacity by `a` (clamped to [0,1]).
 fn with_alpha(c: Color32, a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+// ---- GPU base-copper transform (#9/#10, egui_wgpu) ------------------------------
+// The stacked modes draw the base copper on the GPU: geometry is uploaded once (per
+// visibility/colour change) in LOCAL coords (world minus a board-centre origin so f32
+// stays precise) and a WGSL vertex shader applies the camera each frame. This removes
+// the per-frame CPU world->screen transform that made dense multi-layer pan slow. Diff
+// items, the outline and overlays stay on the CPU painter (drawn on top). When there's
+// no wgpu render state the whole thing falls back to the CPU path.
+
+use egui_wgpu::wgpu;
+
+const GPU_WGSL: &str = r#"
+struct U { scale: vec2<f32>, offset: vec2<f32>, screen: vec2<f32>, pad: vec2<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> };
+@vertex
+fn vs(@location(0) a_pos: vec2<f32>, @location(1) a_color: vec4<f32>) -> VOut {
+    var o: VOut;
+    let p = a_pos * u.scale + u.offset;            // local -> screen points
+    o.pos = vec4<f32>(2.0 * p.x / u.screen.x - 1.0, 1.0 - 2.0 * p.y / u.screen.y, 0.0, 1.0);
+    o.color = a_color;
+    return o;
+}
+@fragment
+fn fs(i: VOut) -> @location(0) vec4<f32> { return i.color; }
+"#;
+
+/// Camera uniform (std140-friendly: 32 bytes, 16-byte aligned).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuUniform {
+    scale: [f32; 2],
+    offset: [f32; 2],
+    screen: [f32; 2],
+    _pad: [f32; 2],
+}
+
+/// Persistent GPU resources, stored in egui_wgpu's per-callback resource map.
+struct GpuRes {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    uniform_buf: wgpu::Buffer,
+    vertex_buf: wgpu::Buffer,
+    vbuf_cap: u64,
+    count: u32,
+    uploaded_key: u64,
+}
+
+/// Build the pipeline + buffers and stash them in the render state's callback map.
+fn setup_base_gpu(rs: &egui_wgpu::RenderState) {
+    let device = &rs.device;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("etchy-base"),
+        source: wgpu::ShaderSource::Wgsl(GPU_WGSL.into()),
+    });
+    let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("etchy-base-bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("etchy-base-pl"),
+        bind_group_layouts: &[Some(&bind_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("etchy-base-pipe"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 6 * 4,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                ],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: rs.target_format,
+                // Premultiplied-alpha blend, matching egui's mesh blend.
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("etchy-base-u"),
+        size: std::mem::size_of::<GpuUniform>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("etchy-base-bg"),
+        layout: &bind_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buf.as_entire_binding(),
+        }],
+    });
+    let vbuf_cap = 1024 * 6 * 4; // grows on demand
+    let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("etchy-base-v"),
+        size: vbuf_cap,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    rs.renderer.write().callback_resources.insert(GpuRes {
+        pipeline,
+        bind_group,
+        uniform_buf,
+        vertex_buf,
+        vbuf_cap,
+        count: 0,
+        uploaded_key: u64::MAX,
+    });
+}
+
+/// Per-frame paint callback: writes the camera uniform (and re-uploads verts when the
+/// base key changed), then draws the base mesh inside egui's render pass.
+struct BaseCallback {
+    u_scale: [f32; 2],
+    u_offset: [f32; 2],
+    verts: Option<Vec<f32>>,
+    key: u64,
+}
+
+impl egui_wgpu::CallbackTrait for BaseCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(res) = resources.get_mut::<GpuRes>() {
+            let ppp = screen.pixels_per_point;
+            let u = GpuUniform {
+                scale: self.u_scale,
+                offset: self.u_offset,
+                screen: [
+                    screen.size_in_pixels[0] as f32 / ppp,
+                    screen.size_in_pixels[1] as f32 / ppp,
+                ],
+                _pad: [0.0, 0.0],
+            };
+            queue.write_buffer(&res.uniform_buf, 0, bytemuck::bytes_of(&u));
+            if let Some(verts) = &self.verts {
+                if self.key != res.uploaded_key {
+                    let bytes: &[u8] = bytemuck::cast_slice(verts);
+                    if bytes.len() as u64 > res.vbuf_cap {
+                        let cap = (bytes.len() as u64).next_power_of_two();
+                        res.vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("etchy-base-v"),
+                            size: cap,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        res.vbuf_cap = cap;
+                    }
+                    queue.write_buffer(&res.vertex_buf, 0, bytes);
+                    res.count = (verts.len() / 6) as u32;
+                    res.uploaded_key = self.key;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        if let Some(res) = resources.get::<GpuRes>() {
+            if res.count == 0 {
+                return;
+            }
+            render_pass.set_pipeline(&res.pipeline);
+            render_pass.set_bind_group(0, &res.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, res.vertex_buf.slice(..));
+            render_pass.draw(0..res.count, 0..1);
+        }
+    }
+}
+
+/// Bake the cache's base items into interleaved [x, y, r, g, b, a] f32 verts, local to
+/// the returned origin (board centre, so f32 stays precise). Mirrors the CPU base
+/// colouring: `base_display_color` + the #59 per-layer dim.
+fn bake_base(
+    cache: &TessCache,
+    base_of: impl Fn(usize) -> Color32,
+    canvas: Color32,
+    base_level: BaseLevel,
+    selected: usize,
+) -> (Vec<f32>, [f64; 2]) {
+    let mut bb = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+    let mut any = false;
+    for item in &cache.items {
+        if item.role != Role::Base {
+            continue;
+        }
+        any = true;
+        bb[0] = bb[0].min(item.bbox[0]);
+        bb[1] = bb[1].min(item.bbox[1]);
+        bb[2] = bb[2].max(item.bbox[2]);
+        bb[3] = bb[3].max(item.bbox[3]);
+    }
+    if !any {
+        return (Vec::new(), [0.0, 0.0]);
+    }
+    let origin = [(bb[0] + bb[2]) as f64 / 2.0, (bb[1] + bb[3]) as f64 / 2.0];
+    let mut verts = Vec::new();
+    for item in &cache.items {
+        if item.role != Role::Base {
+            continue;
+        }
+        let mut col = base_display_color(base_of(item.layer_index), canvas, base_level);
+        let dim = dim_factor(item.layer_index, selected);
+        if dim < 1.0 {
+            col = with_alpha(col, (col.a() as f32 / 255.0) * dim);
+        }
+        let (r, g, b, a) = (
+            col.r() as f32 / 255.0,
+            col.g() as f32 / 255.0,
+            col.b() as f32 / 255.0,
+            col.a() as f32 / 255.0,
+        );
+        for tri in &item.tris {
+            for p in tri {
+                verts.push((p.x as f64 - origin[0]) as f32);
+                verts.push((p.y as f64 - origin[1]) as f32);
+                verts.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+    }
+    (verts, origin)
+}
+
+/// Hash of everything that changes the baked base verts, to gate GPU re-upload.
+fn base_key(
+    geom: &GeomKey,
+    base_level: BaseLevel,
+    selected: usize,
+    canvas: Color32,
+    base_overrides: &[(usize, Color32)],
+    theme: Theme,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    geom.visible.hash(&mut h);
+    (base_level as u8).hash(&mut h);
+    selected.hash(&mut h);
+    canvas.to_array().hash(&mut h);
+    (theme as u8).hash(&mut h);
+    for (i, c) in base_overrides {
+        i.hash(&mut h);
+        c.to_array().hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Push a fixed-size, axis-aligned square (two triangles) centred at `at` in screen

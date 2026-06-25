@@ -1191,9 +1191,11 @@ name = "etchy-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "console_error_panic_hook",
  "eframe",
  "egui",
+ "egui-wgpu",
  "etchy-core",
  "include_dir",
  "js-sys",

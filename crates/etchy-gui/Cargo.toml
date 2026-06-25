@@ -19,6 +19,12 @@ etchy-core = { path = "../etchy-core" }
 # new external crate — serde/ron/home are already in the workspace lock.
 eframe = { workspace = true, features = ["persistence"] }
 egui.workspace = true
+# GPU base-copper transform (#9/#10, viewer perf): an egui_wgpu CallbackTrait uploads
+# the visible base geometry once and a WGSL vertex shader applies the camera each
+# frame, so dense multi-layer pan/zoom isn't bound by per-frame CPU transform. wgpu is
+# already eframe's renderer here; wgpu types come via egui_wgpu's re-export.
+egui-wgpu = "0.34"
+bytemuck = { version = "1", features = ["derive"] }
 anyhow.workspace = true
 # Settings (#52) are serialized via eframe's storage; serde derive lives here.
 serde.workspace = true
