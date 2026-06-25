@@ -389,6 +389,18 @@ fn visible_from_changed(changed: &[bool]) -> Vec<bool> {
     changed.to_vec()
 }
 
+/// On-load visibility (#9/#10 perf): only the selected layer is shown; multiple
+/// layers are opt-in via the per-row/per-group checkboxes. Rendering one layer by
+/// default keeps the common case fast on dense boards (the old default showed every
+/// changed layer at once). An out-of-range `selected` just yields nothing forced on.
+fn default_visible(n: usize, selected: usize) -> Vec<bool> {
+    let mut v = vec![false; n];
+    if let Some(s) = v.get_mut(selected) {
+        *s = true;
+    }
+    v
+}
+
 /// Rebuild a per-layer visibility vector of length `n` from saved visible indices
 /// (#52). Out-of-range indices (the layer count shrank between sessions) are
 /// dropped rather than panicking.
@@ -647,13 +659,10 @@ impl ViewApp {
         order.sort_by_key(|&i| !diff.layers[i].is_changed()); // changed first, stable
         let selected = order.first().copied().unwrap_or(0);
         let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
-        // Default visibility (#59): show every changed layer, and always keep the
-        // selected layer visible so a board with no diff still renders something.
-        let mut visible_layers: Vec<bool> = diff.layers.iter().map(|l| l.is_changed()).collect();
-        if let Some(v) = visible_layers.get_mut(selected) {
-            *v = true;
-        }
-        // No changed layers and an empty board -> nothing to force on; fine.
+        // Default visibility (#9/#10 perf): show only the selected layer on load;
+        // multi-layer is opt-in via the checkboxes. Keeps the common case fast on
+        // dense boards. `selected` is the most-changed layer (changed-first order).
+        let visible_layers = default_visible(diff.layers.len(), selected);
         Self {
             diff,
             old_label,
@@ -3573,6 +3582,18 @@ mod tests {
         // No changed layers -> nothing visible (caller decides whether to keep the
         // selection visible separately).
         assert_eq!(visible_from_changed(&[false, false]), vec![false, false]);
+    }
+
+    #[test]
+    fn default_visible_shows_only_the_selected_layer() {
+        use super::default_visible;
+        // On load only the selected layer is visible; multi-layer is opt-in (#9/#10
+        // perf — fewer layers transformed by default).
+        assert_eq!(default_visible(4, 2), vec![false, false, true, false]);
+        assert_eq!(default_visible(1, 0), vec![true]);
+        // Empty board / out-of-range selected: no panic, nothing forced on.
+        assert_eq!(default_visible(0, 0), Vec::<bool>::new());
+        assert_eq!(default_visible(3, 9), vec![false, false, false]);
     }
 
     #[test]
