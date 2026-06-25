@@ -1,6 +1,29 @@
 # Design — GPU-side geometry transform for the viewer
 
-**Status:** proposed (awaiting Simon's review). **Author:** Simon. **Date:** 2026-06-24.
+**Status:** in progress. **Author:** Simon. **Date:** 2026-06-24 (updated 2026-06-25).
+
+## ⚠ Spike finding (2026-06-25) — the renderer is WGPU, not glow
+
+A first spike to wire a glow `PaintCallback` failed immediately at compile: `cc.gl`
+does not exist, because **eframe 0.34's default renderer here is WGPU** (the `default`
+feature pulls `egui-wgpu` / `wgpu` v29) on **both** native and web (`WebOptions::default()`).
+So the glow approach below is superseded:
+
+- **Implementation uses `egui_wgpu`, not `egui_glow`.** A `egui_wgpu::CallbackTrait`
+  (the `custom3d_wgpu` pattern): `prepare()` uploads the base vertex + camera-uniform
+  buffers; `paint()` binds the pipeline and draws inside egui's render pass. Resources
+  live in `cc.wgpu_render_state` (device, queue, target format) and egui_wgpu's
+  per-callback resource type-map.
+- **Shaders are WGSL**, not GLSL (one source, works native + WebGPU/WebGL2-via-wgpu).
+- **Renderer switch to glow was rejected** — making the whole app + web demo render
+  through glow just to reuse a PaintCallback is too broad a blast radius for a
+  secondary-surface perf feature. Keep WGPU; add a wgpu callback.
+
+Everything else below (the hybrid base-GPU / diff-CPU split, the local-origin f32
+precision fix, the bake-colour-per-vertex choice, the CPU fallback, the 1a default-one-
+layer win already shipped) stands — only the GL binding layer changes from glow to wgpu.
+
+---
 
 ## Problem
 
