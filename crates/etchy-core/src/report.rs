@@ -200,6 +200,8 @@ mod tests {
                 removed_area_nm2: 0,
                 added_region_count: 2,
                 removed_region_count: 0,
+                has_added: true,
+                has_removed: false,
             },
         );
         let r = DiffReport::new(vec![changed], vec!["heads up".into()]);
