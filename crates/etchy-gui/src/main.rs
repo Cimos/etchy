@@ -144,7 +144,7 @@ fn board_from_files(
             layers.push(etchy_core::Layer {
                 kind: etchy_core::classify(stem, ext),
                 label: name.clone(),
-                geometry,
+                geometry: std::sync::Arc::new(geometry),
             });
         }
     }
