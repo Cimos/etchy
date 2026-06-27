@@ -14,10 +14,20 @@ path = "src/main.rs"
 
 [dependencies]
 etchy-core = { path = "../etchy-core" }
-# "persistence" pulls eframe's storage backends so user settings (#52) survive a
-# restart on BOTH surfaces: a RON config file on native, localStorage on web. No
-# new external crate — serde/ron/home are already in the workspace lock.
-eframe = { workspace = true, features = ["persistence"] }
+# default-features=false drops eframe's wgpu backend + naga (~half the wasm
+# bundle, #86); we render through glow (WebGL2 on web, OpenGL on native), which
+# also makes the future GPU base-transform path verifiable headless. We re-add
+# only the defaults we use: glow (renderer), default_fonts (text), and the linux
+# windowing backends (wayland/x11). "persistence" pulls eframe's storage backends
+# so user settings (#52) survive a restart on BOTH surfaces: a RON config file on
+# native, localStorage on web. No new external crate.
+eframe = { workspace = true, features = [
+    "glow",
+    "default_fonts",
+    "persistence",
+    "wayland",
+    "x11",
+] }
 egui.workspace = true
 anyhow.workspace = true
 # Settings (#52) are serialized via eframe's storage; serde derive lives here.

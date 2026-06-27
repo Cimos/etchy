@@ -28,8 +28,24 @@ serde_json = "1"
 # cli
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-# gui
-eframe = "0.34"
+# gui — default-features=false drops the wgpu backend + naga (#86); the gui crate
+# re-adds glow + the features it needs. Must live here: a member crate can't
+# override default-features on a workspace-inherited dep.
+eframe = { version = "0.34", default-features = false }
 egui = "0.34"
 # tests
 proptest = "1"
+
+# Release profile (#87). These flags cut size AND help speed, so they're safe
+# workspace-wide: fat LTO + a single codegen unit let the optimizer inline across
+# crates, and strip removes symbols. We deliberately leave `opt-level` at the
+# release default (3): opt-level="z" would shrink the binary but slow the
+# large-board diff (Phase 3 perf) — the wasm *bundle* gets its size win from the
+# glow swap (#86) plus binaryen `wasm-opt=z` (index.html), which don't touch the
+# native engine's speed. `panic="abort"` is intentionally NOT set: Phase 1 #85
+# wants a catch_unwind boundary around the third-party parser, which abort would
+# defeat. Revisit both once #85 lands.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
