@@ -38,6 +38,8 @@ pub use naming::{classify, looks_like_gerber};
 pub use report::{DiffReport, LayerReport, LayerStatus, Totals, SCHEMA_VERSION};
 pub use view::{BoardDiff, LayerView};
 
+use std::sync::Arc;
+
 /// The crate version, from Cargo.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -64,7 +66,10 @@ pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
     }
     same_board_guard(old, new)?;
 
-    let empty = PolygonSet::default();
+    // `a`/`b` below are `Arc<PolygonSet>` handles, not deep copies: the per-layer
+    // `.clone()`s are refcount bumps shared with the source Board (#81). `empty`
+    // is the shared placeholder for a one-sided layer's absent side.
+    let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
     let mut reports = Vec::new();
     let mut views = Vec::new();
     for pairing in pair_layers(old, new) {
@@ -155,12 +160,12 @@ mod tests {
         let la = Layer {
             kind: LayerKind::TopCopper,
             label: "F_Cu".into(),
-            geometry: polygonize_gerber(a_txt.as_bytes()).unwrap(),
+            geometry: Arc::new(polygonize_gerber(a_txt.as_bytes()).unwrap()),
         };
         let lb = Layer {
             kind: LayerKind::TopCopper,
             label: "F_Cu".into(),
-            geometry: polygonize_gerber(b_txt.as_bytes()).unwrap(),
+            geometry: Arc::new(polygonize_gerber(b_txt.as_bytes()).unwrap()),
         };
         let old = Board { layers: vec![la] };
         let new = Board { layers: vec![lb] };
@@ -169,5 +174,37 @@ mod tests {
         assert_eq!(rep.totals.added_regions, 1);
         assert_eq!(rep.totals.removed_regions, 0);
         assert_eq!(rep.layers[0].status, LayerStatus::Changed);
+    }
+
+    #[test]
+    fn compare_detailed_shares_geometry_via_arc() {
+        // #81: the view must reuse each board layer's geometry allocation, not
+        // deep-copy it. Asserted by pointer identity so a future regression that
+        // reintroduces a clone fails loudly.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let corners = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let ga = Arc::new(polygonize_gerber(format!("{hdr}{corners}M02*\n").as_bytes()).unwrap());
+        let gb = Arc::new(
+            polygonize_gerber(format!("{hdr}{corners}X25000000Y25000000D03*\nM02*\n").as_bytes())
+                .unwrap(),
+        );
+        let old = Board {
+            layers: vec![Layer {
+                kind: LayerKind::TopCopper,
+                label: "F_Cu".into(),
+                geometry: Arc::clone(&ga),
+            }],
+        };
+        let new = Board {
+            layers: vec![Layer {
+                kind: LayerKind::TopCopper,
+                label: "F_Cu".into(),
+                geometry: Arc::clone(&gb),
+            }],
+        };
+        let diff = compare_detailed(&old, &new).unwrap();
+        // Same allocation, not a copy: the view points at the board's geometry.
+        assert!(Arc::ptr_eq(&diff.layers[0].old, &ga));
+        assert!(Arc::ptr_eq(&diff.layers[0].new, &gb));
     }
 }

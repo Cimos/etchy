@@ -52,8 +52,10 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
             .and_then(|s| s.to_str())
             .unwrap_or(stem)
             .to_string();
-        let geometry = etchy_core::polygonize_gerber(&bytes)
-            .with_context(|| format!("processing layer {label}"))?;
+        let geometry = std::sync::Arc::new(
+            etchy_core::polygonize_gerber(&bytes)
+                .with_context(|| format!("processing layer {label}"))?,
+        );
         layers.push(Layer {
             kind,
             label,

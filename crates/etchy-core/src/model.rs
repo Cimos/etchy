@@ -5,6 +5,8 @@
 //! policy) and hands the engine an already-tagged [`Board`]; the engine never
 //! touches the filesystem or interprets a path.
 
+use std::sync::Arc;
+
 use crate::error::{EngineError, Result};
 use crate::geo::{PolygonSet, NM_PER_MM};
 
@@ -84,7 +86,10 @@ impl LayerKind {
 pub struct Layer {
     pub kind: LayerKind,
     pub label: String,
-    pub geometry: PolygonSet,
+    /// Shared so the diff can hand the same geometry to the report and the
+    /// viewer without deep-copying it per layer (was the parallel-diff memory
+    /// spike, #81). Clones are refcount bumps.
+    pub geometry: Arc<PolygonSet>,
 }
 
 /// A whole fab pack: the set of resolved layers for one revision.
@@ -235,12 +240,12 @@ mod tests {
         Layer {
             kind,
             label: format!("{kind:?}"),
-            geometry: PolygonSet::new(vec![vec![vec![
+            geometry: Arc::new(PolygonSet::new(vec![vec![vec![
                 Pt::new(x0, y0),
                 Pt::new(x1, y0),
                 Pt::new(x1, y1),
                 Pt::new(x0, y1),
-            ]]]),
+            ]]])),
         }
     }
 
@@ -285,12 +290,12 @@ mod tests {
         let mk = |label: &str| Layer {
             kind: LayerKind::Other,
             label: label.into(),
-            geometry: PolygonSet::new(vec![vec![vec![
+            geometry: Arc::new(PolygonSet::new(vec![vec![vec![
                 Pt::new(0, 0),
                 Pt::new(1, 0),
                 Pt::new(1, 1),
                 Pt::new(0, 1),
-            ]]]),
+            ]]])),
         };
         let a = Board {
             layers: vec![mk("M.GM1"), mk("M.GM2")],
@@ -311,12 +316,12 @@ mod tests {
         let mk = |label: &str| Layer {
             kind: LayerKind::TopCopper,
             label: label.into(),
-            geometry: PolygonSet::new(vec![vec![vec![
+            geometry: Arc::new(PolygonSet::new(vec![vec![vec![
                 Pt::new(0, 0),
                 Pt::new(1, 0),
                 Pt::new(1, 1),
                 Pt::new(0, 1),
-            ]]]),
+            ]]])),
         };
         let a = Board {
             layers: vec![mk("revA-F_Cu.gbr")],

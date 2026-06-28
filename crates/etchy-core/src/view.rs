@@ -4,6 +4,8 @@
 //! also needs the actual per-layer geometry to draw. [`BoardDiff`] carries both,
 //! from the same single computation.
 
+use std::sync::Arc;
+
 use crate::diff::LayerChange;
 use crate::geo::PolygonSet;
 use crate::model::LayerKind;
@@ -16,10 +18,11 @@ pub struct LayerView {
     pub label_old: Option<String>,
     pub label_new: Option<String>,
     pub status: LayerStatus,
-    /// Old-revision filled geometry (empty for an added layer).
-    pub old: PolygonSet,
-    /// New-revision filled geometry (empty for a removed layer).
-    pub new: PolygonSet,
+    /// Old-revision filled geometry (empty for an added layer). Shared with the
+    /// source [`crate::Board`] via `Arc` — not deep-copied per layer (#81).
+    pub old: Arc<PolygonSet>,
+    /// New-revision filled geometry (empty for a removed layer). Shared via `Arc`.
+    pub new: Arc<PolygonSet>,
     /// `B − A` — copper present only in the new revision.
     pub added: PolygonSet,
     /// `A − B` — copper present only in the old revision.
