@@ -17,5 +17,12 @@ serde.workspace = true
 serde_json.workspace = true
 i_triangle = "0.45.0"
 
+# Per-layer parallelism for the diff (perf: large multi-layer boards). Native only —
+# wasm has no threads without COOP/COEP + a worker pool, so the web build stays serial
+# (cfg-gated in compare_detailed). Layers are independent, so output order/determinism
+# is preserved (rayon's map+collect keeps order).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
+
 [dev-dependencies]
 proptest.workspace = true

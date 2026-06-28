@@ -66,72 +66,88 @@ pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
     }
     same_board_guard(old, new)?;
 
-    // `a`/`b` below are `Arc<PolygonSet>` handles, not deep copies: the per-layer
-    // `.clone()`s are refcount bumps shared with the source Board (#81). `empty`
-    // is the shared placeholder for a one-sided layer's absent side.
-    let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
-    let mut reports = Vec::new();
-    let mut views = Vec::new();
-    for pairing in pair_layers(old, new) {
-        // (a, b) are the (old, new) geometry for this kind; one is empty for a
-        // one-sided layer. An empty one-sided layer stays Unchanged (no false gate).
-        let (kind, label_old, label_new, a, b, default_status) = match pairing {
-            LayerPairing::Both { kind, old, new } => (
-                kind,
-                Some(old.label.clone()),
-                Some(new.label.clone()),
-                old.geometry.clone(),
-                new.geometry.clone(),
-                LayerStatus::Changed,
-            ),
-            LayerPairing::OnlyOld(l) => (
-                l.kind,
-                Some(l.label.clone()),
-                None,
-                l.geometry.clone(),
-                empty.clone(),
-                LayerStatus::RemovedLayer,
-            ),
-            LayerPairing::OnlyNew(l) => (
-                l.kind,
-                None,
-                Some(l.label.clone()),
-                empty.clone(),
-                l.geometry.clone(),
-                LayerStatus::AddedLayer,
-            ),
-        };
-
-        let d = diff_layer(&a, &b); // removed = a−b, added = b−a
-        let change = d.measure();
-        let status = if change.is_unchanged() {
-            LayerStatus::Unchanged
-        } else {
-            default_status
-        };
-        reports.push(LayerReport::new(
-            kind,
-            label_old.clone(),
-            label_new.clone(),
-            status,
-            &change,
-        ));
-        views.push(LayerView {
-            kind,
-            label_old,
-            label_new,
-            status,
-            old: a,
-            new: b,
-            added: d.added,
-            removed: d.removed,
-            change,
-        });
-    }
+    let pairings = pair_layers(old, new);
+    // The expensive part — the boolean diff per layer — is independent across layers,
+    // so we map each pairing to its (report, view) and run the map in parallel on
+    // native (large boards have many layers; near-linear speedup). wasm stays serial.
+    // Order is preserved, so the result is identical to the old sequential loop.
+    // Geometry is shared via Arc inside diff_one_layer (#81), so the parallel fan-out
+    // holds refcount handles, not per-layer deep copies (no 16x memory spike).
+    let (reports, views): (Vec<LayerReport>, Vec<LayerView>) = {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+            pairings.into_par_iter().map(diff_one_layer).unzip()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            pairings.into_iter().map(diff_one_layer).unzip()
+        }
+    };
     Ok(BoardDiff {
         report: DiffReport::new(reports, Vec::new()),
         layers: views,
     })
+}
+
+/// Diff a single layer pairing into its (report, view). Pure and independent across
+/// layers, so `compare_detailed` can run it in parallel (perf) without affecting
+/// output order or determinism.
+fn diff_one_layer(pairing: LayerPairing) -> (LayerReport, LayerView) {
+    // `a`/`b` are `Arc<PolygonSet>` handles shared with the source Board, so the
+    // per-layer `.clone()`s below are refcount bumps, not deep copies — the parallel
+    // fan-out doesn't multiply peak memory (#81). `empty` is the shared placeholder
+    // for a one-sided layer's absent side.
+    let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
+    // (a, b) are the (old, new) geometry for this kind; one is empty for a one-sided
+    // layer. An empty one-sided layer stays Unchanged (no false gate).
+    let (kind, label_old, label_new, a, b, default_status) = match pairing {
+        LayerPairing::Both { kind, old, new } => (
+            kind,
+            Some(old.label.clone()),
+            Some(new.label.clone()),
+            old.geometry.clone(),
+            new.geometry.clone(),
+            LayerStatus::Changed,
+        ),
+        LayerPairing::OnlyOld(l) => (
+            l.kind,
+            Some(l.label.clone()),
+            None,
+            l.geometry.clone(),
+            empty,
+            LayerStatus::RemovedLayer,
+        ),
+        LayerPairing::OnlyNew(l) => (
+            l.kind,
+            None,
+            Some(l.label.clone()),
+            empty,
+            l.geometry.clone(),
+            LayerStatus::AddedLayer,
+        ),
+    };
+
+    let d = diff_layer(&a, &b); // removed = a−b, added = b−a
+    let change = d.measure();
+    let status = if change.is_unchanged() {
+        LayerStatus::Unchanged
+    } else {
+        default_status
+    };
+    let report = LayerReport::new(kind, label_old.clone(), label_new.clone(), status, &change);
+    let view = LayerView {
+        kind,
+        label_old,
+        label_new,
+        status,
+        old: a,
+        new: b,
+        added: d.added,
+        removed: d.removed,
+        change,
+    };
+    (report, view)
 }
 
 #[cfg(test)]
