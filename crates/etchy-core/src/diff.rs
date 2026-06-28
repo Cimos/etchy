@@ -8,25 +8,40 @@
 use crate::boolean;
 use crate::geo::PolygonSet;
 
+/// Region-count noise floor (nm²): a diff region smaller than this is a sub-feature
+/// sliver — a sub-µm rim produced along near-coincident edges — whose *number* swings
+/// with tessellation granularity (a fixed 64-gon over-produces them). It's excluded
+/// from the reported region count so that count is stable and meaningful (#94 research
+/// found the raw count moved ~40% purely with tessellation). ~1e-4 mm² is far below
+/// any real PCB feature and far above the slivers. Change-detection still uses raw
+/// presence (`has_added`/`has_removed`), so a sub-floor sliver is never a silent miss.
+const REGION_NOISE_FLOOR_NM2: i128 = 100_000_000; // 1e-4 mm²
+
 /// Magnitudes for one layer's change. Areas are exact integer nm² (`i128` avoids
 /// overflow on big pours); mm² is derived for humans / CI thresholds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LayerChange {
     pub added_area_nm2: i128,
     pub removed_area_nm2: i128,
+    /// Reported region counts — only regions above [`REGION_NOISE_FLOOR_NM2`], so the
+    /// number is tessellation-robust (#94).
     pub added_region_count: u32,
     pub removed_region_count: u32,
+    /// Raw presence of ANY diff geometry (even sub-floor slivers), kept separate so
+    /// change-detection can't miss a tiny real change (the trust bar).
+    pub has_added: bool,
+    pub has_removed: bool,
 }
 
 impl LayerChange {
-    /// True when nothing changed on this layer. Checks region counts too, not just
-    /// area: a sub-1-nm² sliver truncates to zero area under `area_nm2`'s integer
-    /// `/2`, but a nonzero region count still means geometry changed (no silent miss).
+    /// True when nothing changed on this layer. Uses raw presence, not the (noise-
+    /// floored) region count: a sub-floor sliver truncates to zero reported area and
+    /// count, but `has_*` still flags it as changed (no silent miss — the trust bar).
     pub fn is_unchanged(&self) -> bool {
         self.added_area_nm2 == 0
             && self.removed_area_nm2 == 0
-            && self.added_region_count == 0
-            && self.removed_region_count == 0
+            && !self.has_added
+            && !self.has_removed
     }
     pub fn added_area_mm2(&self) -> f64 {
         nm2_to_mm2(self.added_area_nm2)
@@ -49,8 +64,12 @@ impl LayerDiff {
         LayerChange {
             added_area_nm2: self.added.area_nm2(),
             removed_area_nm2: self.removed.area_nm2(),
-            added_region_count: self.added.region_count(),
-            removed_region_count: self.removed.region_count(),
+            // Reported counts exclude sub-floor slivers (tessellation-robust, #94)...
+            added_region_count: self.added.region_count_above(REGION_NOISE_FLOOR_NM2),
+            removed_region_count: self.removed.region_count_above(REGION_NOISE_FLOOR_NM2),
+            // ...but raw presence still flags any change, so nothing is silently missed.
+            has_added: !self.added.is_empty(),
+            has_removed: !self.removed.is_empty(),
         }
     }
     pub fn is_empty(&self) -> bool {
