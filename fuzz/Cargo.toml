@@ -1,0 +1,26 @@
+# cargo-fuzz harness for the Gerber front-end (#85). Its own workspace so the
+# stable `cargo build --workspace` never tries to build it — libfuzzer needs a
+# nightly toolchain + the sanitizer runtime. Run with:
+#   cargo +nightly fuzz run resolve_layer
+[package]
+name = "etchy-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+etchy-core = { path = "../crates/etchy-core" }
+
+[[bin]]
+name = "resolve_layer"
+path = "fuzz_targets/resolve_layer.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace (cargo-fuzz convention).
+[workspace]
