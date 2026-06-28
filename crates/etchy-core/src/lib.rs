@@ -28,8 +28,8 @@ pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
 pub use export::layer_svg;
 pub use geo::{
-    quantize_mm, triangulate_shape, Aperture, Contour, Polarity, PolygonSet, Primitive, Pt, Shape,
-    GRID_NM, NM_PER_MM,
+    quantize_mm, simplify_contour, triangulate_shape, Aperture, Contour, Polarity, PolygonSet,
+    Primitive, Pt, Shape, GRID_NM, NM_PER_MM,
 };
 pub use geom::CIRCLE_SEGMENTS;
 pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};

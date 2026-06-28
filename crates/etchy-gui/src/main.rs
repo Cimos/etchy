@@ -1053,6 +1053,11 @@ const LOD_HI_PX: f32 = 5.0;
 /// diff region (below `LOD_LO_PX`), so it stays visible at every zoom instead of
 /// phantoming (#14). Approximate — needs later visual tuning against real boards.
 const MARKER_PX: f32 = 3.0;
+/// Render-only contour-simplification tolerance (nm) for the faint base/outline mesh
+/// (#94). At ~2µm the fixed 64-gon flashes (pads/vias) collapse to far fewer triangles
+/// while large/flat features keep detail; the deviation is invisible at any practical
+/// zoom and the diff geometry is never simplified.
+const BASE_SIMPLIFY_TOL_NM: f64 = 2000.0;
 /// Default min-area threshold (mm²). Diff regions smaller than this are treated
 /// as noise (e.g. the sub-µm rims from a units/precision mismatch) and dropped —
 /// but the count is always surfaced in the caption, never silently.
@@ -2370,11 +2375,20 @@ fn push_context_items(
         }
         // Thickness data (#9/#10): lets transform_cache LOD-cull sub-pixel base
         // features when zoomed out, so a dense multi-layer view stays fast. Same
-        // area/extent the diff path computes.
+        // area/extent the diff path computes — from the EXACT outer, not the simplified
+        // mesh, so culling/LOD stay accurate.
         let bb = ring_bbox(outer);
         let extent_nm = (bb[2] - bb[0]).max(bb[3] - bb[1]);
         let area_nm2 = lod::ring_area_nm2(outer);
-        let tris = etchy_core::triangulate_shape(shape);
+        // Render-only simplification (#94): coarsen the faint base/outline mesh to
+        // ~2µm so the fixed 64-gon flashes (round pads/vias) collapse to far fewer
+        // triangles, cutting the per-frame transform on dense boards. The diff geometry
+        // is untouched (push_diff_items uses the exact contours).
+        let simplified: etchy_core::Shape = shape
+            .iter()
+            .map(|c| etchy_core::simplify_contour(c, BASE_SIMPLIFY_TOL_NM))
+            .collect();
+        let tris = etchy_core::triangulate_shape(&simplified);
         if !tris.is_empty() {
             items.push(CachedItem {
                 role,

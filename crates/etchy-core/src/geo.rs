@@ -250,6 +250,56 @@ pub(crate) fn wind(mut c: Contour, ccw: bool) -> Contour {
     c
 }
 
+/// Simplify a closed contour for RENDERING: drop points whose perpendicular deviation
+/// from the running edge stays within `tol_nm`, so the fixed 64-gon flashes (round
+/// pads/vias) collapse to far fewer vertices while large/flat features keep their
+/// detail. Render-only (#94): the diff/measure pipeline always uses the exact geometry
+/// — this just cuts the triangle count of the faint base mesh. Linear time and bounded
+/// error (no DoS), i128 math so it can't overflow on large coords.
+pub fn simplify_contour(c: &[Pt], tol_nm: f64) -> Contour {
+    let n = c.len();
+    if n <= 4 || tol_nm <= 0.0 {
+        return c.to_vec();
+    }
+    let tol2 = (tol_nm * tol_nm) as i128;
+    let mut out = Vec::with_capacity(n);
+    out.push(c[0]);
+    let mut key = 0usize; // start of the current edge run
+    let mut nxt = 1usize; // the edge direction is c[key] -> c[nxt]
+    let mut i = 2usize;
+    while i < n {
+        if perp_dist2_exceeds(c[i], c[key], c[nxt], tol2) {
+            // c[i] strays off the c[key]->c[nxt] line; keep c[i-1] as the new key.
+            out.push(c[i - 1]);
+            key = i - 1;
+            nxt = i;
+        }
+        i += 1;
+    }
+    out.push(c[n - 1]);
+    if out.len() < 3 {
+        c.to_vec() // never degrade a region below a triangle
+    } else {
+        out
+    }
+}
+
+/// Whether point `p`'s perpendicular distance from the infinite line `(a, b)` exceeds
+/// `tol2` (= tol²). `dist² = cross²/len2`, so `dist > tol  ⇔  cross² > tol²·len2` — all
+/// in i128 to avoid overflow on nm coords.
+fn perp_dist2_exceeds(p: Pt, a: Pt, b: Pt, tol2: i128) -> bool {
+    let abx = (b.x - a.x) as i128;
+    let aby = (b.y - a.y) as i128;
+    let len2 = abx * abx + aby * aby;
+    let apx = (p.x - a.x) as i128;
+    let apy = (p.y - a.y) as i128;
+    if len2 == 0 {
+        return apx * apx + apy * apy > tol2; // degenerate edge → distance to `a`
+    }
+    let cross = abx * apy - aby * apx;
+    cross * cross > tol2 * len2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +325,67 @@ mod tests {
         assert_eq!(ps.region_count_above(100_000_000), 1);
         // A zero floor counts everything (== raw).
         assert_eq!(ps.region_count_above(0), 2);
+    }
+
+    #[test]
+    fn simplify_contour_reduces_a_tessellated_circle_within_tolerance() {
+        // A fixed 64-gon flash (radius 100µm) should collapse to far fewer points.
+        let r = 100_000.0_f64;
+        let circle: Vec<Pt> = (0..64)
+            .map(|k| {
+                let a = std::f64::consts::TAU * k as f64 / 64.0;
+                Pt::new((r * a.cos()).round() as i64, (r * a.sin()).round() as i64)
+            })
+            .collect();
+        let simp = simplify_contour(&circle, 2000.0); // 2µm tolerance
+        assert!(
+            simp.len() < circle.len() && simp.len() >= 6,
+            "64-gon should reduce but stay a circle: {} -> {}",
+            circle.len(),
+            simp.len()
+        );
+        // Area is preserved to within a few percent (no gross distortion).
+        let a0 = shoelace_2x_nm2(&circle).unsigned_abs();
+        let a1 = shoelace_2x_nm2(&simp).unsigned_abs();
+        let err = (a0 as f64 - a1 as f64).abs() / a0 as f64;
+        assert!(err < 0.05, "area drift {err} too large");
+    }
+
+    #[test]
+    fn simplify_contour_drops_collinear_keeps_corners() {
+        // A square with a collinear midpoint on each edge.
+        let sq = vec![
+            Pt::new(0, 0),
+            Pt::new(50, 0),
+            Pt::new(100, 0),
+            Pt::new(100, 50),
+            Pt::new(100, 100),
+            Pt::new(50, 100),
+            Pt::new(0, 100),
+            Pt::new(0, 50),
+        ];
+        let simp = simplify_contour(&sq, 10.0);
+        // The collinear midpoints drop; the four corners stay (one seam point may remain).
+        assert!(
+            (4..=5).contains(&simp.len()),
+            "collinear midpoints removed: {}",
+            simp.len()
+        );
+        assert!(simp.contains(&Pt::new(100, 100)) && simp.contains(&Pt::new(0, 0)));
+    }
+
+    #[test]
+    fn simplify_contour_leaves_tiny_contours_and_zero_tol_untouched() {
+        let tri = vec![Pt::new(0, 0), Pt::new(10, 0), Pt::new(5, 10)];
+        assert_eq!(simplify_contour(&tri, 100.0), tri);
+        let pent = vec![
+            Pt::new(0, 0),
+            Pt::new(40, 0),
+            Pt::new(60, 30),
+            Pt::new(20, 60),
+            Pt::new(-10, 30),
+        ];
+        assert_eq!(simplify_contour(&pent, 0.0), pent); // tol 0 = no simplification
     }
 
     #[test]
