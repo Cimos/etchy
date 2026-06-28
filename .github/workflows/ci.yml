@@ -83,3 +83,22 @@ jobs:
         run: |
           test -f crates/etchy-gui/dist/etchy-gui_bg.wasm
           test -f crates/etchy-gui/dist/etchy-gui.js
+
+  deny:
+    name: cargo-deny (licenses, advisories, bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Install from crates.io (no extra third-party action to audit). Slower than
+      # a prebuilt binary; swap for a pinned prebuilt (like trunk above) if it drags.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      # Enforces the permissive-only license policy + RUSTSEC advisories + bans
+      # (deny.toml). A real advisory or a non-allow-listed license fails the job.
+      - name: cargo deny check
+        run: cargo deny check advisories bans licenses

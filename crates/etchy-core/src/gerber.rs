@@ -28,8 +28,15 @@ use crate::geom;
 /// Parse + resolve one Gerber layer's bytes into its filled copper geometry.
 pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
     let normalized = normalize(bytes)?;
-    let doc = parse(BufReader::new(Cursor::new(normalized.as_bytes())))
-        .map_err(|(_, e)| EngineError::Parse(format!("{e:?}")))?;
+    // The third-party parser is the first code to touch attacker-controlled bytes.
+    // Contain a panic in it as a loud typed error instead of unwinding through the
+    // caller / aborting a batch (#85). Relies on panic=unwind (kept that way in the
+    // release profile precisely so this works — see #87/#100).
+    let doc = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parse(BufReader::new(Cursor::new(normalized.as_bytes())))
+            .map_err(|(_, e)| EngineError::Parse(format!("{e:?}")))
+    }))
+    .map_err(|_| EngineError::Parse("gerber parser panicked on this input".into()))??;
 
     let errs = doc.errors();
     if !errs.is_empty() {
@@ -749,6 +756,25 @@ mod tests {
         // dim() chokepoint that aperture- and macro-derived coordinates flow through.
         let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1000000000*%\nD10*\nX0Y0D03*\nM02*\n";
         assert!(resolve_layer(g.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn parser_never_panics_on_garbage() {
+        // The catch_unwind boundary (#85) must turn any parser panic into a typed
+        // error: resolve_layer always returns for ANY bytes, never unwinds into the
+        // caller. The assertion is simply that each call returns (the test would
+        // abort if a panic escaped). The fuzz target covers the broader space.
+        let inputs: &[&[u8]] = &[
+            b"",
+            b"\xff\xfe\x00\x01 not gerber at all",
+            b"%FSLAX46Y46*%",                        // truncated header
+            b"%FSLAX46Y46*%\n%MOMM*%\nG36*\nM02*\n", // region opened, never closed
+            b"%MOMM*%\nX0Y0D03*\n",                  // flash, no format/aperture
+            b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,*%\n", // malformed aperture
+        ];
+        for inp in inputs {
+            let _ = resolve_layer(inp); // Ok or Err — must not panic.
+        }
     }
 
     #[test]
