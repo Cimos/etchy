@@ -140,9 +140,19 @@ pub fn rotate(x: f64, y: f64, deg: f64) -> (f64, f64) {
 mod tests {
     use super::*;
     use crate::geo::PolygonSet;
+    use proptest::prelude::*;
 
     fn area(c: Contour) -> f64 {
         PolygonSet::new(vec![vec![c]]).area_nm2() as f64
+    }
+
+    /// All tessellated points lie on the defining circle, within ~2× the sagitta
+    /// tolerance (rounding to integer nm costs up to ~1 nm per coordinate).
+    fn on_radius(pts: &[Pt], cx: f64, cy: f64, r: f64) -> bool {
+        pts.iter().all(|p| {
+            let d = (((p.x as f64) - cx).powi(2) + ((p.y as f64) - cy).powi(2)).sqrt();
+            (d - r).abs() < 2.0 * SAG_TOL_NM
+        })
     }
 
     #[test]
@@ -188,5 +198,111 @@ mod tests {
             (a / ideal - 1.0).abs() < 0.01,
             "circle-arc area {a} vs {ideal}"
         );
+    }
+
+    // ---- #89: every builder emits CCW (positive signed area) ----
+    // The whole NonZero diff scheme rests on "dark copper is wound CCW", asserted
+    // nowhere before this. A future CW builder would silently reintroduce the #48
+    // notch on non-macro paths, so pin the invariant as a property across the
+    // builders' input space. `area` is the signed shoelace (CCW > 0).
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn ngon_is_ccw(cx in -1e8..1e8f64, cy in -1e8..1e8f64, r in 1e3..1e7f64) {
+            prop_assert!(area(ngon(cx, cy, r)) > 0.0);
+        }
+
+        #[test]
+        fn rect_is_ccw(
+            cx in -1e8..1e8f64, cy in -1e8..1e8f64, w in 1e3..1e7f64, h in 1e3..1e7f64,
+        ) {
+            prop_assert!(area(rect(cx, cy, w, h)) > 0.0);
+        }
+
+        #[test]
+        fn rect_rot_is_ccw(
+            cx in -1e8..1e8f64, cy in -1e8..1e8f64,
+            w in 1e3..1e7f64, h in 1e3..1e7f64, deg in 0.0..360.0f64,
+        ) {
+            prop_assert!(area(rect_rot(cx, cy, w, h, deg)) > 0.0);
+        }
+
+        #[test]
+        fn stadium_is_ccw(
+            ax in -1e7..1e7f64, ay in -1e7..1e7f64,
+            bx in -1e7..1e7f64, by in -1e7..1e7f64, r in 1e3..1e6f64,
+        ) {
+            prop_assert!(area(stadium(ax, ay, bx, by, r)) > 0.0);
+        }
+
+        #[test]
+        fn obround_is_ccw(
+            cx in -1e8..1e8f64, cy in -1e8..1e8f64, w in 1e3..1e7f64, h in 1e3..1e7f64,
+        ) {
+            prop_assert!(area(obround(cx, cy, w, h)) > 0.0);
+        }
+    }
+
+    // ---- #90: arc tessellation — multi-quadrant, on-radius, correct direction ----
+    #[test]
+    fn arc_quarter_half_threequarter_on_radius() {
+        let r = 1_000_000.0;
+        // 90° CCW: (r,0) -> (0,r).
+        let q = arc_points(r, 0.0, 0.0, r, 0.0, 0.0, true);
+        assert!(on_radius(&q, 0.0, 0.0, r), "90° off radius");
+        let last = *q.last().unwrap();
+        assert!(
+            (last.x as f64).abs() < 2.0 && (last.y as f64 - r).abs() < 2.0,
+            "90° endpoint {last:?} should be ~(0, r)"
+        );
+        // 180° CCW: (r,0) -> (-r,0).
+        let h = arc_points(r, 0.0, -r, 0.0, 0.0, 0.0, true);
+        assert!(on_radius(&h, 0.0, 0.0, r), "180° off radius");
+        // 270° CCW: (r,0) -> (0,-r) the long way; more points than 90°.
+        let t = arc_points(r, 0.0, 0.0, -r, 0.0, 0.0, true);
+        assert!(on_radius(&t, 0.0, 0.0, r), "270° off radius");
+        assert!(t.len() > q.len(), "270° should tessellate more than 90°");
+    }
+
+    #[test]
+    fn arc_direction_is_honoured() {
+        let r = 1_000_000.0;
+        // Same endpoints (r,0)->(0,r): CCW is the short 90°, CW the long 270°.
+        let ccw = arc_points(r, 0.0, 0.0, r, 0.0, 0.0, true);
+        let cw = arc_points(r, 0.0, 0.0, r, 0.0, 0.0, false);
+        assert!(
+            cw.len() > ccw.len(),
+            "CW (long way) should have more points"
+        );
+        assert!(on_radius(&ccw, 0.0, 0.0, r) && on_radius(&cw, 0.0, 0.0, r));
+        // CCW midpoint sits in the +x/+y quadrant; CW goes the long way through -y.
+        let cm = ccw[ccw.len() / 2];
+        assert!(cm.x > 0 && cm.y > 0, "CCW midpoint {cm:?} should be +x/+y");
+        let wm = cw[cw.len() / 2];
+        assert!(wm.y < 0, "CW midpoint {wm:?} should pass through -y");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Any arc (any centre, radius, endpoints on the circle, direction) keeps
+        /// every tessellated point on the defining circle.
+        #[test]
+        fn arc_points_lie_on_radius(
+            cx in -1e7..1e7f64, cy in -1e7..1e7f64,
+            r in 1e4..5e6f64,
+            a0 in 0.0..std::f64::consts::TAU,
+            a1 in 0.0..std::f64::consts::TAU,
+            ccw in any::<bool>(),
+        ) {
+            let (fx, fy) = (cx + r * a0.cos(), cy + r * a0.sin());
+            let (tx, ty) = (cx + r * a1.cos(), cy + r * a1.sin());
+            let pts = arc_points(fx, fy, tx, ty, cx, cy, ccw);
+            for p in &pts {
+                let d = (((p.x as f64) - cx).powi(2) + ((p.y as f64) - cy).powi(2)).sqrt();
+                prop_assert!((d - r).abs() < 2.0 * SAG_TOL_NM, "point {p:?} off radius {r}: d={d}");
+            }
+        }
     }
 }

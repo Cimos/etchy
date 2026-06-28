@@ -821,6 +821,60 @@ mod tests {
         assert!(ps.area_mm2() > 1.2, "area {} too small", ps.area_mm2());
     }
 
+    // ---- #90: aperture-macro primitive geometry (area/shape + rotation/offset) ----
+    // flash_macro handles Circle/CenterLine/VectorLine/Outline/Polygon with offset
+    // and rotation; only Outline had a test. These pin each primitive's geometry —
+    // all common on real fab packs and silent if the maths is wrong.
+
+    #[test]
+    fn macro_circle_primitive_area_is_offset_invariant() {
+        // Circle (code 1): dia 0.5 mm at macro-local offset (0.3, 0.3); area = π·0.25²
+        // wherever the local centre sits.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMCIR*\n1,1,0.5,0.3,0.3*%\n%ADD10CIR*%\nD10*\nX0Y0D03*\nM02*\n";
+        let a = area_mm2(g);
+        let ideal = std::f64::consts::PI * 0.25 * 0.25;
+        assert!(
+            (a / ideal - 1.0).abs() < 0.02,
+            "macro circle area {a} vs {ideal}"
+        );
+    }
+
+    #[test]
+    fn macro_centerline_rect_area_is_rotation_invariant() {
+        // CenterLine (code 21): 1.0×0.5 mm rect rotated 30°. Area = 0.5 mm² regardless.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMCL*\n21,1,1.0,0.5,0,0,30*%\n%ADD10CL*%\nD10*\nX0Y0D03*\nM02*\n";
+        let a = area_mm2(g);
+        assert!((a - 0.5).abs() < 0.01, "macro centerline area {a} vs 0.5");
+    }
+
+    #[test]
+    fn macro_vectorline_stroke_area() {
+        // VectorLine (code 20): width 0.2 mm from (0,0) to (1,0). Stadium stroke
+        // area = 0.2·1.0 + π·0.1².
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMVL*\n20,1,0.2,0,0,1.0,0,0*%\n%ADD10VL*%\nD10*\nX0Y0D03*\nM02*\n";
+        let a = area_mm2(g);
+        let ideal = 0.2 * 1.0 + std::f64::consts::PI * 0.1 * 0.1;
+        assert!(
+            (a / ideal - 1.0).abs() < 0.03,
+            "macro vectorline area {a} vs {ideal}"
+        );
+    }
+
+    #[test]
+    fn macro_polygon_hexagon_area() {
+        // Polygon (code 5): regular 6-gon, centre (0,0), diameter 1.0 mm
+        // (circumradius 0.5). Area = (3√3/2)·R². Exercises polygon_ngon.
+        let g =
+            "%FSLAX46Y46*%\n%MOMM*%\n%AMPG*\n5,1,6,0,0,1.0,0*%\n%ADD10PG*%\nD10*\nX0Y0D03*\nM02*\n";
+        let a = area_mm2(g);
+        let r = 0.5;
+        let ideal = 1.5 * 3.0_f64.sqrt() * r * r;
+        assert!(
+            (a / ideal - 1.0).abs() < 0.02,
+            "macro polygon area {a} vs {ideal}"
+        );
+    }
+
     #[test]
     fn region_fills_its_outline() {
         // A 2×2 mm square region → 4 mm².
