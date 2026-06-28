@@ -25,6 +25,16 @@ use crate::error::{EngineError, Result};
 use crate::geo::{quantize_mm, snap_nm, Contour, PolygonSet, Pt};
 use crate::geom;
 
+/// Per-layer contour ceiling. A tiny file with many large arcs or region loops
+/// can amplify into millions of contours and exhaust CPU/RAM before the boolean
+/// pass even runs (#83). We fail loud at this bound instead of grinding or
+/// OOM-ing. Set generously so legitimate dense/curvy boards never trip it;
+/// lowered under test so the guard can be exercised without huge allocations.
+#[cfg(not(test))]
+const MAX_CONTOURS_PER_LAYER: usize = 5_000_000;
+#[cfg(test)]
+const MAX_CONTOURS_PER_LAYER: usize = 5_000;
+
 /// Parse + resolve one Gerber layer's bytes into its filled copper geometry.
 pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
     let normalized = normalize(bytes)?;
@@ -263,6 +273,10 @@ struct Machine<'a> {
     in_region: bool,
     region_loops: Vec<Contour>,
     cur_loop: Contour,
+
+    /// Running count of contours pushed this layer, checked against
+    /// `MAX_CONTOURS_PER_LAYER` once per command (#83).
+    emitted: usize,
 }
 
 impl<'a> Machine<'a> {
@@ -285,6 +299,7 @@ impl<'a> Machine<'a> {
             in_region: false,
             region_loops: Vec::new(),
             cur_loop: Vec::new(),
+            emitted: 0,
         }
     }
 
@@ -308,6 +323,15 @@ impl<'a> Machine<'a> {
             },
             Command::FunctionCode(FunctionCode::MCode(_)) => {}
             Command::ExtendedCode(ec) => self.extended(ec)?,
+        }
+        // Bound per-layer object count: a tiny file with many arcs / region loops
+        // must fail loud, not amplify into a CPU/RAM blow-up (#83).
+        if self.emitted > MAX_CONTOURS_PER_LAYER {
+            return Err(EngineError::ObjectLimit {
+                what: "contours",
+                count: self.emitted,
+                limit: MAX_CONTOURS_PER_LAYER,
+            });
         }
         Ok(())
     }
@@ -686,6 +710,7 @@ impl<'a> Machine<'a> {
         if c.len() < 3 {
             return;
         }
+        self.emitted += 1; // checked against the per-layer ceiling in step() (#83)
         let is_dark = self.polarity_dark == exposure;
         // NOTE: contours arrive correctly wound — our geom builders emit CCW solids,
         // and region fills come CCW-outer/CW-holes from fill_even_odd. Do NOT
@@ -774,6 +799,26 @@ mod tests {
         ];
         for inp in inputs {
             let _ = resolve_layer(inp); // Ok or Err — must not panic.
+        }
+    }
+
+    #[test]
+    fn object_count_cap_fails_loud() {
+        // A tiny file can still emit a huge object count (here, many flashes). Past
+        // the per-layer ceiling the engine must fail loud, not grind or OOM (#83).
+        // The cap is lowered under cfg(test), so a few thousand flashes trip it.
+        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\n");
+        for i in 0..(MAX_CONTOURS_PER_LAYER + 1) {
+            g.push_str(&format!("X{}Y0D03*\n", i * 1000));
+        }
+        g.push_str("M02*\n");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::ObjectLimit { what, limit, count }) => {
+                assert_eq!(what, "contours");
+                assert_eq!(limit, MAX_CONTOURS_PER_LAYER);
+                assert!(count > limit, "count {count} should exceed limit {limit}");
+            }
+            other => panic!("expected ObjectLimit, got {other:?}"),
         }
     }
 

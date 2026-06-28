@@ -65,6 +65,17 @@ pub enum EngineError {
     /// etchy diffs same-board revisions only and will not auto-align.
     #[error("not the same board (etchy will not auto-align): {detail}")]
     BoardMismatch { detail: String },
+
+    /// A single layer emitted more objects than the engine will process. Guards
+    /// against a tiny file amplifying (many arcs / region loops / polarity spans)
+    /// into millions of contours — a CPU/RAM exhaustion DoS. Fail loud rather
+    /// than grind or OOM (#83).
+    #[error("layer object limit exceeded: {count} {what} (limit {limit})")]
+    ObjectLimit {
+        what: &'static str,
+        count: usize,
+        limit: usize,
+    },
 }
 
 /// Convenience result alias for the engine.
