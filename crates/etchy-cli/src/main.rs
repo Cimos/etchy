@@ -109,6 +109,11 @@ fn run(cli: &Cli) -> Result<DiffReport> {
     Ok(report)
 }
 
+/// Reject any single layer file larger than this before reading it into RAM. The
+/// loaders copy the bytes a few times (read → utf8 → normalized), so an oversized
+/// or junk file is a quick OOM (#82). 100 MiB is far above any real fab layer.
+const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Walk a directory (one level), read each Gerber file, classify it, and
 /// polygonize it into a [`Layer`]. I/O + path/naming policy live here, not in core.
 fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
@@ -125,6 +130,16 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
     let mut layers = Vec::new();
     let mut fmt = None;
     for path in entries {
+        let len = path
+            .metadata()
+            .with_context(|| format!("reading metadata for {}", path.display()))?
+            .len();
+        if len > MAX_LAYER_FILE_BYTES {
+            anyhow::bail!(
+                "{} is {len} bytes, over the {MAX_LAYER_FILE_BYTES}-byte per-file limit",
+                path.display()
+            );
+        }
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         if !etchy_core::looks_like_gerber(&bytes) {
             continue; // not a Gerber layer (e.g. drill, job file) — Excellon is a later increment
