@@ -162,6 +162,24 @@ impl PolygonSet {
         self.area_nm2() as f64 / (NM_PER_MM as f64 * NM_PER_MM as f64)
     }
 
+    /// Count filled regions whose net area is at least `min_area_nm2` — the
+    /// tessellation-ROBUST region count. [`region_count`](Self::region_count) is the
+    /// literal i_overlay shape count, which includes sub-µm sliver regions produced
+    /// along near-coincident edges; their *number* swings with tessellation granularity
+    /// (a fixed 64-gon over-produces them, so coarser geometry reports far fewer). A
+    /// small area floor excludes that noise, giving a stable, meaningful count.
+    /// Change-detection (whether *anything* changed) must use raw presence instead, so
+    /// a sub-floor sliver is never a silent miss.
+    pub fn region_count_above(&self, min_area_nm2: i128) -> u32 {
+        self.shapes
+            .iter()
+            .filter(|s| {
+                let doubled: i128 = s.iter().map(|c| shoelace_2x_nm2(c)).sum();
+                (doubled / 2).abs() >= min_area_nm2
+            })
+            .count() as u32
+    }
+
     /// Triangulate every shape (outer ring with **holes subtracted**) into a flat
     /// list of triangles (nm), for filled rendering. Concave-correct — unlike
     /// egui's vertex-0 fan, which only tiles convex polygons and throws spurious
@@ -235,6 +253,29 @@ pub(crate) fn wind(mut c: Contour, ccw: bool) -> Contour {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_count_above_drops_sub_floor_slivers() {
+        // One real 1mm×1mm region + one tiny 10nm×10nm sliver.
+        let big = vec![vec![
+            Pt::new(0, 0),
+            Pt::new(1_000_000, 0),
+            Pt::new(1_000_000, 1_000_000),
+            Pt::new(0, 1_000_000),
+        ]];
+        let sliver = vec![vec![
+            Pt::new(0, 0),
+            Pt::new(10, 0),
+            Pt::new(10, 10),
+            Pt::new(0, 10),
+        ]];
+        let ps = PolygonSet::new(vec![big, sliver]);
+        assert_eq!(ps.region_count(), 2, "raw counts both");
+        // Floor at 1e-4 mm² (1e8 nm²): the big region survives, the sliver drops.
+        assert_eq!(ps.region_count_above(100_000_000), 1);
+        // A zero floor counts everything (== raw).
+        assert_eq!(ps.region_count_above(0), 2);
+    }
 
     #[test]
     fn quantize_guards_bad_input() {
