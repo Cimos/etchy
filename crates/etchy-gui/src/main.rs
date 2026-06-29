@@ -6,6 +6,8 @@
 //! the pure `etchy-core` engine via `compare_detailed`; this crate only does I/O
 //! and rendering. M1 scope: flash-only geometry (the engine fails loud otherwise).
 
+#[cfg(feature = "gpu-transform")]
+mod gpu;
 #[cfg(not(target_arch = "wasm32"))]
 mod loader;
 mod lod;
@@ -651,6 +653,18 @@ struct ViewApp {
     /// Transient: the swipe divider is being dragged (#61). Not persisted — it only
     /// holds the grab across frames so leaving the handle mid-drag keeps it.
     swipe_drag: bool,
+
+    /// GPU base-transform (#106): the glow resources, present only when the
+    /// `gpu-transform` feature is built and a GL context is available.
+    #[cfg(feature = "gpu-transform")]
+    gpu: Option<gpu::GpuBase>,
+    /// Runtime toggle for the GPU base path; the CPU path is always the fallback.
+    #[cfg(feature = "gpu-transform")]
+    use_gpu: bool,
+    /// The geom-cache key whose base mesh is currently uploaded, so we re-upload
+    /// only when the geometry changes.
+    #[cfg(feature = "gpu-transform")]
+    gpu_uploaded_key: Option<GeomKey>,
 }
 
 impl ViewApp {
@@ -699,6 +713,15 @@ impl ViewApp {
             input_preset: InputPreset::default(),
             swipe_frac: 0.5,
             swipe_drag: false,
+            // The feature is opt-in (off in normal builds), so defaulting the
+            // runtime toggle on inside a feature build is safe and lets the GPU
+            // path be exercised; the checkbox still turns it off.
+            #[cfg(feature = "gpu-transform")]
+            gpu: None,
+            #[cfg(feature = "gpu-transform")]
+            use_gpu: true,
+            #[cfg(feature = "gpu-transform")]
+            gpu_uploaded_key: None,
         }
     }
 
@@ -1199,6 +1222,15 @@ impl ViewApp {
                 app.apply_settings(settings);
             }
         }
+        #[cfg(feature = "gpu-transform")]
+        {
+            // Build the GL program once from eframe's glow context; None (e.g. no
+            // GL) just leaves the CPU path in charge.
+            app.gpu = cc
+                .gl
+                .as_ref()
+                .and_then(|gl| gpu::GpuBase::new(std::sync::Arc::clone(gl)));
+        }
         app
     }
 
@@ -1431,6 +1463,13 @@ impl eframe::App for ViewApp {
                 ui.selectable_value(&mut self.base_level, BaseLevel::Off, "off");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Faint, "faint");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Strong, "strong");
+                #[cfg(feature = "gpu-transform")]
+                if self.gpu.is_some() {
+                    ui.checkbox(&mut self.use_gpu, "GPU").on_hover_text(
+                        "Transform the base layer on the GPU (#106, experimental). \
+                         Off falls back to the CPU path.",
+                    );
+                }
                 if ui.selectable_label(self.show_colors, "Colors").clicked() {
                     self.show_colors = !self.show_colors;
                 }
@@ -2064,6 +2103,44 @@ impl ViewApp {
         if geom_cache_dirty(self.cache.as_ref().map(|c| &c.key), &key) {
             self.cache = Some(build_cache(&self.diff, &key, self.outline));
         }
+        // GPU base path (#106): upload the base mesh once per geometry change. Only
+        // for the single-layer overlay/before/after case (one base colour, no per-
+        // layer dim); everything else stays on the CPU path. Done before `base_of`
+        // borrows self, and the cache borrow is dropped before we set the key.
+        #[cfg(feature = "gpu-transform")]
+        {
+            let pending = {
+                let cache = self.cache.as_ref().expect("cache built above");
+                let base_layers: std::collections::BTreeSet<usize> = cache
+                    .items
+                    .iter()
+                    .filter(|i| i.role == Role::Base)
+                    .map(|i| i.layer_index)
+                    .collect();
+                let eligible = self.use_gpu
+                    && self.gpu.is_some()
+                    && self.base_level != BaseLevel::Off
+                    && matches!(self.mode, Mode::Overlay | Mode::Before | Mode::After)
+                    && base_layers.len() <= 1;
+                if eligible && self.gpu_uploaded_key.as_ref() != Some(&cache.key) {
+                    let tris: Vec<[Pt; 3]> = cache
+                        .items
+                        .iter()
+                        .filter(|i| i.role == Role::Base)
+                        .flat_map(|i| i.tris.iter().copied())
+                        .collect();
+                    Some((tris, cache.key.clone()))
+                } else {
+                    None
+                }
+            };
+            if let Some((tris, key)) = pending {
+                if let Some(g) = &self.gpu {
+                    g.upload(&tris);
+                }
+                self.gpu_uploaded_key = Some(key);
+            }
+        }
         let min_area_nm2 =
             self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
         // Per-layer base/context colour resolver (#21) — used for both the stacked
@@ -2158,6 +2235,29 @@ impl ViewApp {
             self.last_hidden = 0;
             n = ln + rn;
         } else {
+            // GPU base path active this frame iff the base mesh for this exact cache
+            // is uploaded (#106). The CPU path then skips base and draws diff/outline.
+            #[cfg(feature = "gpu-transform")]
+            let gpu_base_active = self.use_gpu
+                && self.gpu.is_some()
+                && self.base_level != BaseLevel::Off
+                && matches!(self.mode, Mode::Overlay | Mode::Before | Mode::After)
+                && self.gpu_uploaded_key.as_ref() == Some(&cache.key);
+            #[cfg(not(feature = "gpu-transform"))]
+            let gpu_base_active = false;
+
+            #[cfg(feature = "gpu-transform")]
+            if gpu_base_active {
+                if let Some(g) = &self.gpu {
+                    let col = base_display_color(
+                        base_of(self.selected),
+                        self.canvas_color(),
+                        self.base_level,
+                    );
+                    painter.add(g.callback(rect, self.cam.scale, self.cam.center, col));
+                }
+            }
+
             let (shapes, hidden) = transform_cache(
                 cache,
                 &self.cam,
@@ -2169,6 +2269,7 @@ impl ViewApp {
                 self.col_added,
                 self.col_removed,
                 min_area_nm2,
+                gpu_base_active,
             );
             self.last_hidden = hidden;
             n = shapes.len();
@@ -2522,6 +2623,9 @@ fn transform_cache(
     col_added: Color32,
     col_removed: Color32,
     min_area_nm2: f64,
+    // When true, Role::Base items are skipped here because the GPU path is drawing
+    // them this frame (#106). Always false without the `gpu-transform` feature.
+    skip_base: bool,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
     // instead of one Mesh+Shape per region — the FMU top-copper layer was ~5.5k
@@ -2541,6 +2645,9 @@ fn transform_cache(
         // (Role::Outline) is deliberately never culled, and diff items keep their own
         // marker-dot LOD below.
         if item.role == Role::Base {
+            if skip_base {
+                continue; // base drawn on the GPU this frame (#106)
+            }
             let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
             if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
                 continue;
