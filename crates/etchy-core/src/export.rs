@@ -10,7 +10,7 @@
 //! up as a board does (SVG Y grows downward; board Y grows upward).
 
 use crate::geo::{PolygonSet, NM_PER_MM};
-use crate::view::LayerView;
+use crate::view::{BoardDiff, LayerView};
 
 /// Base (unchanged board) fill — faint grey so the diff colours read on top.
 const BASE_FILL: &str = "#cfcfcf";
@@ -124,6 +124,25 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Per-layer copper-area report as CSV (#60), for downstream use (e.g. a thermal
+/// estimate). `old_copper_mm2`/`new_copper_mm2` are the **unioned** total copper on
+/// each side (overlaps counted once — see [`PolygonSet::copper_area_mm2`]);
+/// `added`/`removed` are the diff magnitudes (already clean from the boolean engine).
+pub fn board_areas_csv(diff: &BoardDiff) -> String {
+    let mut s = String::from("layer,old_copper_mm2,new_copper_mm2,added_mm2,removed_mm2\n");
+    for l in &diff.layers {
+        s.push_str(&format!(
+            "{},{:.5},{:.5},{:.5},{:.5}\n",
+            l.name(),
+            l.old.copper_area_mm2(),
+            l.new.copper_area_mm2(),
+            l.added.area_mm2(),
+            l.removed.area_mm2(),
+        ));
+    }
+    s
 }
 
 #[cfg(test)]
