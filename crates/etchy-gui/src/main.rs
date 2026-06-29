@@ -6,6 +6,7 @@
 //! the pure `etchy-core` engine via `compare_detailed`; this crate only does I/O
 //! and rendering. M1 scope: flash-only geometry (the engine fails loud otherwise).
 
+mod exportio;
 #[cfg(feature = "gpu-transform")]
 mod gpu;
 mod loader;
@@ -13,7 +14,7 @@ mod lod;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
-use etchy_core::{BoardDiff, LayerView, PolygonSet, Pt};
+use etchy_core::{BoardDiff, LayerStatus, LayerView, PolygonSet, Pt};
 
 // ===========================================================================
 // Native entry (desktop) — diff two Gerber directories given on the CLI.
@@ -766,6 +767,9 @@ struct ViewApp {
     /// frame, which is what makes the GPU path O(1) in triangle count.
     #[cfg(feature = "gpu-transform")]
     gpu_hash: Option<u64>,
+    /// Transient status line from the last export (#60), shown by the Export
+    /// control. Not persisted.
+    export_msg: Option<String>,
 }
 
 impl ViewApp {
@@ -838,7 +842,45 @@ impl ViewApp {
             use_gpu: true,
             #[cfg(feature = "gpu-transform")]
             gpu_hash: None,
+            export_msg: None,
         }
+    }
+
+    /// Build the export file set (#60): per-layer SVGs (current layer, or all
+    /// changed layers) plus the board-wide copper-area CSV.
+    fn build_export(&self, all_layers: bool) -> Vec<exportio::ExportFile> {
+        let mut files = Vec::new();
+        let chosen: Vec<&LayerView> = if all_layers {
+            self.diff
+                .layers
+                .iter()
+                .filter(|l| l.status != LayerStatus::Unchanged)
+                .collect()
+        } else {
+            self.diff.layers.get(self.selected).into_iter().collect()
+        };
+        for (i, l) in chosen.iter().enumerate() {
+            // Prefix with an index so two layers sharing a display name (e.g. two
+            // "other" layers) don't clobber each other's file.
+            files.push(exportio::ExportFile {
+                name: format!("{i:02}-{}.svg", l.name()),
+                content: etchy_core::layer_svg(l),
+            });
+        }
+        files.push(exportio::ExportFile {
+            name: "areas.csv".into(),
+            content: etchy_core::board_areas_csv(&self.diff),
+        });
+        files
+    }
+
+    /// Run an export and stash the result message for the toast.
+    fn do_export(&mut self, all_layers: bool) {
+        let files = self.build_export(all_layers);
+        self.export_msg = Some(match exportio::save(&files) {
+            Ok(msg) => msg,
+            Err(e) => format!("export failed: {e}"),
+        });
     }
 
     /// Trust-warning affordance (G1b): a fixed-height copper chip. While expanded
@@ -2127,6 +2169,31 @@ impl eframe::App for ViewApp {
                 }
                 if ui.button("Fit").clicked() {
                     self.cam.fitted = false;
+                }
+                // Export (#60): per-layer SVG + a copper-area CSV. Native writes
+                // ./etchy-export/; web downloads. PNG deferred. Set flags in the
+                // menu closure, act after, to avoid borrowing self inside it.
+                let (mut exp_current, mut exp_all) = (false, false);
+                ui.menu_button("Export", |ui| {
+                    if ui.button("Current layer").clicked() {
+                        exp_current = true;
+                        ui.close();
+                    }
+                    if ui.button("All changed layers").clicked() {
+                        exp_all = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label("SVG per layer + areas.csv (copper mm²). PNG: later.");
+                });
+                if exp_current {
+                    self.do_export(false);
+                }
+                if exp_all {
+                    self.do_export(true);
+                }
+                if let Some(msg) = &self.export_msg {
+                    ui.label(egui::RichText::new(msg).weak().small());
                 }
                 if ui
                     .selectable_label(self.measure_mode, "Measure")
