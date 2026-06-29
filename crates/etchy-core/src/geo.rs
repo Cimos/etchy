@@ -162,6 +162,21 @@ impl PolygonSet {
         self.area_nm2() as f64 / (NM_PER_MM as f64 * NM_PER_MM as f64)
     }
 
+    /// True copper area in nm², **unioning overlaps first** (#60). `area_nm2`
+    /// double-counts where raw polygonized flashes overlap (coincident pads,
+    /// a track meeting a pad); this self-unions the set under NonZero fill so
+    /// each region is counted once. Use this for "how much copper is on this
+    /// layer" (e.g. a thermal-area estimate), not the raw `area_nm2`.
+    pub fn copper_area_nm2(&self) -> i128 {
+        let flat: Vec<Contour> = self.shapes.iter().flat_map(|s| s.iter().cloned()).collect();
+        crate::boolean::union(&flat, &[]).area_nm2()
+    }
+
+    /// True copper area in mm² (unioned — see [`Self::copper_area_nm2`]).
+    pub fn copper_area_mm2(&self) -> f64 {
+        self.copper_area_nm2() as f64 / (NM_PER_MM as f64 * NM_PER_MM as f64)
+    }
+
     /// Count filled regions whose net area is at least `min_area_nm2` — the
     /// tessellation-ROBUST region count. [`region_count`](Self::region_count) is the
     /// literal i_overlay shape count, which includes sub-µm sliver regions produced
@@ -303,6 +318,27 @@ fn perp_dist2_exceeds(p: Pt, a: Pt, b: Pt, tol2: i128) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copper_area_unions_overlaps() {
+        // Two 10x10 squares overlapping by half. Raw area double-counts the overlap
+        // (100 + 100); copper_area unions them first → one 15x10 region = 150 (#60).
+        let a = vec![vec![
+            Pt::new(0, 0),
+            Pt::new(10, 0),
+            Pt::new(10, 10),
+            Pt::new(0, 10),
+        ]];
+        let b = vec![vec![
+            Pt::new(5, 0),
+            Pt::new(15, 0),
+            Pt::new(15, 10),
+            Pt::new(5, 10),
+        ]];
+        let ps = PolygonSet::new(vec![a, b]);
+        assert_eq!(ps.area_nm2(), 200, "raw double-counts the overlap");
+        assert_eq!(ps.copper_area_nm2(), 150, "unioned copper area");
+    }
 
     #[test]
     fn region_count_above_drops_sub_floor_slivers() {
