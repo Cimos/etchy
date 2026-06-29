@@ -2103,6 +2103,15 @@ impl ViewApp {
             // Base boards honour the base-level (faint/strong dimming) — #44; the
             // board outline (Side::Full) is drawn into BOTH halves for orientation — #45.
             // Split shows the active layer only, so its base colour is per-item.
+            //
+            // #91: Split/Swipe deliberately show the RAW old vs new boards side by
+            // side — not the diff. So, unlike Overlay, they apply neither the
+            // added/removed colouring, the min-area noise filter, nor the per-feature
+            // LOD fade that `transform_cache` does: this view is "look at the two
+            // boards", and hiding small real features or sub-pixel detail would defeat
+            // that. The measured diff and its noise/LOD treatment live in the
+            // Overlay/Before/After modes. The divergence is intentional, not a missed
+            // cull — same diff, different (deliberate) view.
             for item in &cache.items {
                 let base_col = base_display_color(
                     base_of(item.layer_index),
