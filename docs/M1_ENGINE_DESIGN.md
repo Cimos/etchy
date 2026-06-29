@@ -82,9 +82,12 @@ metadata-only parse issues land here in a later increment — empty this slice).
 
 Compare each board's **whole-board union bbox** (not per-layer — F_Cu's added
 block legitimately grows its own bbox) with a **generous** tolerance
-(`max(1 mm, ~2% of span)`). The synthetic revs share identical union extents, so
-it passes; grossly different boards fail loud ("not the same board; etchy will not
-auto-align"). A coarse plausibility check, not registration.
+(`max(2 mm, 10% of span)`, matching `model.rs`). The synthetic revs share identical
+union extents, so it passes; grossly different boards fail loud ("not the same
+board; etchy will not auto-align"). A coarse plausibility check, not registration:
+it catches grossly mis-sized boards (wrong files), but extent alone cannot tell two
+*same-size* different boards apart — tightening the percentage wouldn't fix that and
+would only false-positive on legit revisions, so the bound stays loose (#92).
 
 ## Test retargeting
 

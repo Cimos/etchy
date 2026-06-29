@@ -213,9 +213,14 @@ pub fn same_board_guard(old: &Board, new: &Board) -> Result<()> {
 
     let span = |bb: [i64; 4]| (bb[2] - bb[0]).max(bb[3] - bb[1]).max(0);
     let max_span = span(ob).max(span(nb));
-    // Generous on purpose: this catches *grossly* different boards (wrong files),
-    // not legitimate revision changes (a moved edge, an added tab/fiducial). 2 mm
-    // or 10% of the larger span, whichever is bigger. `--force` bypasses it.
+    // Generous on purpose: 2 mm, or 10% of the larger span, whichever is bigger.
+    // This is a coarse size-sanity gate that catches *grossly* different boards
+    // (wrong files), not legitimate revision changes (a moved edge, an added
+    // tab/fiducial). A tighter bound (e.g. the 2% an earlier spec draft suggested)
+    // wouldn't catch the real weak case — two *same-size* but different boards pass
+    // on extent alone regardless of the percentage — and would only add false
+    // positives on legit revisions. So the loose bound is the right trade for a
+    // plausibility check; etchy diffs same-board revisions by contract (#92).
     let tol = (2 * NM_PER_MM).max((max_span as f64 * 0.10) as i64);
 
     for i in 0..4 {
