@@ -6,6 +6,8 @@
 //! the pure `etchy-core` engine via `compare_detailed`; this crate only does I/O
 //! and rendering. M1 scope: flash-only geometry (the engine fails loud otherwise).
 
+#[cfg(feature = "gpu-transform")]
+mod gpu;
 #[cfg(not(target_arch = "wasm32"))]
 mod loader;
 mod lod;
@@ -651,6 +653,19 @@ struct ViewApp {
     /// Transient: the swipe divider is being dragged (#61). Not persisted — it only
     /// holds the grab across frames so leaving the handle mid-drag keeps it.
     swipe_drag: bool,
+
+    /// GPU base-transform (#106): the glow resources, present only when the
+    /// `gpu-transform` feature is built and a GL context is available.
+    #[cfg(feature = "gpu-transform")]
+    gpu: Option<gpu::GpuMesh>,
+    /// Runtime toggle for the GPU path; the CPU path is always the fallback.
+    #[cfg(feature = "gpu-transform")]
+    use_gpu: bool,
+    /// Hash of the inputs that determine the uploaded GPU mesh (geometry, visible
+    /// set, selection, colours). We re-upload only when it changes — never per pan
+    /// frame, which is what makes the GPU path O(1) in triangle count.
+    #[cfg(feature = "gpu-transform")]
+    gpu_hash: Option<u64>,
 }
 
 impl ViewApp {
@@ -699,6 +714,15 @@ impl ViewApp {
             input_preset: InputPreset::default(),
             swipe_frac: 0.5,
             swipe_drag: false,
+            // The feature is opt-in (off in normal builds), so defaulting the
+            // runtime toggle on inside a feature build is safe and lets the GPU
+            // path be exercised; the checkbox still turns it off.
+            #[cfg(feature = "gpu-transform")]
+            gpu: None,
+            #[cfg(feature = "gpu-transform")]
+            use_gpu: true,
+            #[cfg(feature = "gpu-transform")]
+            gpu_hash: None,
         }
     }
 
@@ -1199,7 +1223,87 @@ impl ViewApp {
                 app.apply_settings(settings);
             }
         }
+        #[cfg(feature = "gpu-transform")]
+        {
+            // Build the GL program once from eframe's glow context; None (e.g. no
+            // GL) just leaves the CPU path in charge.
+            app.gpu = cc
+                .gl
+                .as_ref()
+                .and_then(|gl| gpu::GpuMesh::new(std::sync::Arc::clone(gl)));
+        }
         app
+    }
+
+    /// Build the colour'd triangle list for the GPU path (#80): every visible item
+    /// (base + diff + outline) with its colour baked per-vertex, using the same
+    /// colour logic as `transform_cache` minus the per-frame LOD/marker (the GPU
+    /// path draws true-scale). Colours are premultiplied (`Color32::to_array`) to
+    /// match egui's blend.
+    #[cfg(feature = "gpu-transform")]
+    fn build_gpu_tris(&self, cache: &TessCache) -> Vec<gpu::ColorTri> {
+        let canvas = self.canvas_color();
+        let mut out = Vec::new();
+        for item in &cache.items {
+            let dim = dim_factor(item.layer_index, self.selected);
+            let mut color = match item.role {
+                Role::Base => {
+                    let base = if item.layer_index == NO_LAYER {
+                        C_BASE
+                    } else {
+                        resolve_base_color(
+                            item.layer_index,
+                            self.diff.layers[item.layer_index].kind,
+                            &self.base_overrides,
+                            self.theme,
+                        )
+                    };
+                    base_display_color(base, canvas, self.base_level)
+                }
+                Role::Outline => C_OUTLINE_FAINT,
+                Role::Added => self.col_added,
+                Role::Removed => self.col_removed,
+            };
+            if dim < 1.0 {
+                color = with_alpha(color, (color.a() as f32 / 255.0) * dim);
+            }
+            let [r, g, b, a] = color.to_array();
+            let inv = 1.0 / 255.0;
+            let c = [
+                r as f32 * inv,
+                g as f32 * inv,
+                b as f32 * inv,
+                a as f32 * inv,
+            ];
+            for &tri in &item.tris {
+                out.push((tri, c));
+            }
+        }
+        out
+    }
+
+    /// Hash of everything that affects the uploaded GPU mesh — geometry/visibility
+    /// (the cache key), selection, base level, theme, and colours — so we re-upload
+    /// only on a real change, never per pan frame.
+    #[cfg(feature = "gpu-transform")]
+    fn gpu_input_hash(&self, cache: &TessCache) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        cache.key.visible.hash(&mut h);
+        (cache.key.mode as u8).hash(&mut h);
+        cache.key.base_on.hash(&mut h);
+        cache.key.outline_effective.hash(&mut h);
+        self.selected.hash(&mut h);
+        (self.base_level as u8).hash(&mut h);
+        (self.theme as u8).hash(&mut h);
+        self.canvas_color().to_array().hash(&mut h);
+        self.col_added.to_array().hash(&mut h);
+        self.col_removed.to_array().hash(&mut h);
+        for (i, c) in &self.base_overrides {
+            i.hash(&mut h);
+            c.to_array().hash(&mut h);
+        }
+        h.finish()
     }
 
     /// Snapshot the user-tunable state for persistence (#52).
@@ -1431,6 +1535,13 @@ impl eframe::App for ViewApp {
                 ui.selectable_value(&mut self.base_level, BaseLevel::Off, "off");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Faint, "faint");
                 ui.selectable_value(&mut self.base_level, BaseLevel::Strong, "strong");
+                #[cfg(feature = "gpu-transform")]
+                if self.gpu.is_some() {
+                    ui.checkbox(&mut self.use_gpu, "GPU").on_hover_text(
+                        "Transform the base layer on the GPU (#106, experimental). \
+                         Off falls back to the CPU path.",
+                    );
+                }
                 if ui.selectable_label(self.show_colors, "Colors").clicked() {
                     self.show_colors = !self.show_colors;
                 }
@@ -2064,6 +2175,32 @@ impl ViewApp {
         if geom_cache_dirty(self.cache.as_ref().map(|c| &c.key), &key) {
             self.cache = Some(build_cache(&self.diff, &key, self.outline));
         }
+        // GPU path (#80/#107): upload ALL visible geometry (base + diff + outline)
+        // once, with per-vertex colour, whenever the inputs change — then pan/zoom
+        // only updates a uniform, so frame time is O(1) in triangle count (the HDI
+        // fix). Overlay/Before/After only; Split/Swipe keep the CPU path. The cache
+        // borrow is dropped before we set the hash.
+        #[cfg(feature = "gpu-transform")]
+        {
+            let pending = {
+                let cache = self.cache.as_ref().expect("cache built above");
+                let eligible = self.use_gpu
+                    && self.gpu.is_some()
+                    && matches!(self.mode, Mode::Overlay | Mode::Before | Mode::After);
+                let hash = self.gpu_input_hash(cache);
+                if eligible && self.gpu_hash != Some(hash) {
+                    Some((self.build_gpu_tris(cache), hash))
+                } else {
+                    None
+                }
+            };
+            if let Some((tris, hash)) = pending {
+                if let Some(g) = &self.gpu {
+                    g.upload(&tris);
+                }
+                self.gpu_hash = Some(hash);
+            }
+        }
         let min_area_nm2 =
             self.min_area_mm2 * etchy_core::NM_PER_MM as f64 * etchy_core::NM_PER_MM as f64;
         // Per-layer base/context colour resolver (#21) — used for both the stacked
@@ -2158,21 +2295,47 @@ impl ViewApp {
             self.last_hidden = 0;
             n = ln + rn;
         } else {
-            let (shapes, hidden) = transform_cache(
-                cache,
-                &self.cam,
-                rect,
-                self.base_level,
-                self.selected,
-                base_of,
-                self.canvas_color(),
-                self.col_added,
-                self.col_removed,
-                min_area_nm2,
-            );
-            self.last_hidden = hidden;
-            n = shapes.len();
-            painter.extend(shapes);
+            // GPU path active this frame iff a mesh is uploaded for the current
+            // inputs (#80). When active, the GPU draws everything and the CPU path
+            // is skipped entirely. No per-feature LOD/markers on the GPU path — it
+            // draws true-scale; that's the dense/HDI trade for O(1) frames.
+            #[cfg(feature = "gpu-transform")]
+            let gpu_active = self.use_gpu
+                && self.gpu.is_some()
+                && self.gpu_hash.is_some()
+                && matches!(self.mode, Mode::Overlay | Mode::Before | Mode::After);
+            #[cfg(not(feature = "gpu-transform"))]
+            let gpu_active = false;
+
+            #[cfg(feature = "gpu-transform")]
+            if gpu_active {
+                if let Some(g) = &self.gpu {
+                    painter.add(g.callback(rect, self.cam.scale, self.cam.center));
+                }
+            }
+
+            if gpu_active {
+                // GPU drew it; the CPU build is skipped (the O(1) win).
+                self.last_hidden = 0;
+                n = 1;
+            } else {
+                let (shapes, hidden) = transform_cache(
+                    cache,
+                    &self.cam,
+                    rect,
+                    self.base_level,
+                    self.selected,
+                    base_of,
+                    self.canvas_color(),
+                    self.col_added,
+                    self.col_removed,
+                    min_area_nm2,
+                    false,
+                );
+                self.last_hidden = hidden;
+                n = shapes.len();
+                painter.extend(shapes);
+            }
         }
 
         // Empty-state hint.
@@ -2522,6 +2685,9 @@ fn transform_cache(
     col_added: Color32,
     col_removed: Color32,
     min_area_nm2: f64,
+    // When true, Role::Base items are skipped here because the GPU path is drawing
+    // them this frame (#106). Always false without the `gpu-transform` feature.
+    skip_base: bool,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
     // instead of one Mesh+Shape per region — the FMU top-copper layer was ~5.5k
@@ -2548,6 +2714,9 @@ fn transform_cache(
         // (Role::Outline) is deliberately never culled, and diff items keep their own
         // marker-dot LOD below.
         if item.role == Role::Base {
+            if skip_base {
+                continue; // base drawn on the GPU this frame (#106)
+            }
             let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
             if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
                 continue;
