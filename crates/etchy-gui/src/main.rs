@@ -2529,6 +2529,13 @@ fn transform_cache(
     // before their vertices are built (cheaper when zoomed in). Items are pushed
     // base → outline → diff, so draw order within the single mesh stays correct.
     let mut mesh = egui::epaint::Mesh::default();
+    // Pre-reserve the vertex/index buffers (#80). Without this they double-and-copy
+    // as they grow; on a dense board (e.g. an 8-layer pack with all layers on) the
+    // per-frame mesh rebuild hits a realloc cliff — a measured 500k-triangle frame
+    // dropped from ~27 ms to ~4.6 ms just from reserving. (3 verts + 3 indices/tri.)
+    let cap: usize = cache.items.iter().map(|it| it.tris.len() * 3).sum();
+    mesh.vertices.reserve(cap);
+    mesh.indices.reserve(cap);
     let mut hidden = 0usize;
     for item in &cache.items {
         if !bbox_visible(item.bbox, cam, rect) {
@@ -2917,6 +2924,90 @@ mod tests {
         Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    // Manual perf bench for the per-frame mesh build (#80), worst case = everything
+    // on-screen, nothing culled. Ignored in CI (timing is machine-dependent).
+    // Run: cargo test --release -p etchy-gui bench_transform_cache -- --ignored --nocapture
+    fn dense_cache(total_tris: usize) -> super::TessCache {
+        let per_item = 20usize;
+        let n_items = (total_tris / per_item).max(1);
+        let board = 50_000_000i64; // 50 mm
+        let cols = (n_items as f64).sqrt().ceil() as i64;
+        let cell = (board / cols).max(1);
+        let mut items = Vec::with_capacity(n_items);
+        for i in 0..n_items {
+            let cx = (i as i64 % cols) * cell;
+            let cy = (i as i64 / cols) * cell;
+            let tris: Vec<[super::Pt; 3]> = (0..per_item)
+                .map(|k| {
+                    let o = k as i64 * 800;
+                    [
+                        super::Pt::new(cx + o, cy),
+                        super::Pt::new(cx + o + 4000, cy),
+                        super::Pt::new(cx + o, cy + 4000),
+                    ]
+                })
+                .collect();
+            let role = match i % 3 {
+                0 => super::Role::Base,
+                1 => super::Role::Added,
+                _ => super::Role::Removed,
+            };
+            let s = 1_000_000i64; // 1 mm feature → passes LOD (not culled)
+            items.push(super::CachedItem {
+                role,
+                side: super::Side::Full,
+                layer_index: 0,
+                tris,
+                bbox: [cx, cy, cx + s, cy + s],
+                extent_nm: s,
+                area_nm2: (s as f64) * (s as f64),
+            });
+        }
+        super::TessCache {
+            key: super::GeomKey {
+                visible: vec![0],
+                mode: Mode::Overlay,
+                base_on: true,
+                outline_effective: false,
+            },
+            items,
+        }
+    }
+
+    #[test]
+    #[ignore = "manual perf bench (#80); run with --ignored --nocapture"]
+    fn bench_transform_cache_scaling() {
+        use std::time::Instant;
+        let rect = egui::Rect::from_min_size(egui::pos2(260.0, 130.0), egui::vec2(1140.0, 760.0));
+        for &target in &[50_000usize, 150_000, 300_000, 500_000] {
+            let cache = dense_cache(target);
+            let real: usize = cache.items.iter().map(|it| it.tris.len()).sum();
+            let mut cam = super::Camera::default();
+            super::fit(&mut cam, [0, 0, 50_000_000, 50_000_000], rect);
+            let frames = 60u32;
+            let mut sink = 0usize;
+            let t = Instant::now();
+            for f in 0..frames {
+                cam.center[0] += f as f64 * 1000.0; // simulate a pan
+                let (shapes, _h) = super::transform_cache(
+                    &cache,
+                    &cam,
+                    rect,
+                    BaseLevel::Faint,
+                    0,
+                    |_| super::C_BASE,
+                    egui::Color32::BLACK,
+                    super::C_ADDED,
+                    super::C_REMOVED,
+                    0.0,
+                );
+                sink += shapes.len();
+            }
+            let ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+            println!("BENCH transform_cache: {real} tris -> {ms:.2} ms/frame (sink={sink})");
+        }
+    }
 
     #[test]
     fn distance_mm_is_a_3_4_5_triangle() {
