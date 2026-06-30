@@ -12,6 +12,12 @@ authors.workspace = true
 name = "etchy-gui"
 path = "src/main.rs"
 
+[features]
+# GPU world->screen transform for the base mesh (#106). Off by default; when on,
+# it is still gated behind a runtime toggle with the CPU path as the fallback, so
+# it ships safe and is trivial to pull. Build with: --features gpu-transform.
+gpu-transform = []
+
 [dependencies]
 etchy-core = { path = "../etchy-core" }
 # default-features=false drops eframe's wgpu backend + naga (~half the wasm
