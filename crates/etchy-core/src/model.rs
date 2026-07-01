@@ -213,10 +213,13 @@ pub fn same_board_guard(old: &Board, new: &Board) -> Result<()> {
 
     let span = |bb: [i64; 4]| (bb[2] - bb[0]).max(bb[3] - bb[1]).max(0);
     let max_span = span(ob).max(span(nb));
-    // Generous on purpose: this catches *grossly* different boards (wrong files),
-    // not legitimate revision changes (a moved edge, an added tab/fiducial). 2 mm
-    // or 10% of the larger span, whichever is bigger. `--force` bypasses it.
-    let tol = (2 * NM_PER_MM).max((max_span as f64 * 0.10) as i64);
+    // Catches grossly different boards (wrong files) while tolerating legitimate
+    // revision changes (a moved edge, an added tab/fiducial): 1 mm or 2% of the
+    // larger span, whichever is bigger — matching the M1_ENGINE_DESIGN.md spec.
+    // Kept tight on purpose (was 2 mm / 10%, #92): a "no silent misses" guard must
+    // err toward failing loud on a possibly-wrong pair, not passing it and emitting
+    // a garbage diff. `--force` bypasses it for the rare legit outlier.
+    let tol = NM_PER_MM.max((max_span as f64 * 0.02) as i64);
 
     for i in 0..4 {
         if (ob[i] - nb[i]).abs() > tol {
@@ -281,6 +284,51 @@ mod tests {
             same_board_guard(&a, &b),
             Err(EngineError::BoardMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn guard_rejects_a_five_percent_extent_difference() {
+        // Trust bar (#92): the guard must fail loud on boards that differ by more
+        // than ~2% of span — a 5%-of-span extent difference is not "the same board
+        // with a moved feature", it's likely the wrong file pair. (Under the old
+        // 10% tolerance this silently passed and produced a garbage diff.)
+        let a = Board {
+            layers: vec![layer(
+                LayerKind::TopCopper,
+                [0, 0, 100_000_000, 100_000_000],
+            )],
+        };
+        // max_x grown by 5 mm on a 100 mm board = 5% of span.
+        let b = Board {
+            layers: vec![layer(
+                LayerKind::TopCopper,
+                [0, 0, 105_000_000, 100_000_000],
+            )],
+        };
+        assert!(matches!(
+            same_board_guard(&a, &b),
+            Err(EngineError::BoardMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn guard_tolerates_a_small_revision_change() {
+        // A legitimate revision that nudges an edge by well under the tolerance
+        // (0.5 mm here) must still pass — the guard is a wrong-board catch, not
+        // registration.
+        let a = Board {
+            layers: vec![layer(
+                LayerKind::TopCopper,
+                [0, 0, 100_000_000, 100_000_000],
+            )],
+        };
+        let b = Board {
+            layers: vec![layer(
+                LayerKind::TopCopper,
+                [0, 0, 100_500_000, 100_000_000],
+            )],
+        };
+        assert!(same_board_guard(&a, &b).is_ok());
     }
 
     #[test]
