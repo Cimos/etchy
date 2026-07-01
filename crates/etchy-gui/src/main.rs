@@ -656,6 +656,9 @@ struct ViewApp {
     /// layers can be drawn at once; the `selected` one is highlighted and the rest
     /// are dimmed at draw time. Persisted via #52.
     visible_layers: Vec<bool>,
+    /// New-revision area (mm²) per layer, cached at load so the sidebar %-change
+    /// (#114) doesn't reshoelace every frame. Denominator for "how much changed".
+    new_area_mm2: Vec<f64>,
     mode: Mode,
     /// Always-available faint base behind the diff (G3): Off / Faint / Strong.
     base_level: BaseLevel,
@@ -729,6 +732,11 @@ struct ViewApp {
     src_new: Option<LoadedBoard>,
     /// The last load/diff error, surfaced in the UI (fail-loud, never silent).
     load_error: Option<String>,
+    /// The directory of the last board opened, so the next "Open" dialog starts
+    /// there (revisions A and B usually live side by side) (#120 polish). Native
+    /// only — the web file picker has no directory concept.
+    #[cfg(not(target_arch = "wasm32"))]
+    last_dir: Option<std::path::PathBuf>,
     /// Web only: async file-pick results land here and are drained each frame. The
     /// sender is cloned into each pick task; native uses a blocking dialog instead.
     #[cfg(target_arch = "wasm32")]
@@ -762,6 +770,7 @@ impl ViewApp {
         // multi-layer is opt-in via the checkboxes. Keeps the common case fast on
         // dense boards. `selected` is the most-changed layer (changed-first order).
         let visible_layers = default_visible(diff.layers.len(), selected);
+        let new_area_mm2 = layer_new_areas(&diff);
         Self {
             diff,
             old_label,
@@ -769,6 +778,7 @@ impl ViewApp {
             order,
             selected,
             visible_layers,
+            new_area_mm2,
             mode: Mode::Overlay,
             base_level: BaseLevel::Faint,
             col_added: C_ADDED,
@@ -801,6 +811,8 @@ impl ViewApp {
             src_old: None,
             src_new: None,
             load_error: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_dir: None,
             #[cfg(target_arch = "wasm32")]
             file_tx: file_tx_init,
             #[cfg(target_arch = "wasm32")]
@@ -1472,6 +1484,7 @@ impl ViewApp {
         self.selected = selected;
         self.outline = outline;
         self.visible_layers = visible_layers;
+        self.new_area_mm2 = layer_new_areas(&self.diff);
         self.base_overrides.clear(); // indices are per-board
         self.cache = None;
         self.cam = Camera::default(); // fitted=false → auto-fit next frame
@@ -1527,7 +1540,11 @@ impl ViewApp {
             RevSide::Old => "Open revision A (old) — folder",
             RevSide::New => "Open revision B (new) — folder",
         };
-        if let Some(dir) = rfd::FileDialog::new().set_title(title).pick_folder() {
+        let mut dialog = rfd::FileDialog::new().set_title(title);
+        if let Some(d) = &self.last_dir {
+            dialog = dialog.set_directory(d);
+        }
+        if let Some(dir) = dialog.pick_folder() {
             self.load_side_path(side, &dir);
         }
     }
@@ -1539,17 +1556,24 @@ impl ViewApp {
             RevSide::Old => "Open revision A (old) — .zip fab pack",
             RevSide::New => "Open revision B (new) — .zip fab pack",
         };
-        if let Some(file) = rfd::FileDialog::new()
+        let mut dialog = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("fab pack", &["zip"])
-            .pick_file()
-        {
+            .add_filter("fab pack", &["zip"]);
+        if let Some(d) = &self.last_dir {
+            dialog = dialog.set_directory(d);
+        }
+        if let Some(file) = dialog.pick_file() {
             self.load_side_path(side, &file);
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn load_side_path(&mut self, side: RevSide, path: &std::path::Path) {
+        // Next dialog starts from this board's parent, so opening the other
+        // revision lands on its sibling (#120 polish).
+        if let Some(parent) = path.parent() {
+            self.last_dir = Some(parent.to_path_buf());
+        }
         match loader::load_source(path) {
             Ok((board, fmt)) => self.set_side(
                 side,
@@ -1768,6 +1792,12 @@ fn empty_diff() -> BoardDiff {
         report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
         layers: Vec::new(),
     }
+}
+
+/// New-revision copper area (mm²) per layer, computed once at load — the
+/// denominator for the sidebar's per-layer %-change (#114).
+fn layer_new_areas(diff: &BoardDiff) -> Vec<f64> {
+    diff.layers.iter().map(|l| l.new.area_mm2()).collect()
 }
 
 /// Build a `BoardDiff` from two loaded source boards, carrying the coordinate
@@ -2230,23 +2260,40 @@ impl eframe::App for ViewApp {
                                             };
                                             let r =
                                                 ui.selectable_label(idx == self.selected, label);
-                                            // Compact +A/-B mm² micro-label on changed
-                                            // layers. No old/base area is exposed by
-                                            // etchy-core, so a percent isn't available —
-                                            // show the deltas instead.
+                                            // Compact %-change micro-label on changed
+                                            // layers (#114): the changed area as a
+                                            // share of the layer's new-revision area.
+                                            // The mm² deltas move into the hover text so
+                                            // the row stays scannable. If the layer is
+                                            // gone in the new rev (area 0), fall back to
+                                            // the raw deltas.
                                             if changed {
+                                                let area = self
+                                                    .new_area_mm2
+                                                    .get(idx)
+                                                    .copied()
+                                                    .unwrap_or(0.0);
+                                                let txt = if area > 0.0 {
+                                                    format!(
+                                                        "Δ {:.1}%",
+                                                        (added + removed) / area * 100.0
+                                                    )
+                                                } else {
+                                                    format!("+{added:.3} −{removed:.3}")
+                                                };
                                                 ui.with_layout(
                                                     egui::Layout::right_to_left(
                                                         egui::Align::Center,
                                                     ),
                                                     |ui| {
                                                         ui.label(
-                                                            egui::RichText::new(format!(
-                                                                "+{added:.3} −{removed:.3}"
-                                                            ))
-                                                            .small()
-                                                            .weak(),
-                                                        );
+                                                            egui::RichText::new(txt).small().weak(),
+                                                        )
+                                                        .on_hover_text(format!(
+                                                            "+{added:.4} mm² added · \
+                                                             −{removed:.4} mm² removed · \
+                                                             layer area {area:.3} mm²"
+                                                        ));
                                                     },
                                                 );
                                             }
@@ -2876,6 +2923,14 @@ impl ViewApp {
                 "   ·   {} hidden < {:.4} mm²",
                 self.last_hidden, self.min_area_mm2
             ));
+        }
+        // #112: spell out when only some layers are shown, so a single visible
+        // layer reads as "one layer of many" rather than "missing traces". The
+        // default view shows just the most-changed layer, which surprised users.
+        let shown = self.visible_layers.iter().filter(|&&v| v).count();
+        let total = self.visible_layers.len();
+        if shown < total {
+            cap.push_str(&format!("   ·   showing {shown} of {total} layers"));
         }
         painter.text(
             rect.left_top() + egui::vec2(8.0, 8.0),
