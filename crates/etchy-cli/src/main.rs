@@ -301,10 +301,10 @@ fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<Gerb
             Some((s, e)) => (s, e),
             None => (name.as_str(), ""),
         };
-        let kind = etchy_core::classify(stem, ext);
-        // Gerber layer, Excellon/NC drill, or neither (job file, README) — skip the
-        // last, but route drill files through the Excellon front-end (#62) so drill
-        // changes actually diff instead of being silently dropped.
+        let mut kind = etchy_core::classify(stem, ext);
+        // Gerber layer, Excellon/NC drill, pick-and-place, or neither (job file,
+        // README) — skip the last. Drill (#62) and P&P (#115) route through their
+        // own front-ends so those changes diff instead of being silently dropped.
         let geometry = if etchy_core::looks_like_gerber(&bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(&bytes).ok();
@@ -317,6 +317,12 @@ fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<Gerb
             std::sync::Arc::new(
                 etchy_core::resolve_excellon(&bytes)
                     .with_context(|| format!("processing drill layer {name}"))?,
+            )
+        } else if etchy_core::looks_like_placement(&bytes) {
+            kind = etchy_core::LayerKind::Placement;
+            std::sync::Arc::new(
+                etchy_core::resolve_placement(&bytes)
+                    .with_context(|| format!("processing placement file {name}"))?,
             )
         } else {
             continue;
