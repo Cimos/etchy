@@ -1154,6 +1154,13 @@ const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
 /// the diff fast.
 const SPLASH_HOLD_SECS: f64 = 0.9;
 const SPLASH_FADE_SECS: f64 = 0.6;
+
+/// Links for the Help menu.
+const URL_REPO: &str = "https://github.com/Cimos/etchy";
+const URL_ISSUES: &str = "https://github.com/Cimos/etchy/issues";
+const URL_SITE: &str = "https://cimos.github.io";
+const URL_SPONSOR: &str = "https://github.com/sponsors/Cimos";
+
 /// Brand "surface" charcoal — panels/chrome, one step up from the board so the
 /// UI doesn't read as one flat near-black mass.
 const C_SURFACE: Color32 = Color32::from_rgb(0x14, 0x1a, 0x18); // #141a18
@@ -2260,6 +2267,18 @@ impl eframe::App for ViewApp {
                 {
                     self.open_primary(RevSide::New, ui.ctx());
                 }
+                ui.separator();
+                // Help: external links (open in the browser on native + web).
+                ui.menu_button("Help", |ui| {
+                    ui.hyperlink_to("etchy on GitHub", URL_REPO);
+                    ui.hyperlink_to("Website", URL_SITE);
+                    ui.hyperlink_to("Report an issue", URL_ISSUES);
+                    ui.separator();
+                    ui.hyperlink_to("Sponsor / fund etchy", URL_SPONSOR);
+                    ui.separator();
+                    ui.label(format!("etchy v{}", env!("CARGO_PKG_VERSION")))
+                        .on_hover_text("The engine version.");
+                });
                 ui.separator();
                 // Warning chip lives IN the controls row (no separate row that can
                 // reflow the canvas — #49). Overlay floats; ASCII glyph (no tofu).
