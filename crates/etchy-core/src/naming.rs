@@ -61,6 +61,10 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
         LayerKind::Drill
     } else if has("EDGE") || has("OUTLINE") || e == "gko" || e == "gm1" || e == "gm" {
         LayerKind::Outline
+    } else if e == "pos" || has("PICK") || has("PLACE") || has("CENTROID") || has("PNP") {
+        // Pick-and-place / centroid files (#115): KiCad `.pos`, or a CSV named
+        // pick-place / centroid / pnp.
+        LayerKind::Placement
     } else {
         LayerKind::Other
     }

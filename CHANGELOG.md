@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Pick-and-place input (#115):** centroid files (KiCad `.pos`, and Altium/JLC/
+  generic centroid CSVs) are parsed and each component rendered as a rotated
+  marker at its position, so **moved / rotated / added / removed parts diff** in
+  the overlay, HTML, magnitudes, and CI gate — as geometry, not a BOM list. New
+  `LayerKind::Placement`; routed by all loaders (CLI + GUI + web).
 - **HTML report (M1):** `--html <file>` writes a single self-contained HTML report
   — totals, warnings, and each changed layer's overlay (the per-layer SVG, inlined)
   with its magnitudes. No external assets; shareable and printable.
