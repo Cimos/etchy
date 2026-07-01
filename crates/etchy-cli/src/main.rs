@@ -61,6 +61,10 @@ struct Cli {
     /// directory is created if it does not exist.
     #[arg(long, value_name = "DIR")]
     svg: Option<PathBuf>,
+    /// Write a single self-contained HTML report to this file: totals, warnings,
+    /// and each changed layer's overlay inlined (no external assets).
+    #[arg(long, value_name = "FILE")]
+    html: Option<PathBuf>,
 
     /// CI gate: fail (exit 1) only when the changed area on the gated layers
     /// exceeds this many mm². Omitted ⇒ any change on the gated layers fails.
@@ -250,6 +254,17 @@ fn run(cli: &Cli) -> Result<DiffReport> {
     // Optional SVG export: one file per changed layer (headless render).
     if let Some(dir) = &cli.svg {
         write_svgs(&diff, dir).with_context(|| format!("writing SVGs to {}", dir.display()))?;
+    }
+
+    // Optional self-contained HTML report (M1 output).
+    if let Some(path) = &cli.html {
+        let html = etchy_core::board_report_html(
+            &diff,
+            &cli.old.to_string_lossy(),
+            &cli.new.to_string_lossy(),
+        );
+        std::fs::write(path, html)
+            .with_context(|| format!("writing HTML report to {}", path.display()))?;
     }
 
     // `--json` is the deprecated alias for `--format json`.

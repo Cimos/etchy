@@ -7,6 +7,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **HTML report (M1):** `--html <file>` writes a single self-contained HTML report
+  — totals, warnings, and each changed layer's overlay (the per-layer SVG, inlined)
+  with its magnitudes. No external assets; shareable and printable.
 - **Git-refs invocation (M2):** `etchy <refA> <refB> [subdir]` diffs two committed
   revisions of a repo's Gerbers with no checkout (reads the blobs via `git`).
   Auto-detected when the OLD argument isn't a directory, or forced with `--git`.
