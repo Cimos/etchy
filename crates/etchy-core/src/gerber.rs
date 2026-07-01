@@ -35,6 +35,24 @@ const MAX_CONTOURS_PER_LAYER: usize = 5_000_000;
 #[cfg(test)]
 const MAX_CONTOURS_PER_LAYER: usize = 5_000;
 
+/// Per-layer total-point ceiling (#83). The contour count alone doesn't bound
+/// this — one region loop or a near-full arc can carry thousands of points, so a
+/// handful of contours can still amplify into a huge point set (and a slow/greedy
+/// boolean pass). Fail loud once the summed vertex count crosses the bound.
+#[cfg(not(test))]
+const MAX_POINTS_PER_LAYER: usize = 20_000_000;
+#[cfg(test)]
+const MAX_POINTS_PER_LAYER: usize = 30_000;
+
+/// Per-layer polarity-span ceiling (#83). Each span is one boolean pass over the
+/// accumulated geometry, so a file that toggles `%LP` on every object turns the
+/// resolve into an O(N²) grind. Real layers have a handful of polarity groups;
+/// this bound is far above any of them.
+#[cfg(not(test))]
+const MAX_SPANS_PER_LAYER: usize = 100_000;
+#[cfg(test)]
+const MAX_SPANS_PER_LAYER: usize = 2_000;
+
 /// Parse + resolve one Gerber layer's bytes into its filled copper geometry.
 pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
     let normalized = normalize(bytes)?;
@@ -277,6 +295,9 @@ struct Machine<'a> {
     /// Running count of contours pushed this layer, checked against
     /// `MAX_CONTOURS_PER_LAYER` once per command (#83).
     emitted: usize,
+    /// Running sum of vertices across all pushed contours, checked against
+    /// `MAX_POINTS_PER_LAYER` once per command (#83).
+    total_points: usize,
 }
 
 impl<'a> Machine<'a> {
@@ -300,6 +321,7 @@ impl<'a> Machine<'a> {
             region_loops: Vec::new(),
             cur_loop: Vec::new(),
             emitted: 0,
+            total_points: 0,
         }
     }
 
@@ -331,6 +353,22 @@ impl<'a> Machine<'a> {
                 what: "contours",
                 count: self.emitted,
                 limit: MAX_CONTOURS_PER_LAYER,
+            });
+        }
+        // …and the total vertex count (a few huge contours) and polarity-span count
+        // (O(N²) boolean passes), which the contour count alone doesn't bound (#83).
+        if self.total_points > MAX_POINTS_PER_LAYER {
+            return Err(EngineError::ObjectLimit {
+                what: "points",
+                count: self.total_points,
+                limit: MAX_POINTS_PER_LAYER,
+            });
+        }
+        if self.spans.len() > MAX_SPANS_PER_LAYER {
+            return Err(EngineError::ObjectLimit {
+                what: "polarity spans",
+                count: self.spans.len(),
+                limit: MAX_SPANS_PER_LAYER,
             });
         }
         Ok(())
@@ -710,7 +748,8 @@ impl<'a> Machine<'a> {
         if c.len() < 3 {
             return;
         }
-        self.emitted += 1; // checked against the per-layer ceiling in step() (#83)
+        self.emitted += 1; // checked against the per-layer ceilings in step() (#83)
+        self.total_points += c.len();
         let is_dark = self.polarity_dark == exposure;
         // NOTE: contours arrive correctly wound — our geom builders emit CCW solids,
         // and region fills come CCW-outer/CW-holes from fill_even_odd. Do NOT
@@ -807,7 +846,9 @@ mod tests {
         // A tiny file can still emit a huge object count (here, many flashes). Past
         // the per-layer ceiling the engine must fail loud, not grind or OOM (#83).
         // The cap is lowered under cfg(test), so a few thousand flashes trip it.
-        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\n");
+        // Rect flashes (4 pts each) keep the point total under MAX_POINTS_PER_LAYER
+        // so the *contour* ceiling is what trips here, not the point ceiling.
+        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,0.1X0.1*%\nD10*\n");
         for i in 0..(MAX_CONTOURS_PER_LAYER + 1) {
             g.push_str(&format!("X{}Y0D03*\n", i * 1000));
         }
@@ -819,6 +860,53 @@ mod tests {
                 assert!(count > limit, "count {count} should exceed limit {limit}");
             }
             other => panic!("expected ObjectLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn point_count_cap_fails_loud() {
+        // Circle flashes are CIRCLE_SEGMENTS (64) points each, so a few hundred of
+        // them cross the point ceiling while staying well under the contour ceiling
+        // — exactly the "few contours, many points" vector the contour cap misses
+        // (#83).
+        let per = crate::geom::CIRCLE_SEGMENTS;
+        let n = MAX_POINTS_PER_LAYER / per + 10;
+        assert!(
+            n < MAX_CONTOURS_PER_LAYER,
+            "test must trip points, not contours"
+        );
+        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\n");
+        for i in 0..n {
+            g.push_str(&format!("X{}Y0D03*\n", i * 3000));
+        }
+        g.push_str("M02*\n");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::ObjectLimit { what, limit, count }) => {
+                assert_eq!(what, "points");
+                assert_eq!(limit, MAX_POINTS_PER_LAYER);
+                assert!(count > limit, "count {count} should exceed limit {limit}");
+            }
+            other => panic!("expected ObjectLimit(points), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn span_count_cap_fails_loud() {
+        // Toggling polarity on every flash makes each object its own span — an
+        // O(N²) boolean grind the contour/point ceilings don't bound (#83).
+        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,0.1X0.1*%\nD10*\n");
+        for i in 0..(MAX_SPANS_PER_LAYER + 100) {
+            let lp = if i % 2 == 0 { "D" } else { "C" };
+            g.push_str(&format!("%LP{lp}*%\nX{}Y0D03*\n", i * 1000));
+        }
+        g.push_str("M02*\n");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::ObjectLimit { what, limit, count }) => {
+                assert_eq!(what, "polarity spans");
+                assert_eq!(limit, MAX_SPANS_PER_LAYER);
+                assert!(count > limit, "count {count} should exceed limit {limit}");
+            }
+            other => panic!("expected ObjectLimit(polarity spans), got {other:?}"),
         }
     }
 
