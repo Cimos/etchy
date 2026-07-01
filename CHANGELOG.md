@@ -7,6 +7,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Git-refs invocation (M2):** `etchy <refA> <refB> [subdir]` diffs two committed
+  revisions of a repo's Gerbers with no checkout (reads the blobs via `git`).
+  Auto-detected when the OLD argument isn't a directory, or forced with `--git`.
 - **CI gate thresholds (M2):** `--fail-on-area <mm²>` and `--fail-on-regions <n>`
   gate the exit code on the *magnitude* of change, and `--gate-layers <spec>`
   (e.g. `copper`) scopes the gate to specific layers — so a pipeline can fail on
