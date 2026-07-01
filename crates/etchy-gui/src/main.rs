@@ -3086,11 +3086,9 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
 mod tests {
     use super::{
         base_display_color, build_geom_key, cycle_base, distance_mm, geom_cache_dirty,
-        group_all_visible, group_layers, layer_group, outline_legend_visible, pans_on,
-        pick_outline_index, region_screen_px, restore_visibility, scroll_to_camera_action,
-        set_group_visibility, short_layer_name, step_in_order, visible_from_changed,
-        visible_indices, warning_phase, BaseLevel, CameraAction, InputPreset, LayerGroup, Mode,
-        Theme, WarningPhase,
+        group_layers, layer_group, outline_legend_visible, pans_on, pick_outline_index,
+        region_screen_px, scroll_to_camera_action, short_layer_name, step_in_order, warning_phase,
+        BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
 
@@ -3170,6 +3168,7 @@ mod tests {
                     super::C_ADDED,
                     super::C_REMOVED,
                     0.0,
+                    false, // skip_base: CPU path draws everything in this bench
                 );
                 sink += shapes.len();
             }

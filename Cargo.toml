@@ -43,8 +43,10 @@ proptest = "1"
 # crates, and strip removes symbols. We deliberately leave `opt-level` at the
 # release default (3): opt-level="z" would shrink the binary but slow the
 # large-board diff (Phase 3 perf) — the wasm *bundle* gets its size win from the
-# glow swap (#86) plus binaryen `wasm-opt=z` (index.html), which don't touch the
-# native engine's speed. `panic="abort"` is intentionally NOT set: Phase 1 #85
+# glow swap (#86) plus a post-build binaryen `wasm-opt -Oz` run in CI/deploy (#99;
+# trunk's own wasm-opt is disabled in index.html because its bundled binaryen
+# rejects Rust's bulk-memory output), which don't touch the native engine's speed.
+# `panic="abort"` is intentionally NOT set: Phase 1 #85
 # wants a catch_unwind boundary around the third-party parser, which abort would
 # defeat. Revisit both once #85 lands.
 [profile.release]
