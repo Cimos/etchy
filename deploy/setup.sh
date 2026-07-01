@@ -62,6 +62,16 @@ build() {
   local dist="$REPO/crates/etchy-gui/dist"
   [ -f "$dist/etchy-gui.js" ] && [ -f "$dist/etchy-gui_bg.wasm" ] \
     || die "build did not produce dist/etchy-gui.js + _bg.wasm in $dist"
+  # Size-optimize the bundle ourselves (#99). trunk's own wasm-opt is disabled in
+  # index.html because its bundled binaryen rejects Rust's bulk-memory output; we
+  # run wasm-opt here with all features enabled instead. Best-effort: skip with a
+  # note if binaryen isn't installed, so a plain dev build still works.
+  if have wasm-opt; then
+    say "optimizing wasm bundle (wasm-opt -Oz)…"
+    wasm-opt -all -Oz --strip-debug "$dist/etchy-gui_bg.wasm" -o "$dist/etchy-gui_bg.wasm"
+  else
+    say "wasm-opt not found — shipping unoptimized bundle (install binaryen for a smaller one)"
+  fi
   say "staging serve dir: $SERVE_DIR"
   mkdir -p "$SERVE_DIR"
   cp "$dist/etchy-gui.js" "$dist/etchy-gui_bg.wasm" "$SERVE_DIR/"

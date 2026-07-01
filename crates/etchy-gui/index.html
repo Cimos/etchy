@@ -15,7 +15,11 @@
 <body>
   <div id="loading"><div><b>etchy</b> — loading…</div></div>
   <canvas id="the_canvas_id"></canvas>
-  <link data-trunk rel="rust" data-wasm-opt="z" />
+  <!-- data-wasm-opt="0": trunk's bundled binaryen rejects Rust's bulk-memory /
+       reference-types output and fails the release build (#99). We skip trunk's
+       wasm-opt and run it ourselves (CI + deploy/setup.sh) with the feature flags
+       enabled — see the "wasm-opt" step in .github/workflows/ci.yml. -->
+  <link data-trunk rel="rust" data-wasm-opt="0" />
   <script>
     // Remove the loading splash when the app starts. (Don't gate on canvas.width —
     // a bare <canvas> defaults to width 300, so that check fires immediately.)
