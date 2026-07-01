@@ -7,6 +7,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Help menu (viewer):** a toolbar **Help** menu with links to the GitHub repo,
+  the website, "report an issue", and **Sponsor / fund etchy** (GitHub Sponsors),
+  plus the version. Opens links in the browser on native and web. A repo
+  `.github/FUNDING.yml` adds the Sponsor button too.
 - **Pick-and-place input (#115):** centroid files (KiCad `.pos`, and Altium/JLC/
   generic centroid CSVs) are parsed and each component rendered as a rotated
   marker at its position, so **moved / rotated / added / removed parts diff** in
