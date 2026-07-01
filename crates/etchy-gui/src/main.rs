@@ -8,7 +8,6 @@
 
 #[cfg(feature = "gpu-transform")]
 mod gpu;
-#[cfg(not(target_arch = "wasm32"))]
 mod loader;
 mod lod;
 
@@ -50,19 +49,22 @@ mod native {
     pub fn run() -> ExitCode {
         configure_display_for_wsl();
         let args: Vec<String> = std::env::args().skip(1).collect();
-        if args.len() != 2 {
-            eprintln!("usage: etchy-gui <old-dir> <new-dir>");
-            return ExitCode::from(2);
-        }
-        let (old_dir, new_dir) = (PathBuf::from(&args[0]), PathBuf::from(&args[1]));
-        let diff = match build_diff(&old_dir, &new_dir) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("etchy-gui: error: {e:#}");
+        // 0 args → start on the welcome screen; 2 args → load both up front (keeps
+        // the `etchy-gui <old> <new>` contract and fails loud on a bad path).
+        let seed = match args.len() {
+            0 => None,
+            2 => match load_seed(&PathBuf::from(&args[0]), &PathBuf::from(&args[1])) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("etchy-gui: error: {e:#}");
+                    return ExitCode::from(2);
+                }
+            },
+            _ => {
+                eprintln!("usage: etchy-gui [<old-dir> <new-dir>]");
                 return ExitCode::from(2);
             }
         };
-        let (old_lbl, new_lbl) = (label(&old_dir), label(&new_dir));
         // No window icon: the in-app "etchy" wordmark is the single logo on both
         // surfaces (#18). Setting a window icon here gave native a second logo.
         let viewport = egui::ViewportBuilder::default()
@@ -80,7 +82,7 @@ mod native {
         match eframe::run_native(
             "etchy",
             native_options,
-            Box::new(move |cc| Ok(Box::new(ViewApp::from_cc(cc, diff, old_lbl, new_lbl)))),
+            Box::new(move |cc| Ok(Box::new(build_app(cc, seed)))),
         ) {
             Ok(()) => ExitCode::from(0),
             Err(e) => {
@@ -97,16 +99,44 @@ mod native {
             .to_string()
     }
 
-    fn build_diff(old_dir: &Path, new_dir: &Path) -> anyhow::Result<BoardDiff> {
-        let (old, of) = loader::load_board(old_dir)?;
-        let (new, nf) = loader::load_board(new_dir)?;
-        let mut d = etchy_core::compare_detailed(&old, &new)?;
-        if let (Some(o), Some(n)) = (of, nf) {
-            if let Some(w) = etchy_core::coordinate_mismatch_warning(&o, &n) {
-                d.report.warnings.push(w);
+    /// Load both revisions from CLI paths into source boards + their diff.
+    fn load_seed(
+        old_dir: &Path,
+        new_dir: &Path,
+    ) -> anyhow::Result<(LoadedBoard, LoadedBoard, BoardDiff)> {
+        let (old_board, of) = loader::load_source(old_dir)?;
+        let (new_board, nf) = loader::load_source(new_dir)?;
+        let old = LoadedBoard {
+            label: label(old_dir),
+            board: old_board,
+            fmt: of,
+        };
+        let new = LoadedBoard {
+            label: label(new_dir),
+            board: new_board,
+            fmt: nf,
+        };
+        let diff = diff_from_sources(&old, &new)?;
+        Ok((old, new, diff))
+    }
+
+    /// Construct the app, restoring persisted settings. With a seed, both source
+    /// boards are set so either can be reopened; without one, the welcome screen
+    /// shows (empty diff).
+    fn build_app(
+        cc: &eframe::CreationContext<'_>,
+        seed: Option<(LoadedBoard, LoadedBoard, BoardDiff)>,
+    ) -> ViewApp {
+        match seed {
+            Some((old, new, diff)) => {
+                let (ol, nl) = (old.label.clone(), new.label.clone());
+                let mut app = ViewApp::from_cc(cc, diff, ol, nl);
+                app.src_old = Some(old);
+                app.src_new = Some(new);
+                app
             }
+            None => ViewApp::from_cc(cc, empty_diff(), String::new(), String::new()),
         }
-        Ok(d)
     }
 }
 
@@ -154,18 +184,23 @@ fn board_from_files(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn demo_diff() -> BoardDiff {
+fn demo_seed() -> (LoadedBoard, LoadedBoard, BoardDiff) {
     static OLD: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/old");
     static NEW: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/new");
-    let (old, of) = board_from_files(&OLD);
-    let (new, nf) = board_from_files(&NEW);
-    let mut d = etchy_core::compare_detailed(&old, &new).expect("demo diff");
-    if let (Some(o), Some(n)) = (of, nf) {
-        if let Some(w) = etchy_core::coordinate_mismatch_warning(&o, &n) {
-            d.report.warnings.push(w);
-        }
-    }
-    d
+    let (ob, of) = board_from_files(&OLD);
+    let (nb, nf) = board_from_files(&NEW);
+    let old = LoadedBoard {
+        label: "Mad_RP2040 v0.0.0".into(),
+        board: ob,
+        fmt: of,
+    };
+    let new = LoadedBoard {
+        label: "Mad_RP2040 v0.0.1".into(),
+        board: nb,
+        fmt: nf,
+    };
+    let diff = diff_from_sources(&old, &new).expect("demo diff");
+    (old, new, diff)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -187,12 +222,14 @@ fn main() {
                 canvas,
                 web_options,
                 Box::new(|cc| {
-                    Ok(Box::new(ViewApp::from_cc(
-                        cc,
-                        demo_diff(),
-                        "Mad_RP2040 v0.0.0".into(),
-                        "Mad_RP2040 v0.0.1".into(),
-                    )))
+                    let (old, new, diff) = demo_seed();
+                    let (ol, nl) = (old.label.clone(), new.label.clone());
+                    let mut app = ViewApp::from_cc(cc, diff, ol, nl);
+                    // Seed the sources so "Open A/B" re-diffs against the demo side
+                    // the user keeps (#120).
+                    app.src_old = Some(old);
+                    app.src_new = Some(new);
+                    Ok(Box::new(app))
                 }),
             )
             .await
@@ -577,6 +614,32 @@ impl Default for Camera {
     }
 }
 
+/// One loaded revision, retained so either side can be swapped and re-diffed
+/// without re-reading the other (#120). Geometry is `Arc`-shared, so keeping the
+/// source board alongside the diff is cheap.
+#[derive(Clone)]
+struct LoadedBoard {
+    label: String,
+    board: etchy_core::Board,
+    fmt: Option<etchy_core::GerberFormat>,
+}
+
+/// Which revision a load targets: the old (A) or new (B) side. (Distinct from
+/// `Side` above, which is the split-view Left/Right.)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RevSide {
+    Old,
+    New,
+}
+
+/// Result of a web async file pick, delivered back to the UI thread over a
+/// channel (the browser file dialog is async; native uses a blocking dialog).
+#[cfg(target_arch = "wasm32")]
+struct FilePick {
+    side: RevSide,
+    result: anyhow::Result<LoadedBoard>,
+}
+
 struct ViewApp {
     diff: BoardDiff,
     old_label: String,
@@ -654,6 +717,19 @@ struct ViewApp {
     /// holds the grab across frames so leaving the handle mid-drag keeps it.
     swipe_drag: bool,
 
+    /// Retained source boards (#120) so either side can be reopened and re-diffed.
+    /// `None` before a board is chosen (the welcome screen shows in that state).
+    src_old: Option<LoadedBoard>,
+    src_new: Option<LoadedBoard>,
+    /// The last load/diff error, surfaced in the UI (fail-loud, never silent).
+    load_error: Option<String>,
+    /// Web only: async file-pick results land here and are drained each frame. The
+    /// sender is cloned into each pick task; native uses a blocking dialog instead.
+    #[cfg(target_arch = "wasm32")]
+    file_tx: std::sync::mpsc::Sender<FilePick>,
+    #[cfg(target_arch = "wasm32")]
+    file_rx: std::sync::mpsc::Receiver<FilePick>,
+
     /// GPU base-transform (#106): the glow resources, present only when the
     /// `gpu-transform` feature is built and a GL context is available.
     #[cfg(feature = "gpu-transform")]
@@ -670,6 +746,8 @@ struct ViewApp {
 
 impl ViewApp {
     fn new(diff: BoardDiff, old_label: String, new_label: String) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let (file_tx_init, file_rx_init) = std::sync::mpsc::channel::<FilePick>();
         let mut order: Vec<usize> = (0..diff.layers.len()).collect();
         order.sort_by_key(|&i| !diff.layers[i].is_changed()); // changed first, stable
         let selected = order.first().copied().unwrap_or(0);
@@ -714,6 +792,13 @@ impl ViewApp {
             input_preset: InputPreset::default(),
             swipe_frac: 0.5,
             swipe_drag: false,
+            src_old: None,
+            src_new: None,
+            load_error: None,
+            #[cfg(target_arch = "wasm32")]
+            file_tx: file_tx_init,
+            #[cfg(target_arch = "wasm32")]
+            file_rx: file_rx_init,
             // The feature is opt-in (off in normal builds), so defaulting the
             // runtime toggle on inside a feature build is safe and lets the GPU
             // path be exercised; the checkbox still turns it off.
@@ -1362,8 +1447,389 @@ impl ViewApp {
     }
 }
 
+impl ViewApp {
+    /// Replace the shown diff with a freshly loaded one, resetting board-derived
+    /// state (layer order/selection/visibility, outline, caches, camera) while
+    /// keeping user preferences (theme, colours, presets). The camera re-fits next
+    /// frame (#120).
+    fn adopt_diff(&mut self, diff: BoardDiff, old_label: String, new_label: String) {
+        let mut order: Vec<usize> = (0..diff.layers.len()).collect();
+        order.sort_by_key(|&i| !diff.layers[i].is_changed());
+        let selected = order.first().copied().unwrap_or(0);
+        let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
+        let visible_layers = default_visible(diff.layers.len(), selected);
+        self.diff = diff;
+        self.old_label = old_label;
+        self.new_label = new_label;
+        self.order = order;
+        self.selected = selected;
+        self.outline = outline;
+        self.visible_layers = visible_layers;
+        self.base_overrides.clear(); // indices are per-board
+        self.cache = None;
+        self.cam = Camera::default(); // fitted=false → auto-fit next frame
+        self.measure_pts.clear();
+        self.warning_shown_at = None;
+        self.warning_expanded = false;
+        self.load_error = None;
+        #[cfg(feature = "gpu-transform")]
+        {
+            self.gpu_hash = None;
+        }
+    }
+
+    /// Store a freshly loaded board on one side and re-diff if both sides are set.
+    fn set_side(&mut self, side: RevSide, loaded: LoadedBoard) {
+        match side {
+            RevSide::Old => self.src_old = Some(loaded),
+            RevSide::New => self.src_new = Some(loaded),
+        }
+        self.load_error = None;
+        self.rebuild_diff();
+    }
+
+    /// Recompute the diff from the two source boards, if both are present.
+    fn rebuild_diff(&mut self) {
+        let (Some(o), Some(n)) = (self.src_old.as_ref(), self.src_new.as_ref()) else {
+            return;
+        };
+        match diff_from_sources(o, n) {
+            Ok(diff) => {
+                let (ol, nl) = (o.label.clone(), n.label.clone());
+                self.adopt_diff(diff, ol, nl);
+            }
+            Err(e) => self.load_error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Drain any completed async file picks (web) into the diff.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_file_picks(&mut self) {
+        while let Ok(pick) = self.file_rx.try_recv() {
+            match pick.result {
+                Ok(loaded) => self.set_side(pick.side, loaded),
+                Err(e) => self.load_error = Some(format!("{e:#}")),
+            }
+        }
+    }
+
+    /// Native: open a folder picker for `side`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pick_folder(&mut self, side: RevSide) {
+        let title = match side {
+            RevSide::Old => "Open revision A (old) — folder",
+            RevSide::New => "Open revision B (new) — folder",
+        };
+        if let Some(dir) = rfd::FileDialog::new().set_title(title).pick_folder() {
+            self.load_side_path(side, &dir);
+        }
+    }
+
+    /// Native: open a `.zip` fab-pack picker for `side`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pick_zip(&mut self, side: RevSide) {
+        let title = match side {
+            RevSide::Old => "Open revision A (old) — .zip fab pack",
+            RevSide::New => "Open revision B (new) — .zip fab pack",
+        };
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter("fab pack", &["zip"])
+            .pick_file()
+        {
+            self.load_side_path(side, &file);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_side_path(&mut self, side: RevSide, path: &std::path::Path) {
+        match loader::load_source(path) {
+            Ok((board, fmt)) => self.set_side(
+                side,
+                LoadedBoard {
+                    label: path_label(path),
+                    board,
+                    fmt,
+                },
+            ),
+            Err(e) => self.load_error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// The primary toolbar "Open" action for a side: a folder on native, the
+    /// browser file picker on web.
+    fn open_primary(&mut self, side: RevSide, _ctx: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pick_folder(side);
+        #[cfg(target_arch = "wasm32")]
+        self.pick_files_web(side, _ctx);
+    }
+
+    /// Handle files dropped onto the window (both surfaces). Fills the first empty
+    /// side (A then B); if both are already loaded, a drop replaces A.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        let side = if self.src_old.is_none() {
+            RevSide::Old
+        } else if self.src_new.is_none() {
+            RevSide::New
+        } else {
+            RevSide::Old
+        };
+        self.load_dropped(side, dropped);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_dropped(&mut self, side: RevSide, files: Vec<egui::DroppedFile>) {
+        let paths: Vec<std::path::PathBuf> = files.iter().filter_map(|f| f.path.clone()).collect();
+        if paths.is_empty() {
+            return;
+        }
+        match load_dropped_paths(&paths) {
+            Ok(loaded) => self.set_side(side, loaded),
+            Err(e) => self.load_error = Some(format!("{e:#}")),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn load_dropped(&mut self, side: RevSide, files: Vec<egui::DroppedFile>) {
+        // Web drops carry bytes. A single `.zip` → load_zip; otherwise every
+        // dropped file is treated as a layer.
+        let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut zip: Option<Vec<u8>> = None;
+        for f in files {
+            let Some(bytes) = f.bytes else { continue };
+            if f.name.to_ascii_lowercase().ends_with(".zip") {
+                zip = Some(bytes.to_vec());
+            } else {
+                byte_files.push((basename(&f.name), bytes.to_vec()));
+            }
+        }
+        let res = if let Some(zb) = zip {
+            loader::load_zip(zb)
+        } else {
+            loader::board_from_bytes(byte_files)
+        };
+        match res {
+            Ok((board, fmt)) => self.set_side(
+                side,
+                LoadedBoard {
+                    label: "dropped files".into(),
+                    board,
+                    fmt,
+                },
+            ),
+            Err(e) => self.load_error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Web: open the browser file picker for `side` (multiple Gerbers or one
+    /// `.zip`); the result comes back over the channel and is drained next frame.
+    #[cfg(target_arch = "wasm32")]
+    fn pick_files_web(&mut self, side: RevSide, ctx: &egui::Context) {
+        let tx = self.file_tx.clone();
+        let ctx = ctx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let Some(handles) = rfd::AsyncFileDialog::new()
+                .add_filter(
+                    "Gerber / fab pack",
+                    &[
+                        "gbr", "gtl", "gbl", "gts", "gbs", "gto", "gbo", "gtp", "gbp", "gko",
+                        "gm1", "zip",
+                    ],
+                )
+                .pick_files()
+                .await
+            else {
+                return;
+            };
+            let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut zip: Option<Vec<u8>> = None;
+            for h in handles {
+                let name = h.file_name();
+                let bytes = h.read().await;
+                if name.to_ascii_lowercase().ends_with(".zip") {
+                    zip = Some(bytes);
+                } else {
+                    byte_files.push((basename(&name), bytes));
+                }
+            }
+            let result = if let Some(zb) = zip {
+                loader::load_zip(zb)
+            } else {
+                loader::board_from_bytes(byte_files)
+            }
+            .map(|(board, fmt)| LoadedBoard {
+                label: "uploaded".into(),
+                board,
+                fmt,
+            });
+            let _ = tx.send(FilePick { side, result });
+            ctx.request_repaint();
+        });
+    }
+
+    /// The welcome / empty-state screen shown when no board is loaded (#120).
+    fn welcome_ui(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(56.0);
+                ui.label(
+                    egui::RichText::new("etchy")
+                        .size(40.0)
+                        .strong()
+                        .color(C_COPPER),
+                );
+                ui.label(
+                    egui::RichText::new("PCB visual + geometric diff")
+                        .size(15.0)
+                        .color(C_CREAM),
+                );
+                ui.add_space(22.0);
+                ui.label("Open two revisions of a board's fab output to compare them.");
+                ui.add_space(18.0);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(440.0);
+                    self.side_open_row(ui, RevSide::Old, "Revision A (old)");
+                    ui.add_space(10.0);
+                    self.side_open_row(ui, RevSide::New, "Revision B (new)");
+                });
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new(
+                        "…or drag a folder, a .zip fab pack, or Gerber files onto the window.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                if let Some(err) = self.load_error.clone() {
+                    ui.add_space(16.0);
+                    ui.colored_label(C_REMOVED, format!("[!] {err}"));
+                }
+            });
+        });
+    }
+
+    /// One "Revision X: [status] [Open…]" row for the welcome screen.
+    fn side_open_row(&mut self, ui: &mut egui::Ui, side: RevSide, label: &str) {
+        let status = match side {
+            RevSide::Old => &self.src_old,
+            RevSide::New => &self.src_new,
+        }
+        .as_ref()
+        .map(|l| l.label.clone());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(label).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.open_buttons(ui, side);
+                match status {
+                    Some(s) => ui.label(egui::RichText::new(s).color(C_ADDED)),
+                    None => ui.label(egui::RichText::new("not loaded").weak()),
+                };
+            });
+        });
+    }
+
+    /// The Open button(s) for a side, platform-appropriate.
+    fn open_buttons(&mut self, ui: &mut egui::Ui, side: RevSide) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if ui.button("Folder…").clicked() {
+                self.pick_folder(side);
+            }
+            if ui.button("Zip…").clicked() {
+                self.pick_zip(side);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if ui.button("Open…").clicked() {
+                self.pick_files_web(side, ui.ctx());
+            }
+        }
+    }
+}
+
+/// The initial empty diff shown before any board is loaded (the welcome screen).
+/// Native start-empty path + tests; web always seeds the demo.
+#[cfg(not(target_arch = "wasm32"))]
+fn empty_diff() -> BoardDiff {
+    BoardDiff {
+        report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
+        layers: Vec::new(),
+    }
+}
+
+/// Build a `BoardDiff` from two loaded source boards, carrying the coordinate
+/// mismatch warning if the formats disagree (same as the CLI startup path).
+fn diff_from_sources(old: &LoadedBoard, new: &LoadedBoard) -> anyhow::Result<BoardDiff> {
+    let mut d = etchy_core::compare_detailed(&old.board, &new.board)?;
+    if let (Some(o), Some(n)) = (old.fmt.as_ref(), new.fmt.as_ref()) {
+        if let Some(w) = etchy_core::coordinate_mismatch_warning(o, n) {
+            d.report.warnings.push(w);
+        }
+    }
+    Ok(d)
+}
+
+/// Basename of a filename string (handles `/` and `\`). Web-only (native uses
+/// `path_label`).
+#[cfg(target_arch = "wasm32")]
+fn basename(name: &str) -> String {
+    name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn path_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string()
+}
+
+/// Native: turn dropped paths into a loaded board. A single dropped folder or
+/// `.zip` loads directly; multiple dropped files are read as individual layers.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedBoard> {
+    use anyhow::Context as _;
+    if paths.len() == 1 {
+        let p = &paths[0];
+        let is_zip = p
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false);
+        if p.is_dir() || is_zip {
+            let (board, fmt) = loader::load_source(p)?;
+            return Ok(LoadedBoard {
+                label: path_label(p),
+                board,
+                fmt,
+            });
+        }
+    }
+    let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+        files.push((path_label(p), bytes));
+    }
+    let (board, fmt) = loader::board_from_bytes(files)?;
+    Ok(LoadedBoard {
+        label: format!("{} files", paths.len()),
+        board,
+        fmt,
+    })
+}
+
 impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Loader (#120): drain any async web file picks, then accept drag-and-drop.
+        #[cfg(target_arch = "wasm32")]
+        self.poll_file_picks();
+        self.handle_dropped_files(ui.ctx());
+
         // Keyboard shortcuts. Suppressed while a text field has focus (the numeric
         // noise-filter / grid-spacing DragValue) so typing digits doesn't switch mode
         // or fire a shortcut. Ctrl+M is modifier-aware (#52, fix #4).
@@ -1650,12 +2116,43 @@ impl eframe::App for ViewApp {
                 )
                 .on_hover_text("Type or drag to set the noise filter exactly (mm²), beyond the slider's range.");
                 ui.separator();
+                // Loader (#120): reopen either revision without leaving the app.
+                if ui
+                    .button("Open A…")
+                    .on_hover_text("Open a different revision A (old)")
+                    .clicked()
+                {
+                    self.open_primary(RevSide::Old, ui.ctx());
+                }
+                if ui
+                    .button("Open B…")
+                    .on_hover_text("Open a different revision B (new)")
+                    .clicked()
+                {
+                    self.open_primary(RevSide::New, ui.ctx());
+                }
+                ui.separator();
                 // Warning chip lives IN the controls row (no separate row that can
                 // reflow the canvas — #49). Overlay floats; ASCII glyph (no tofu).
                 let now = ui.ctx().input(|i| i.time);
                 self.warnings_ui(ui, now);
             });
         });
+
+        // No board loaded yet → welcome / open screen. Returning here skips the
+        // layer list + canvas, which assume at least one layer (#120).
+        if self.diff.layers.is_empty() {
+            self.welcome_ui(ui);
+            return;
+        }
+
+        // A reopen that failed while a board is already shown: banner it (the
+        // welcome screen shows the same error inline in the empty state).
+        if let Some(err) = self.load_error.clone() {
+            egui::Panel::top("load_error").show_inside(ui, |ui| {
+                ui.colored_label(C_REMOVED, format!("[!] load failed — {err}"));
+            });
+        }
 
         egui::Panel::left("layers")
             .resizable(true)
@@ -3170,6 +3667,7 @@ mod tests {
                     super::C_ADDED,
                     super::C_REMOVED,
                     0.0,
+                    false, // skip_base: CPU path draws everything in this bench
                 );
                 sink += shapes.len();
             }

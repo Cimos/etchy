@@ -38,6 +38,13 @@ egui.workspace = true
 anyhow.workspace = true
 # Settings (#52) are serialized via eframe's storage; serde derive lives here.
 serde.workspace = true
+# Zip fab-pack reader (#120). default-features=false + deflate keeps it lean and
+# wasm-friendly (in-memory Cursor, no filesystem). MIT.
+zip = { version = "4.2.0", default-features = false, features = ["deflate"] }
+# File/folder dialog + browser file picker (#120). rfd has first-class wasm
+# support, so it's all-targets: gtk3 backend on Linux, the HTML file API on web.
+# MIT — cargo-deny clean.
+rfd = "0.17.2"
 
 [dev-dependencies]
 # Round-trip test for the persisted Settings struct (#52).
