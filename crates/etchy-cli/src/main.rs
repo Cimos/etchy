@@ -37,10 +37,18 @@ impl From<Exit> for ExitCode {
 #[derive(Parser, Debug)]
 #[command(name = "etchy", version, about)]
 struct Cli {
-    /// Old revision: a directory of Gerber files.
+    /// Old revision: a directory of Gerber/Excellon files, or a git ref (see
+    /// `--git` / the optional [SUBDIR] argument).
     old: PathBuf,
-    /// New revision: a directory of Gerber files.
+    /// New revision: a directory, or a git ref.
     new: PathBuf,
+    /// Optional: with git refs, the subdirectory in the repo where the fab files
+    /// live (default: the repo root). Its presence implies `--git`.
+    subdir: Option<PathBuf>,
+    /// Treat OLD and NEW as git refs and read the committed Gerbers at each (no
+    /// checkout). Auto-enabled when OLD is not an existing directory.
+    #[arg(long)]
+    git: bool,
     /// Output format: a terminal summary, machine-readable JSON, or GitHub
     /// Markdown (for a CI step-summary / PR comment).
     #[arg(long, value_enum, default_value_t = Format::Summary)]
@@ -207,10 +215,29 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<DiffReport> {
-    let (old, of) = load_board(&cli.old)
-        .with_context(|| format!("loading old revision {}", cli.old.display()))?;
-    let (new, nf) = load_board(&cli.new)
-        .with_context(|| format!("loading new revision {}", cli.new.display()))?;
+    // Git mode when asked (--git), when a [SUBDIR] is given, or auto when OLD is
+    // not an existing directory (so `etchy v1 v2` "just works" in a repo).
+    let git_mode = cli.git || cli.subdir.is_some() || !cli.old.is_dir();
+    let (old, of, new, nf) = if git_mode {
+        let subdir = cli
+            .subdir
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .unwrap_or(".");
+        let old_ref = cli.old.to_string_lossy();
+        let new_ref = cli.new.to_string_lossy();
+        let (old, of) = load_board_git(&old_ref, subdir)
+            .with_context(|| format!("loading old revision {old_ref}:{subdir}"))?;
+        let (new, nf) = load_board_git(&new_ref, subdir)
+            .with_context(|| format!("loading new revision {new_ref}:{subdir}"))?;
+        (old, of, new, nf)
+    } else {
+        let (old, of) = load_board(&cli.old)
+            .with_context(|| format!("loading old revision {}", cli.old.display()))?;
+        let (new, nf) = load_board(&cli.new)
+            .with_context(|| format!("loading new revision {}", cli.new.display()))?;
+        (old, of, new, nf)
+    };
 
     let diff = compare_detailed(&old, &new).context("comparing revisions")?;
     let mut report = diff.report.clone();
@@ -242,6 +269,53 @@ const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Walk a directory (one level), read each Gerber file, classify it, and
 /// polygonize it into a [`Layer`]. I/O + path/naming policy live here, not in core.
+/// Build a board from an in-memory set of `(filename, bytes)` — the shared
+/// classify + route (Gerber / Excellon / skip) behind both directory and git-ref
+/// loading (#93). Non-Gerber, non-Excellon files are skipped.
+fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<GerberFormat>)> {
+    let mut layers = Vec::new();
+    let mut fmt = None;
+    for (name, bytes) in files {
+        if bytes.len() as u64 > MAX_LAYER_FILE_BYTES {
+            anyhow::bail!(
+                "{name} is {} bytes, over the {MAX_LAYER_FILE_BYTES}-byte per-file limit",
+                bytes.len()
+            );
+        }
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) => (s, e),
+            None => (name.as_str(), ""),
+        };
+        let kind = etchy_core::classify(stem, ext);
+        // Gerber layer, Excellon/NC drill, or neither (job file, README) — skip the
+        // last, but route drill files through the Excellon front-end (#62) so drill
+        // changes actually diff instead of being silently dropped.
+        let geometry = if etchy_core::looks_like_gerber(&bytes) {
+            if fmt.is_none() {
+                fmt = etchy_core::gerber_format(&bytes).ok();
+            }
+            std::sync::Arc::new(
+                etchy_core::polygonize_gerber(&bytes)
+                    .with_context(|| format!("processing layer {name}"))?,
+            )
+        } else if etchy_core::looks_like_excellon(&bytes) {
+            std::sync::Arc::new(
+                etchy_core::resolve_excellon(&bytes)
+                    .with_context(|| format!("processing drill layer {name}"))?,
+            )
+        } else {
+            continue;
+        };
+        layers.push(Layer {
+            kind,
+            label: name,
+            geometry,
+        });
+    }
+    Ok((Board { layers }, fmt))
+}
+
+/// Walk a directory (one level) and load it as a revision.
 fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
     if !dir.is_dir() {
         anyhow::bail!("{} is not a directory", dir.display());
@@ -253,8 +327,7 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
         .collect();
     entries.sort();
 
-    let mut layers = Vec::new();
-    let mut fmt = None;
+    let mut files = Vec::with_capacity(entries.len());
     for path in entries {
         let len = path
             .metadata()
@@ -266,41 +339,57 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
                 path.display()
             );
         }
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        let kind = etchy_core::classify(stem, ext);
-        let label = path
+        let name = path
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or(stem)
+            .unwrap_or_default()
             .to_string();
-        // Gerber layer, Excellon/NC drill, or neither (job file, README) — skip the
-        // last, but route drill files through the Excellon front-end (#62) so drill
-        // changes actually diff instead of being silently dropped.
-        let geometry = if etchy_core::looks_like_gerber(&bytes) {
-            if fmt.is_none() {
-                fmt = etchy_core::gerber_format(&bytes).ok();
-            }
-            std::sync::Arc::new(
-                etchy_core::polygonize_gerber(&bytes)
-                    .with_context(|| format!("processing layer {label}"))?,
-            )
-        } else if etchy_core::looks_like_excellon(&bytes) {
-            std::sync::Arc::new(
-                etchy_core::resolve_excellon(&bytes)
-                    .with_context(|| format!("processing drill layer {label}"))?,
-            )
-        } else {
-            continue;
-        };
-        layers.push(Layer {
-            kind,
-            label,
-            geometry,
-        });
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        files.push((name, bytes));
     }
-    Ok((Board { layers }, fmt))
+    board_from_files(files)
+}
+
+/// Load a revision straight from a git ref — `etchy <refA> <refB> [subdir]` over a
+/// repo of committed Gerbers, no checkout (#M2). Lists the blobs at
+/// `<ref>:<subdir>` via `git ls-tree` and reads each with `git show`.
+fn load_board_git(gitref: &str, subdir: &str) -> Result<(Board, Option<GerberFormat>)> {
+    let listing = git_stdout(&["ls-tree", "-r", "-z", "--name-only", gitref, "--", subdir])
+        .with_context(|| format!("listing gerbers at {gitref}:{subdir}"))?;
+    let paths: Vec<&str> = listing.split('\0').filter(|s| !s.is_empty()).collect();
+    if paths.is_empty() {
+        anyhow::bail!("no files found at git ref {gitref}:{subdir}");
+    }
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let bytes = git_bytes(&["show", &format!("{gitref}:{path}")])
+            .with_context(|| format!("reading {gitref}:{path}"))?;
+        let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+        files.push((name, bytes));
+    }
+    board_from_files(files)
+}
+
+/// Run `git <args>` and return its stdout as text, failing loud on a non-zero exit.
+fn git_stdout(args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&git_bytes(args)?).into_owned())
+}
+
+/// Run `git <args>` and return its raw stdout bytes (Gerber/Excellon are ASCII,
+/// but blobs are read as bytes so nothing is mangled).
+fn git_bytes(args: &[&str]) -> Result<Vec<u8>> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .output()
+        .context("running git (is it installed and are you inside the repo?)")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out.stdout)
 }
 
 /// Write one SVG per *changed* layer into `dir` (created if missing). Filenames
