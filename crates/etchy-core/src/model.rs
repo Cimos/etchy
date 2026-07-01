@@ -24,6 +24,10 @@ pub enum LayerKind {
     BottomPaste,
     Drill,
     Outline,
+    /// Fabrication documentation (drill drawing/guide, pad master, assembly).
+    /// Not a physical board layer — never diffed as copper; kept distinct from
+    /// `Other` so Altium doc exports don't show up as anonymous "other".
+    Documentation,
     Other,
 }
 
@@ -49,6 +53,7 @@ impl LayerKind {
             LayerKind::BottomPaste => "bottom-paste",
             LayerKind::Drill => "drill",
             LayerKind::Outline => "outline",
+            LayerKind::Documentation => "documentation",
             LayerKind::Other => "other",
         }
     }
@@ -75,7 +80,8 @@ impl LayerKind {
             LayerKind::BottomPaste => (8, 0),
             LayerKind::Drill => (9, 0),
             LayerKind::Outline => (10, 0),
-            LayerKind::Other => (11, 0),
+            LayerKind::Documentation => (11, 0),
+            LayerKind::Other => (12, 0),
         }
     }
 }
