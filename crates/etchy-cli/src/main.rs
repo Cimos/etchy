@@ -141,12 +141,6 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
             );
         }
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        if !etchy_core::looks_like_gerber(&bytes) {
-            continue; // not a Gerber layer (e.g. drill, job file) — Excellon is a later increment
-        }
-        if fmt.is_none() {
-            fmt = etchy_core::gerber_format(&bytes).ok();
-        }
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let kind = etchy_core::classify(stem, ext);
@@ -155,10 +149,25 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
             .and_then(|s| s.to_str())
             .unwrap_or(stem)
             .to_string();
-        let geometry = std::sync::Arc::new(
-            etchy_core::polygonize_gerber(&bytes)
-                .with_context(|| format!("processing layer {label}"))?,
-        );
+        // Gerber layer, Excellon/NC drill, or neither (job file, README) — skip the
+        // last, but route drill files through the Excellon front-end (#62) so drill
+        // changes actually diff instead of being silently dropped.
+        let geometry = if etchy_core::looks_like_gerber(&bytes) {
+            if fmt.is_none() {
+                fmt = etchy_core::gerber_format(&bytes).ok();
+            }
+            std::sync::Arc::new(
+                etchy_core::polygonize_gerber(&bytes)
+                    .with_context(|| format!("processing layer {label}"))?,
+            )
+        } else if etchy_core::looks_like_excellon(&bytes) {
+            std::sync::Arc::new(
+                etchy_core::resolve_excellon(&bytes)
+                    .with_context(|| format!("processing drill layer {label}"))?,
+            )
+        } else {
+            continue;
+        };
         layers.push(Layer {
             kind,
             label,
