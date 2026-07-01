@@ -496,6 +496,12 @@ fn layer_type_color(kind: etchy_core::LayerKind, theme: Theme) -> Color32 {
             Color32::from_rgb(0x4a, 0x55, 0x68),
         ),
         Outline => (C_COPPER, C_COPPER),
+        // Fab documentation (drill drawing/guide, pad master) — a parchment tan so
+        // it reads as a drawing/annotation, distinct from anonymous "other".
+        Documentation => (
+            Color32::from_rgb(0x9a, 0x8c, 0x6b),
+            Color32::from_rgb(0x6b, 0x60, 0x48),
+        ),
         Other => (C_BASE, Color32::from_rgb(0x6b, 0x72, 0x80)),
     };
     match theme {
@@ -859,6 +865,7 @@ fn short_layer_name(kind: etchy_core::LayerKind) -> String {
         InnerCopper(n) => format!("inner {n}"),
         Drill => "drill".to_string(),
         Outline => "outline".to_string(),
+        Documentation => "docs".to_string(),
         Other => "other".to_string(),
     }
 }
@@ -872,7 +879,7 @@ fn layer_group(kind: etchy_core::LayerKind) -> LayerGroup {
         TopSilk | BottomSilk => LayerGroup::Silk,
         TopPaste | BottomPaste => LayerGroup::Paste,
         Drill => LayerGroup::Drill,
-        Outline => LayerGroup::Mechanical,
+        Outline | Documentation => LayerGroup::Mechanical,
         Other => LayerGroup::Other,
     }
 }

@@ -32,6 +32,14 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
             return LayerKind::InnerCopper(n);
         }
     }
+    // Altium fabrication-documentation gerbers: drill drawing (`.gd*`), drill
+    // guide (`.gg*`), pad master (`.gpt`/`.gpb`). These are drawings/masters, not
+    // board copper and not the real Excellon drill file — classify by extension
+    // BEFORE the stem heuristics below, so a `DrillDrawing.gd1` isn't grabbed by
+    // the `has("DRILL")` branch and mislabelled as the actual drill layer.
+    if e.starts_with("gd") || e.starts_with("gg") || e == "gpt" || e == "gpb" {
+        return LayerKind::Documentation;
+    }
     let has = |needle: &str| s.contains(needle);
     if has("F_CU") || has("F.CU") || e == "gtl" {
         LayerKind::TopCopper
@@ -51,7 +59,7 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
         LayerKind::BottomPaste
     } else if has("DRILL") || e == "drl" || e == "xln" {
         LayerKind::Drill
-    } else if has("EDGE") || has("OUTLINE") || e == "gko" || e == "gm1" {
+    } else if has("EDGE") || has("OUTLINE") || e == "gko" || e == "gm1" || e == "gm" {
         LayerKind::Outline
     } else {
         LayerKind::Other
@@ -100,6 +108,25 @@ mod tests {
         assert_eq!(classify("board-Edge_Cuts", "gm1"), LayerKind::Outline);
         assert_eq!(classify("something", "gtl"), LayerKind::TopCopper);
         assert_eq!(classify("random", "txt"), LayerKind::Other);
+    }
+
+    #[test]
+    fn classify_altium_documentation() {
+        // Drill drawing / guide and pad master → Documentation, not Other.
+        assert_eq!(classify("board", "gd1"), LayerKind::Documentation);
+        assert_eq!(classify("board", "gg1"), LayerKind::Documentation);
+        assert_eq!(classify("board", "gpt"), LayerKind::Documentation);
+        assert_eq!(classify("board", "gpb"), LayerKind::Documentation);
+        // Extension wins over a "DRILL" in the stem: a drill *drawing* is docs,
+        // not the actual (Excellon) drill layer.
+        assert_eq!(classify("DrillDrawing", "gd1"), LayerKind::Documentation);
+        // The real Excellon drill file is still Drill.
+        assert_eq!(classify("board-PTH", "drl"), LayerKind::Drill);
+        // Altium profile/mechanical outline extensions still map to Outline, and
+        // paste (.gtp/.gbp) is not confused with pad master (.gpt/.gpb).
+        assert_eq!(classify("board", "gm"), LayerKind::Outline);
+        assert_eq!(classify("board", "gtp"), LayerKind::TopPaste);
+        assert_eq!(classify("board", "gbp"), LayerKind::BottomPaste);
     }
 
     #[test]
