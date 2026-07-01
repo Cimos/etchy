@@ -2900,11 +2900,20 @@ impl ViewApp {
         }
 
         // In Before/After the whole board is drawn in its layer colour (not the
-        // green "added") — say so, so it's not mistaken for the diff (#3).
+        // green "added") — say so, so it's not mistaken for the diff (#3). Split and
+        // Swipe likewise show the RAW boards, not the computed diff, and skip the
+        // noise filter — spell that out so a filtered Overlay and a raw Split aren't
+        // read as disagreeing about "what changed" (#91).
         let mode_note = match self.mode {
             Mode::Before => Some("showing OLD board (before)"),
             Mode::After => Some("showing NEW board (after)"),
-            _ => None,
+            Mode::Split => {
+                Some("raw boards: OLD (left) | NEW (right) — diff + noise filter apply in Overlay")
+            }
+            Mode::Swipe => {
+                Some("raw boards, swipe OLD / NEW — diff + noise filter apply in Overlay")
+            }
+            Mode::Overlay => None,
         };
         if let Some(note) = mode_note {
             painter.text(
