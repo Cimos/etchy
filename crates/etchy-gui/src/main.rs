@@ -160,19 +160,25 @@ fn board_from_files(
     let mut fmt = None;
     for f in files {
         let bytes = f.contents();
-        if !etchy_core::looks_like_gerber(bytes) {
-            continue;
-        }
-        if fmt.is_none() {
-            fmt = etchy_core::gerber_format(bytes).ok();
-        }
         let name = f
             .path()
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), ""));
-        if let Ok(geometry) = etchy_core::polygonize_gerber(bytes) {
+        // Gerber or Excellon/NC drill (#62); anything else is skipped. Best-effort:
+        // a layer that fails to parse is dropped rather than crashing the demo.
+        let geometry = if etchy_core::looks_like_gerber(bytes) {
+            if fmt.is_none() {
+                fmt = etchy_core::gerber_format(bytes).ok();
+            }
+            etchy_core::polygonize_gerber(bytes).ok()
+        } else if etchy_core::looks_like_excellon(bytes) {
+            etchy_core::resolve_excellon(bytes).ok()
+        } else {
+            None
+        };
+        if let Some(geometry) = geometry {
             layers.push(etchy_core::Layer {
                 kind: etchy_core::classify(stem, ext),
                 label: name.clone(),
