@@ -41,16 +41,16 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # Gating on fmt/clippy is enabled once a local toolchain has run `cargo fmt`
-      # and the real dependencies land (Milestone 1). Until then they're
-      # informational so the Phase-0 scaffold isn't blocked on un-runnable lints.
-      - name: rustfmt (informational)
+      # fmt + clippy now gate the build (the real deps have landed). Linux-only:
+      # rustfmt is platform-independent, and linting once avoids red builds from
+      # platform-specific clippy lints we can't reproduce on the other runners.
+      - name: rustfmt
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
-        continue-on-error: true
 
-      - name: clippy (informational)
-        run: cargo clippy --workspace --all-targets
-        continue-on-error: true
+      - name: clippy (warnings are errors)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   wasm:
     name: web build (wasm)
