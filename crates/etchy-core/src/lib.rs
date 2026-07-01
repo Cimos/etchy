@@ -22,6 +22,7 @@ pub mod geom;
 pub mod gerber;
 pub mod model;
 pub mod naming;
+pub mod placement;
 pub mod report;
 pub mod view;
 
@@ -37,6 +38,7 @@ pub use geom::CIRCLE_SEGMENTS;
 pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};
 pub use model::{pair_layers, same_board_guard, Board, Layer, LayerKind, LayerPairing};
 pub use naming::{classify, looks_like_gerber};
+pub use placement::{looks_like_placement, resolve_placement};
 pub use report::{DiffReport, LayerReport, LayerStatus, Totals, SCHEMA_VERSION};
 pub use view::{BoardDiff, LayerView};
 

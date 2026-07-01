@@ -28,6 +28,9 @@ pub enum LayerKind {
     /// Not a physical board layer — never diffed as copper; kept distinct from
     /// `Other` so Altium doc exports don't show up as anonymous "other".
     Documentation,
+    /// Pick-and-place / component centroids, rendered as position+rotation markers
+    /// (#115) — a placement diff, not copper geometry.
+    Placement,
     Other,
 }
 
@@ -54,6 +57,7 @@ impl LayerKind {
             LayerKind::Drill => "drill",
             LayerKind::Outline => "outline",
             LayerKind::Documentation => "documentation",
+            LayerKind::Placement => "placement",
             LayerKind::Other => "other",
         }
     }
@@ -81,7 +85,8 @@ impl LayerKind {
             LayerKind::Drill => (9, 0),
             LayerKind::Outline => (10, 0),
             LayerKind::Documentation => (11, 0),
-            LayerKind::Other => (12, 0),
+            LayerKind::Placement => (12, 0),
+            LayerKind::Other => (13, 0),
         }
     }
 }

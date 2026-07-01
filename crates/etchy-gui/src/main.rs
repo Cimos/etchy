@@ -167,8 +167,10 @@ fn board_from_files(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), ""));
-        // Gerber or Excellon/NC drill (#62); anything else is skipped. Best-effort:
-        // a layer that fails to parse is dropped rather than crashing the demo.
+        let mut kind = etchy_core::classify(stem, ext);
+        // Gerber, Excellon/NC drill (#62), or pick-and-place (#115); anything else
+        // is skipped. Best-effort: a layer that fails to parse is dropped rather
+        // than crashing the demo.
         let geometry = if etchy_core::looks_like_gerber(bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(bytes).ok();
@@ -176,12 +178,15 @@ fn board_from_files(
             etchy_core::polygonize_gerber(bytes).ok()
         } else if etchy_core::looks_like_excellon(bytes) {
             etchy_core::resolve_excellon(bytes).ok()
+        } else if etchy_core::looks_like_placement(bytes) {
+            kind = etchy_core::LayerKind::Placement;
+            etchy_core::resolve_placement(bytes).ok()
         } else {
             None
         };
         if let Some(geometry) = geometry {
             layers.push(etchy_core::Layer {
-                kind: etchy_core::classify(stem, ext),
+                kind,
                 label: name.clone(),
                 geometry: std::sync::Arc::new(geometry),
             });
@@ -545,6 +550,12 @@ fn layer_type_color(kind: etchy_core::LayerKind, theme: Theme) -> Color32 {
         Documentation => (
             Color32::from_rgb(0x9a, 0x8c, 0x6b),
             Color32::from_rgb(0x6b, 0x60, 0x48),
+        ),
+        // Pick-and-place markers (#115) — a violet so parts read distinct from
+        // copper/silk/docs.
+        Placement => (
+            Color32::from_rgb(0xa2, 0x7c, 0xd8),
+            Color32::from_rgb(0x6f, 0x52, 0x9a),
         ),
         Other => (C_BASE, Color32::from_rgb(0x6b, 0x72, 0x80)),
     };
@@ -1017,6 +1028,7 @@ fn short_layer_name(kind: etchy_core::LayerKind) -> String {
         Drill => "drill".to_string(),
         Outline => "outline".to_string(),
         Documentation => "docs".to_string(),
+        Placement => "placement".to_string(),
         Other => "other".to_string(),
     }
 }
@@ -1030,7 +1042,7 @@ fn layer_group(kind: etchy_core::LayerKind) -> LayerGroup {
         TopSilk | BottomSilk => LayerGroup::Silk,
         TopPaste | BottomPaste => LayerGroup::Paste,
         Drill => LayerGroup::Drill,
-        Outline | Documentation => LayerGroup::Mechanical,
+        Outline | Documentation | Placement => LayerGroup::Mechanical,
         Other => LayerGroup::Other,
     }
 }
