@@ -702,6 +702,10 @@ struct ViewApp {
     warning_expanded: bool,
     /// `ctx.input().time` when the warning was first shown / last re-expanded.
     warning_shown_at: Option<f64>,
+    /// Startup splash (brand logo screen): the time of the first frame, and whether
+    /// the splash has finished/been dismissed. `None` until the first frame.
+    splash_start: Option<f64>,
+    splash_done: bool,
     /// Index of the board-outline layer (Edge.Cuts/GKO), drawn faintly on every
     /// layer for orientation (G10); None if the board has no outline layer.
     outline: Option<usize>,
@@ -802,6 +806,8 @@ impl ViewApp {
             applied_theme: None,
             warning_expanded: false,
             warning_shown_at: None,
+            splash_start: None,
+            splash_done: false,
             outline,
             show_outline: true,
             cache: None,
@@ -1087,6 +1093,13 @@ const C_REMOVED: Color32 = Color32::from_rgb(0xff, 0x5d, 0x73); // #ff5d73
 const C_BASE: Color32 = Color32::from_rgb(90, 95, 105);
 /// Brand "board dark" — the canvas (PCB) background.
 const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
+
+/// Startup splash (the brand logo screen): hold the wordmark at full opacity for
+/// `HOLD`, then fade over `FADE`. Deliberately brief — a launch-time brand moment,
+/// and any click/key/scroll dismisses it instantly so `etchy-gui old new` lands on
+/// the diff fast.
+const SPLASH_HOLD_SECS: f64 = 0.9;
+const SPLASH_FADE_SECS: f64 = 0.6;
 /// Brand "surface" charcoal — panels/chrome, one step up from the board so the
 /// UI doesn't read as one flat near-black mass.
 const C_SURFACE: Color32 = Color32::from_rgb(0x14, 0x1a, 0x18); // #141a18
@@ -1866,12 +1879,65 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedBoar
     })
 }
 
+impl ViewApp {
+    /// Startup splash — the etchy wordmark over the board-dark, held briefly then
+    /// faded out to reveal the app. Painted on the foreground layer so it covers
+    /// every panel; any pointer press or key skips it, and it's time-based so it
+    /// clears itself even if the window never gets focus.
+    fn splash_ui(&mut self, ui: &egui::Ui, now: f64) {
+        if self.splash_done {
+            return;
+        }
+        let start = *self.splash_start.get_or_insert(now);
+        let elapsed = now - start;
+        let dismiss = ui.input(|i| i.pointer.any_pressed() || !i.keys_down.is_empty());
+        if dismiss || elapsed >= SPLASH_HOLD_SECS + SPLASH_FADE_SECS {
+            self.splash_done = true;
+            return;
+        }
+        let alpha = if elapsed <= SPLASH_HOLD_SECS {
+            1.0
+        } else {
+            1.0 - ((elapsed - SPLASH_HOLD_SECS) / SPLASH_FADE_SECS) as f32
+        }
+        .clamp(0.0, 1.0);
+        let screen = ui.ctx().content_rect();
+        let p = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("etchy-splash"),
+        ));
+        // Board-dark curtain fading to reveal the app underneath.
+        p.rect_filled(screen, 0.0, with_alpha(C_CANVAS, alpha));
+        let c = screen.center();
+        p.text(
+            c - egui::vec2(0.0, 14.0),
+            egui::Align2::CENTER_CENTER,
+            "etchy",
+            egui::FontId::proportional(64.0),
+            with_alpha(C_COPPER, alpha),
+        );
+        p.text(
+            c + egui::vec2(0.0, 34.0),
+            egui::Align2::CENTER_CENTER,
+            "PCB visual + geometric diff",
+            egui::FontId::proportional(17.0),
+            with_alpha(C_CREAM, alpha * 0.85),
+        );
+        ui.ctx().request_repaint(); // keep the fade animating
+    }
+}
+
 impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Loader (#120): drain any async web file picks, then accept drag-and-drop.
         #[cfg(target_arch = "wasm32")]
         self.poll_file_picks();
         self.handle_dropped_files(ui.ctx());
+
+        // Startup splash (foreground overlay; skipped once done). Drawn before the
+        // panels so it covers the welcome screen too, but composited on top.
+        let now = ui.ctx().input(|i| i.time);
+        self.splash_ui(ui, now);
 
         // Keyboard shortcuts. Suppressed while a text field has focus (the numeric
         // noise-filter / grid-spacing DragValue) so typing digits doesn't switch mode
