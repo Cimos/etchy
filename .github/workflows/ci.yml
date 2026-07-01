@@ -41,16 +41,16 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # Gating on fmt/clippy is enabled once a local toolchain has run `cargo fmt`
-      # and the real dependencies land (Milestone 1). Until then they're
-      # informational so the Phase-0 scaffold isn't blocked on un-runnable lints.
-      - name: rustfmt (informational)
+      # fmt + clippy now gate the build (the real deps have landed). Linux-only:
+      # rustfmt is platform-independent, and linting once avoids red builds from
+      # platform-specific clippy lints we can't reproduce on the other runners.
+      - name: rustfmt
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
-        continue-on-error: true
 
-      - name: clippy (informational)
-        run: cargo clippy --workspace --all-targets
-        continue-on-error: true
+      - name: clippy (warnings are errors)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   wasm:
     name: web build (wasm)
@@ -73,11 +73,34 @@ jobs:
             | tar -xz -C "$HOME/.cargo/bin"
           trunk --version
 
+      # Prebuilt binaryen, pinned. trunk's own wasm-opt is disabled in index.html
+      # (its bundled binaryen fails on Rust's bulk-memory output, #99); we run
+      # wasm-opt ourselves below with all features enabled.
+      - name: Install binaryen (wasm-opt, prebuilt, pinned)
+        run: |
+          set -euo pipefail
+          ver=version_123
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${ver}/binaryen-${ver}-x86_64-linux.tar.gz" \
+            | tar -xz -C "$HOME"
+          echo "$HOME/binaryen-${ver}/bin" >> "$GITHUB_PATH"
+
       # Builds the browser viewer, which embeds the committed demo board via
       # include_dir! — the gate that keeps the public demo board buildable.
       - name: Build web viewer (embeds the committed demo board)
         working-directory: crates/etchy-gui
         run: trunk build --release --filehash false
+
+      # Size-optimize the bundle the way deploy does, and prove it validates. This
+      # is the real #99 gate: a regression that reintroduces the bulk-memory issue
+      # fails here instead of silently shipping a broken/unoptimized bundle.
+      - name: Optimize wasm bundle (wasm-opt -Oz)
+        working-directory: crates/etchy-gui
+        run: |
+          set -euo pipefail
+          before=$(stat -c%s dist/etchy-gui_bg.wasm)
+          wasm-opt -all -Oz --strip-debug dist/etchy-gui_bg.wasm -o dist/etchy-gui_bg.wasm
+          after=$(stat -c%s dist/etchy-gui_bg.wasm)
+          echo "wasm bundle: $before -> $after bytes"
 
       - name: Verify bundle produced
         run: |
