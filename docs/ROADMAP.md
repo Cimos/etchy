@@ -48,7 +48,20 @@ a different tool.
 Time estimates are deliberately omitted (solo, open-source cadence); milestones
 are ordered by dependency and each is independently shippable.
 
-### Phase 0 — Foundations & de-risking
+### Where we are — 2026-07-01
+
+Phase 0 and Milestone 1 are done; the CI surface (M2) is roughly half done; and
+1.0 distribution (M4) is starting now.
+
+| Milestone | Status | Notes |
+|---|---|---|
+| Phase 0 — foundations | ✅ done | Cargo workspace + fmt/clippy/test/build matrix (fmt+clippy now gate); engine + Gerber/Excellon parse spikes; golden-corpus + property + fuzz tests wired into CI |
+| M1 — MVP (engine / CLI / GUI) | ✅ done | Gerber **and** Excellon parse → per-layer boolean diff → area/region magnitudes → SVG/JSON/Markdown; native **and** web egui viewer (layer list, overlay/before/after/split/swipe, loader, settings panel, splash). Open M1 item: a self-contained **HTML** report. |
+| M2 — CI surface | ⏳ ~half | Shipped: composite **GitHub Action**, Markdown PR summary, versioned **JSON v1**, exit codes (0/1/2), per-file input caps. To do: **per-layer thresholds** and **git-refs invocation** (`etchy refA refB`). |
+| M3 — PDF + dense-board hardening | ⏳ perf mostly done | Shipped: rayon per-layer diff, all-layers GPU pan path, per-layer DoS ceilings, tessellation-robust region counts. To do: schematic-**PDF** pixel diff (still a stub). |
+| M4 — 1.0 (distribution / docs) | 🔜 starting | Prebuilt per-OS binaries + distroless container landing now; landing/docs site already deployed. To do: trust/limitations doc, CLI reference, sample boards. |
+
+### Phase 0 — Foundations & de-risking ✅
 The big-bang rewrite's main risk is time-to-first-value; Phase 0 buys down the
 highest-uncertainty pieces before committing to the full build.
 
@@ -70,7 +83,7 @@ highest-uncertainty pieces before committing to the full build.
 **Exit:** the engine spike diffs a real dense board correctly and fast enough; the
 corpus harness runs in CI.
 
-### Milestone 1 — MVP (engine + CLI + GUI)
+### Milestone 1 — MVP (engine + CLI + GUI) ✅
 The first genuinely useful etchy. A user can diff two Gerber/Excellon revisions
 and *see* + *export* the result.
 
@@ -89,7 +102,7 @@ and *see* + *export* the result.
 **Exit:** "drop two fab packs, see and export the diff" works on real boards,
 trustworthy on the corpus.
 
-### Milestone 2 — CI surface
+### Milestone 2 — CI surface ⏳
 Make etchy a first-class pipeline gate (the primary surface).
 
 - **Thresholds + exit codes:** gate on changed-area / region-count, **scopable per
@@ -103,7 +116,7 @@ Make etchy a first-class pipeline gate (the primary surface).
 **Exit:** a PR that changes a board shows an inline visual diff and can fail CI on
 a threshold.
 
-### Milestone 3 — Schematic PDF + dense-board hardening
+### Milestone 3 — Schematic PDF + dense-board hardening ⏳
 - **Schematic-PDF pixel diff** ported (page-by-page), as a supported secondary mode.
 - **Performance pass** for dense/many-layer boards: parallelism across layers,
   memory ceilings, adaptive work; benchmarked against targets.
@@ -111,7 +124,7 @@ a threshold.
 
 **Exit:** smooth on a 16-layer dense board; PDF diff usable.
 
-### Milestone 4 — 1.0 (distribution, docs, trust complete)
+### Milestone 4 — 1.0 (distribution, docs, trust complete) 🔜
 - **Distribution:** per-OS static binaries (incl. Linux musl) + **distroless
   container**; reproducible release pipeline.
 - **Docs site:** install, CLI reference, CI recipes, JSON schema, "how the diff
