@@ -41,21 +41,29 @@ pub fn board_from_bytes(
                 bytes.len()
             );
         }
-        if !etchy_core::looks_like_gerber(&bytes) {
-            continue;
-        }
-        if fmt.is_none() {
-            fmt = etchy_core::gerber_format(&bytes).ok();
-        }
         let (stem, ext) = match name.rsplit_once('.') {
             Some((s, e)) => (s, e),
             None => (name.as_str(), ""),
         };
         let kind = etchy_core::classify(stem, ext);
-        let geometry = std::sync::Arc::new(
-            etchy_core::polygonize_gerber(&bytes)
-                .with_context(|| format!("processing layer {name}"))?,
-        );
+        // Gerber layer, Excellon/NC drill, or neither (job file, README). Route
+        // drill files through the Excellon front-end (#62) so drill changes diff.
+        let geometry = if etchy_core::looks_like_gerber(&bytes) {
+            if fmt.is_none() {
+                fmt = etchy_core::gerber_format(&bytes).ok();
+            }
+            std::sync::Arc::new(
+                etchy_core::polygonize_gerber(&bytes)
+                    .with_context(|| format!("processing layer {name}"))?,
+            )
+        } else if etchy_core::looks_like_excellon(&bytes) {
+            std::sync::Arc::new(
+                etchy_core::resolve_excellon(&bytes)
+                    .with_context(|| format!("processing drill layer {name}"))?,
+            )
+        } else {
+            continue;
+        };
         layers.push(Layer {
             kind,
             label: name,
