@@ -33,9 +33,13 @@ and machine-readable magnitudes — on any Gerber/Excellon fab pack.
 ## Scope
 
 **In:** Gerber RS-274X/X2, Excellon drill, schematic-PDF (pixel page-diff, kept).
-**Out (explicit non-goals):** native CAD ingestion (KiCad/Altium/IPC-2581/ODB++),
-net/connectivity diff, BOM/component diff, DRC/rule-checking. Anything here is
-"Beyond 1.0", not forgotten — see the bottom.
+**Out (explicit non-goals):** net/connectivity diff, BOM/component diff,
+DRC/rule-checking, Altium / IPC-2581 / ODB++ ingestion. Anything here is "Beyond
+1.0", not forgotten — see the bottom.
+**Accepted future goal (post-1.0, not yet scheduled):** native KiCad
+`.kicad_pcb` ingestion, so KiCad users can skip the gerber-export step. Tracked
+in #122. KiCad *schematic* (`.kicad_sch`) diff stays out — that's connectivity,
+a different tool.
 
 ---
 
@@ -122,8 +126,10 @@ and trust the result.
 
 ## Beyond 1.0 (parked, not forgotten)
 Revisit only if demand appears; each was explicitly deferred in discovery:
-- Native CAD ingestion (KiCad `.kicad_pcb` via parser or `kicad-cli` plot bridge;
-  Altium) → unlocks object identity + git-native rev-to-rev for KiCad users.
+- **Native KiCad `.kicad_pcb` ingestion (#122) — accepted future goal.** Via a
+  parser or a `kicad-cli` plot bridge → lets KiCad users skip the gerber export,
+  and unlocks object identity + git-native rev-to-rev. Post-1.0, not scheduled.
+- Native Altium ingestion (harder — less-open format).
 - Structured change-lists & per-object deltas ("via moved 0.3 mm") — needs object
   identity from native CAD.
 - IPC-2581 / ODB++ ingestion (carry net + component data).
