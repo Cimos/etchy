@@ -1,18 +1,74 @@
 //! Filesystem → engine input. The GUI owns I/O + path policy (like the CLI); the
 //! pure naming/classify lives in `etchy_core::naming`.
 
+use std::io::{Cursor, Read};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use etchy_core::{Board, Layer};
+use etchy_core::{Board, GerberFormat, Layer};
 
 /// Reject any single layer file larger than this before reading it into RAM. The
 /// loaders copy the bytes a few times (read → utf8 → normalized), so an oversized
 /// or junk file is a quick OOM (#82). 100 MiB is far above any real fab layer.
 const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Reject a `.zip` fab pack larger than this before reading it into RAM. A pack of
+/// Gerber text is small even zipped; 500 MiB is a generous ceiling that still
+/// guards against a junk/huge file (#82). Native only (the whole-file read guard);
+/// web hands us the bytes already, guarded per-entry in [`load_zip`].
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_ZIP_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Build a [`Board`] from an in-memory set of `(filename, bytes)` layer files.
+/// Shared by every input path — the folder loader, the `.zip` loader, and GUI
+/// drag-and-drop — so the classify/sniff/polygonize logic lives in exactly one
+/// place (#93). Files are processed in filename order for a deterministic layer
+/// order. Non-Gerber files are skipped; a Gerber that fails to polygonize is a
+/// hard error (fail-loud over wrong-but-quiet).
+pub fn board_from_bytes(
+    files: impl IntoIterator<Item = (String, Vec<u8>)>,
+) -> Result<(Board, Option<etchy_core::GerberFormat>)> {
+    let mut files: Vec<(String, Vec<u8>)> = files.into_iter().collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut layers = Vec::new();
+    let mut fmt = None;
+    for (name, bytes) in files {
+        if bytes.len() as u64 > MAX_LAYER_FILE_BYTES {
+            bail!(
+                "{name} is {} bytes, over the {MAX_LAYER_FILE_BYTES}-byte per-file limit",
+                bytes.len()
+            );
+        }
+        if !etchy_core::looks_like_gerber(&bytes) {
+            continue;
+        }
+        if fmt.is_none() {
+            fmt = etchy_core::gerber_format(&bytes).ok();
+        }
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) => (s, e),
+            None => (name.as_str(), ""),
+        };
+        let kind = etchy_core::classify(stem, ext);
+        let geometry = std::sync::Arc::new(
+            etchy_core::polygonize_gerber(&bytes)
+                .with_context(|| format!("processing layer {name}"))?,
+        );
+        layers.push(Layer {
+            kind,
+            label: name,
+            geometry,
+        });
+    }
+    Ok((Board { layers }, fmt))
+}
+
 /// Walk a directory (one level), read each Gerber file, classify it, and
 /// polygonize it into a [`Layer`]. Non-Gerber files are skipped (Excellon later).
+/// Native only — the web build has no filesystem (it loads via bytes/zip).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>)> {
     if !dir.is_dir() {
         bail!("{} is not a directory", dir.display());
@@ -24,8 +80,9 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
         .collect();
     entries.sort();
 
-    let mut layers = Vec::new();
-    let mut fmt = None;
+    // Read the bytes here (with a pre-read size guard so a huge file can't OOM
+    // us before we even look at it, #82) and hand the shared builder the set.
+    let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(entries.len());
     for path in entries {
         let len = path
             .metadata()
@@ -37,30 +94,139 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
                 path.display()
             );
         }
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        if !etchy_core::looks_like_gerber(&bytes) {
-            continue;
-        }
-        if fmt.is_none() {
-            fmt = etchy_core::gerber_format(&bytes).ok();
-        }
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        let kind = etchy_core::classify(stem, ext);
-        let label = path
+        let name = path
             .file_name()
             .and_then(|s| s.to_str())
-            .unwrap_or(stem)
+            .unwrap_or_default()
             .to_string();
-        let geometry = std::sync::Arc::new(
-            etchy_core::polygonize_gerber(&bytes)
-                .with_context(|| format!("processing layer {label}"))?,
-        );
-        layers.push(Layer {
-            kind,
-            label,
-            geometry,
-        });
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        files.push((name, bytes));
     }
-    Ok((Board { layers }, fmt))
+    board_from_bytes(files)
+}
+
+/// Read a `.zip` fab pack (its raw bytes) into a [`Board`]. Entries are flattened
+/// to their basename (a pack zipped with a top folder still classifies correctly),
+/// and each entry's *uncompressed* size is checked before extraction so a zip bomb
+/// can't OOM us. Cross-platform (in-memory) so the same path serves native file
+/// picks and web uploads.
+pub fn load_zip(bytes: Vec<u8>) -> Result<(Board, Option<GerberFormat>)> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("reading zip archive")?;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(zip.len());
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .with_context(|| format!("reading zip entry {i}"))?;
+        if !entry.is_file() {
+            continue;
+        }
+        if entry.size() > MAX_LAYER_FILE_BYTES {
+            bail!(
+                "zip entry {} is {} bytes uncompressed, over the {MAX_LAYER_FILE_BYTES}-byte limit",
+                entry.name(),
+                entry.size()
+            );
+        }
+        // Flatten any in-zip directory to the basename so classification (which
+        // keys on filename) works regardless of how the pack was zipped.
+        let name = entry
+            .name()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let mut buf = Vec::with_capacity(entry.size() as usize);
+        entry
+            .read_to_end(&mut buf)
+            .with_context(|| format!("extracting {name}"))?;
+        files.push((name, buf));
+    }
+    board_from_bytes(files)
+}
+
+/// Load one revision from a filesystem path: a directory of Gerbers, or a `.zip`
+/// fab pack. The native GUI's "Open…" and drag-and-drop both go through here.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_source(path: &Path) -> Result<(Board, Option<GerberFormat>)> {
+    if path.is_dir() {
+        return load_board(path);
+    }
+    let is_zip = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+    if is_zip {
+        let len = path
+            .metadata()
+            .with_context(|| format!("reading metadata for {}", path.display()))?
+            .len();
+        if len > MAX_ZIP_BYTES {
+            bail!(
+                "{} is {len} bytes, over the {MAX_ZIP_BYTES}-byte zip limit",
+                path.display()
+            );
+        }
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        return load_zip(bytes);
+    }
+    bail!("{} is not a folder or a .zip fab pack", path.display())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etchy_core::LayerKind;
+
+    // Minimal valid RS-274X: one 1mm circular flash at the origin.
+    const MIN_GERBER: &[u8] = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
+
+    #[test]
+    fn board_from_bytes_classifies_and_skips_non_gerber() {
+        let files = vec![
+            ("readme.txt".to_string(), b"not a gerber file".to_vec()),
+            ("board-F_Cu.gtl".to_string(), MIN_GERBER.to_vec()),
+        ];
+        let (board, fmt) = board_from_bytes(files).unwrap();
+        assert_eq!(board.layers.len(), 1, "the non-Gerber file is skipped");
+        assert_eq!(board.layers[0].kind, LayerKind::TopCopper);
+        assert_eq!(board.layers[0].label, "board-F_Cu.gtl");
+        assert!(fmt.is_some(), "format sniffed from the one Gerber");
+    }
+
+    #[test]
+    fn board_from_bytes_rejects_oversized() {
+        let big = vec![0u8; (MAX_LAYER_FILE_BYTES + 1) as usize];
+        let err = board_from_bytes(vec![("huge.gtl".to_string(), big)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("per-file limit"), "got: {err}");
+    }
+
+    #[test]
+    fn load_zip_flattens_entries_and_skips_non_gerber() {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            // Zipped under a top folder — load_zip should flatten to the basename.
+            w.start_file("fab/board-F_Cu.gtl", opts).unwrap();
+            w.write_all(MIN_GERBER).unwrap();
+            w.start_file("fab/readme.txt", opts).unwrap();
+            w.write_all(b"just notes").unwrap();
+            w.finish().unwrap();
+        }
+        let (board, fmt) = load_zip(buf).unwrap();
+        assert_eq!(board.layers.len(), 1, "non-Gerber entry skipped");
+        assert_eq!(board.layers[0].kind, LayerKind::TopCopper);
+        assert_eq!(
+            board.layers[0].label, "board-F_Cu.gtl",
+            "flattened basename"
+        );
+        assert!(fmt.is_some());
+    }
 }
