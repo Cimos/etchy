@@ -660,12 +660,12 @@ struct ViewApp {
     /// Always-available faint base behind the diff (G3): Off / Faint / Strong.
     base_level: BaseLevel,
     /// User-configurable diff colors (G3, Altium-compare style). Default to the
-    /// brand green/red; a "Colors" popover edits them.
+    /// brand green/red; a "Settings" popover edits them.
     col_added: Color32,
     col_removed: Color32,
     /// Canvas (board background) colour (#53), kept per-theme so a dark board tuned
     /// in dark mode never leaks into light mode (#31). Resolved via `canvas_color()`;
-    /// editable in the Colors window (active theme) and persisted (#52).
+    /// editable in the Settings window (active theme) and persisted (#52).
     canvas_dark: Color32,
     canvas_light: Color32,
     /// Grid colour (#53), per-theme for the same reason as the canvas (#31).
@@ -674,9 +674,9 @@ struct ViewApp {
     /// Per-layer base/context colour overrides, keyed by the layer's index in
     /// `diff.layers` (default = layer_type_color for that kind) (#21).
     base_overrides: Vec<(usize, Color32)>,
-    /// The Colors editor window is open. A real window (not a menu) so the nested
+    /// The Settings editor window is open. A real window (not a menu) so the nested
     /// colour-picker popup works — a menu_button closed on the first inner click.
-    show_colors: bool,
+    show_settings: bool,
     /// Min-area noise threshold in mm² (G9): diff regions smaller than this are
     /// dropped. 0 disables it. Always surfaced — the caption reports how many were
     /// hidden. Driven by a slider in the top bar.
@@ -778,7 +778,7 @@ impl ViewApp {
             grid_dark: C_GRID_DEFAULT,
             grid_light: C_GRID_DEFAULT_LIGHT,
             base_overrides: Vec::new(),
-            show_colors: false,
+            show_settings: false,
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
@@ -1891,12 +1891,12 @@ impl eframe::App for ViewApp {
             }
         }
         if escape {
-            if self.show_colors {
-                // Esc backs out of the Colours window (#4). An open colour-picker
+            if self.show_settings {
+                // Esc backs out of the Settings window (#4). An open colour-picker
                 // popup consumes the first Esc itself (egui closes it; while its RGB
                 // field has focus our `typing` guard suppresses this handler), so the
                 // next Esc lands here and closes the window.
-                self.show_colors = false;
+                self.show_settings = false;
             } else {
                 // Esc cascades (#50): first clear the in-progress measurement, then a
                 // second Esc (nothing to clear) turns the measure tool off.
@@ -2015,8 +2015,8 @@ impl eframe::App for ViewApp {
                          Off falls back to the CPU path.",
                     );
                 }
-                if ui.selectable_label(self.show_colors, "Colors").clicked() {
-                    self.show_colors = !self.show_colors;
+                if ui.selectable_label(self.show_settings, "Settings").clicked() {
+                    self.show_settings = !self.show_settings;
                 }
                 if self.outline.is_some() {
                     ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
@@ -2040,67 +2040,8 @@ impl eframe::App for ViewApp {
                         self.measure_pts.clear();
                     }
                 }
-                // Units toggle (#50): click to cycle mm → inch → mil (hotkey: U).
-                if ui
-                    .selectable_label(true, format!("units: {}", self.measure_unit.label()))
-                    .on_hover_text("Distance unit for the measure label — click or press U to cycle mm / inch / mil.")
-                    .clicked()
-                {
-                    self.measure_unit = self.measure_unit.next();
-                }
-                ui.separator();
-                // Grid overlay (#51). Colour is a fixed faint default for now —
-                // configurable grid colour is deferred to #53.
-                if ui
-                    .selectable_label(self.show_grid, "Grid")
-                    .on_hover_text("Overlay a faint reference grid (hotkey: G). Grid colour is configurable later (#53).")
-                    .clicked()
-                {
-                    self.show_grid = !self.show_grid;
-                }
-                ui.add(
-                    egui::DragValue::new(&mut self.grid_mm)
-                        .speed(0.1)
-                        .range(0.01..=100.0)
-                        .suffix(" mm"),
-                )
-                .on_hover_text("Grid spacing in mm.");
-                ui.checkbox(&mut self.snap_grid, "snap")
-                    .on_hover_text("Snap measure clicks to the nearest grid intersection.");
-                ui.separator();
-                // Input scheme matching the user's ECAD tool (#54). MVP: picks
-                // which mouse button pans the canvas; persisted via #52.
-                let preset_label = |p: InputPreset| match p {
-                    InputPreset::KiCad => "KiCad",
-                    InputPreset::Altium => "Altium",
-                };
-                egui::ComboBox::from_id_salt("input_preset")
-                    .selected_text(preset_label(self.input_preset))
-                    .show_ui(ui, |ui| {
-                        for p in [InputPreset::Altium, InputPreset::KiCad] {
-                            ui.selectable_value(&mut self.input_preset, p, preset_label(p));
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "Pan mouse button by ECAD tool: \
-                         Altium = right-drag, KiCad = middle/right-drag.",
-                    );
-                ui.separator();
-                // Dark/light toggle. ASCII label — egui's default font has no
-                // sun/moon glyph (it rendered as tofu). Re-applied live in ui().
-                let label = if self.theme == Theme::Dark {
-                    "theme: dark"
-                } else {
-                    "theme: light"
-                };
-                if ui.button(label).clicked() {
-                    self.theme = if self.theme == Theme::Dark {
-                        Theme::Light
-                    } else {
-                        Theme::Dark
-                    };
-                }
+                // Theme, units, grid and input-preset moved into the Settings panel
+                // (#121) to declutter the toolbar; their hotkeys (S/U/G) still work.
                 ui.separator();
                 ui.add(
                     // Linear range (user found the log feel odd — #52). Widened to
@@ -2345,21 +2286,73 @@ impl eframe::App for ViewApp {
             self.draw_canvas(ui);
         });
 
-        // Colors editor — a real Window (not a menu) so the nested colour-picker
+        // Settings editor — a real Window (not a menu) so the nested colour-picker
         // popup works; a menu_button closed on the first click inside it.
-        if self.show_colors {
+        if self.show_settings {
             let mut open = true;
             // Open centered on the screen (#56): pin the first-frame position to the
             // viewport centre via a CENTER_CENTER pivot. egui remembers the dragged
             // position afterwards, so it stays movable.
             let center = ui.ctx().content_rect().center();
-            egui::Window::new("Colors")
+            egui::Window::new("Settings")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .default_pos(center)
                 .pivot(egui::Align2::CENTER_CENTER)
                 .show(ui.ctx(), |ui| {
+                    // Display: theme, measure units, and (feature build) the GPU path.
+                    ui.label(egui::RichText::new("Display").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Theme");
+                        ui.selectable_value(&mut self.theme, Theme::Dark, "dark");
+                        ui.selectable_value(&mut self.theme, Theme::Light, "light");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Measure units");
+                        ui.selectable_value(&mut self.measure_unit, Unit::Mm, "mm");
+                        ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
+                        ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
+                    });
+                    #[cfg(feature = "gpu-transform")]
+                    if self.gpu.is_some() {
+                        ui.checkbox(&mut self.use_gpu, "GPU base transform (experimental)")
+                            .on_hover_text(
+                                "Transform the base layer on the GPU (#106). \
+                                 Off falls back to the CPU path.",
+                            );
+                    }
+                    ui.separator();
+                    // Grid overlay + snap.
+                    ui.label(egui::RichText::new("Grid").strong());
+                    ui.checkbox(&mut self.show_grid, "Show reference grid (G)");
+                    ui.horizontal(|ui| {
+                        ui.label("Spacing");
+                        ui.add(
+                            egui::DragValue::new(&mut self.grid_mm)
+                                .speed(0.1)
+                                .range(0.01..=100.0)
+                                .suffix(" mm"),
+                        );
+                    });
+                    ui.checkbox(
+                        &mut self.snap_grid,
+                        "Snap measure clicks to grid intersections",
+                    );
+                    ui.separator();
+                    // Input scheme matching the user's ECAD tool (#54).
+                    ui.label(egui::RichText::new("Input").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("ECAD preset");
+                        ui.selectable_value(&mut self.input_preset, InputPreset::Altium, "Altium");
+                        ui.selectable_value(&mut self.input_preset, InputPreset::KiCad, "KiCad");
+                    })
+                    .response
+                    .on_hover_text(
+                        "Pan mouse button by ECAD tool: \
+                         Altium = right-drag, KiCad = middle/right-drag.",
+                    );
+                    ui.separator();
                     ui.label(egui::RichText::new("Diff colours").strong());
                     ui.horizontal(|ui| {
                         ui.label("added");
@@ -2433,7 +2426,7 @@ impl eframe::App for ViewApp {
                             }
                         });
                 });
-            self.show_colors = open;
+            self.show_settings = open;
         }
 
         // Publish "what they're looking at" for the web feedback widget.
@@ -2514,9 +2507,9 @@ impl ViewApp {
         let layer = &self.diff.layers[self.selected];
         let size = ui.available_size();
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
-        // Clicking the board dismisses the Colors window (#19).
-        if self.show_colors && response.clicked() {
-            self.show_colors = false;
+        // Clicking the board dismisses the Settings window (#19).
+        if self.show_settings && response.clicked() {
+            self.show_settings = false;
         }
         let rect = response.rect;
         // The board background uses the user-configurable canvas colour (#53),
@@ -3427,15 +3420,6 @@ impl Unit {
             Unit::Mm => Unit::Inch,
             Unit::Inch => Unit::Mil,
             Unit::Mil => Unit::Mm,
-        }
-    }
-
-    /// Short label for the controls-row toggle.
-    fn label(self) -> &'static str {
-        match self {
-            Unit::Mm => "mm",
-            Unit::Inch => "in",
-            Unit::Mil => "mil",
         }
     }
 }
