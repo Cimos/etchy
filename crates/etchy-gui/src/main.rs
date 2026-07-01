@@ -3170,6 +3170,7 @@ mod tests {
                     super::C_ADDED,
                     super::C_REMOVED,
                     0.0,
+                    false, // skip_base: CPU path draws everything in this bench
                 );
                 sink += shapes.len();
             }
