@@ -8,17 +8,20 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref (a rapid rebase/force-push no longer
+# leaves several full matrices grinding in parallel) — a big Actions-minute saver.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Runs on every push + PR (Linux, 1x minutes). fmt + clippy gate here.
   test:
-    name: build + test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+    name: build + test (ubuntu)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -41,16 +44,38 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      # fmt + clippy now gate the build (the real deps have landed). Linux-only:
-      # rustfmt is platform-independent, and linting once avoids red builds from
-      # platform-specific clippy lints we can't reproduce on the other runners.
       - name: rustfmt
-        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
 
       - name: clippy (warnings are errors)
-        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Windows (2x) and macOS (10x) minutes are expensive, so the cross-platform
+  # build+test only runs on pushes to main — not on every PR iteration. PRs get
+  # the full Linux gate above; cross-OS regressions surface at merge time.
+  test-cross:
+    name: build + test (${{ matrix.os }})
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Generate golden corpus (best-effort)
+        run: python corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
+        continue-on-error: true
+
+      - name: Test
+        run: cargo test --workspace
 
   wasm:
     name: web build (wasm)

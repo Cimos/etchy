@@ -104,5 +104,8 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --title "etchy $TAG" --generate-notes
+            # A tag with a '-' (e.g. v0.1.0-rc1, v0.1.0-beta) is a pre-release.
+            args=(--title "etchy $TAG" --generate-notes)
+            case "$TAG" in *-*) args+=(--prerelease) ;; esac
+            gh release create "$TAG" dist/* "${args[@]}"
           fi
