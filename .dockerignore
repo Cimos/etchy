@@ -1,0 +1,8 @@
+# Keep the build context small + reproducible: ship only the sources cargo needs.
+target/
+.git/
+.github/
+**/dist/
+deploy/feedback/
+docs/
+*.md

@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Distribution (1.0 track):** a **distroless container** (`Dockerfile` — a
+  static musl `etchy` CLI in `gcr.io/distroless/static`, ~11 MB, no shell/libc)
+  and a lean, tag-triggered **release workflow** (`.github/workflows/release.yml`)
+  that builds per-OS CLI binaries (Linux musl static, macOS x86_64 + arm64,
+  Windows) and attaches the archives + `SHA256SUMS` to the GitHub Release.
 - Phase-0 scaffold: Cargo workspace (`etchy-core`, `etchy-cli`, `etchy-gui`,
   `etchy-pdf`), dual MIT/Apache-2.0 license, CI (build + test matrix on
   Linux/macOS/Windows), and the planning docs (roadmap, developer guide,
