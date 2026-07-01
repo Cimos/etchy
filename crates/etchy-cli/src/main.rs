@@ -53,6 +53,21 @@ struct Cli {
     /// directory is created if it does not exist.
     #[arg(long, value_name = "DIR")]
     svg: Option<PathBuf>,
+
+    /// CI gate: fail (exit 1) only when the changed area on the gated layers
+    /// exceeds this many mm². Omitted ⇒ any change on the gated layers fails.
+    #[arg(long, value_name = "MM2")]
+    fail_on_area: Option<f64>,
+    /// CI gate: fail (exit 1) only when the changed region count on the gated
+    /// layers exceeds this. Omitted ⇒ any change fails (unless --fail-on-area is
+    /// set); if both are set, either being exceeded fails.
+    #[arg(long, value_name = "N")]
+    fail_on_regions: Option<u32>,
+    /// Which layers the CI gate considers: `all` (default) or a comma list of
+    /// groups — copper, mask, silk, paste, drill, outline, documentation, other.
+    /// E.g. `--gate-layers copper` fails on copper changes and ignores silkscreen.
+    #[arg(long, value_name = "SPEC", default_value = "all")]
+    gate_layers: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -62,11 +77,122 @@ enum Format {
     Md,
 }
 
+/// Which layer kinds the CI gate counts, from `--gate-layers` (#M2). `all`, or a
+/// comma list of group words matched against the kebab-case kind tag — so
+/// `copper` covers top/bottom/inner copper, `silk` covers both silkscreens, etc.
+struct LayerFilter {
+    all: bool,
+    tokens: Vec<String>,
+}
+
+impl LayerFilter {
+    fn parse(spec: &str) -> Self {
+        let spec = spec.trim().to_ascii_lowercase();
+        if spec.is_empty() || spec == "all" {
+            return Self {
+                all: true,
+                tokens: Vec::new(),
+            };
+        }
+        let tokens = spec
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Self { all: false, tokens }
+    }
+
+    /// Does the gate include a layer with this kind tag (e.g. `top-copper`)?
+    fn includes(&self, kind: &str) -> bool {
+        self.all
+            || self.tokens.iter().any(|t| {
+                kind.contains(t.as_str()) || (t == "docs" && kind.contains("documentation"))
+            })
+    }
+}
+
+/// The CI gate (#M2): decides whether a diff should fail (exit 1). Thresholds are
+/// opt-in — with none set, any change on the gated layers fails (so
+/// `--gate-layers copper` alone means "fail on copper, ignore silkscreen").
+struct Gate {
+    fail_on_area: Option<f64>,
+    fail_on_regions: Option<u32>,
+    filter: LayerFilter,
+}
+
+impl Gate {
+    fn from_cli(cli: &Cli) -> Self {
+        Self {
+            fail_on_area: cli.fail_on_area,
+            fail_on_regions: cli.fail_on_regions,
+            filter: LayerFilter::parse(&cli.gate_layers),
+        }
+    }
+
+    /// (changed area mm², changed region count) summed over the gated layers.
+    fn totals(&self, report: &DiffReport) -> (f64, u32) {
+        report
+            .layers
+            .iter()
+            .filter(|l| self.filter.includes(l.kind))
+            .fold((0.0, 0), |(a, r), l| {
+                (
+                    a + l.added_area_mm2 + l.removed_area_mm2,
+                    r + l.added_regions + l.removed_regions,
+                )
+            })
+    }
+
+    /// Should this diff fail the gate (exit 1)?
+    fn fails(&self, report: &DiffReport) -> bool {
+        let (area, regions) = self.totals(report);
+        match (self.fail_on_area, self.fail_on_regions) {
+            // No threshold set → any change on the gated layers fails.
+            (None, None) => area > 0.0 || regions > 0,
+            (a, r) => a.is_some_and(|t| area > t) || r.is_some_and(|t| regions > t),
+        }
+    }
+
+    /// True when the gate is non-default (a threshold or a layer scope), so the
+    /// verdict is worth surfacing in the output.
+    fn configured(&self) -> bool {
+        self.fail_on_area.is_some() || self.fail_on_regions.is_some() || !self.filter.all
+    }
+
+    /// A one-line human verdict for stderr.
+    fn describe(&self, report: &DiffReport, fails: bool) -> String {
+        let (area, regions) = self.totals(report);
+        let scope = if self.filter.all {
+            "all layers".to_string()
+        } else {
+            self.tokens_desc()
+        };
+        format!(
+            "etchy: gate {} — {}: changed {:.4} mm², {} regions",
+            if fails { "FAIL" } else { "PASS" },
+            scope,
+            area,
+            regions,
+        )
+    }
+
+    fn tokens_desc(&self) -> String {
+        self.filter.tokens.join(",")
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
         Ok(report) => {
-            if report.any_changes() {
+            // The CI gate decides the exit code (#M2). Default (no thresholds,
+            // all layers) = any change fails, preserving the 0/1 contract.
+            let gate = Gate::from_cli(&cli);
+            let fails = gate.fails(&report);
+            if gate.configured() {
+                eprintln!("{}", gate.describe(&report, fails));
+            }
+            if fails {
                 Exit::DiffFound.into()
             } else {
                 Exit::NoDiff.into()
@@ -253,5 +379,90 @@ fn status_str(s: etchy_core::LayerStatus) -> &'static str {
         Changed => "changed",
         AddedLayer => "added-layer",
         RemovedLayer => "removed-layer",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etchy_core::LayerReport;
+
+    fn layer(kind: &'static str, area_mm2: f64, regions: u32) -> LayerReport {
+        LayerReport {
+            kind,
+            inner_index: None,
+            label_old: None,
+            label_new: Some("x".into()),
+            status: if area_mm2 > 0.0 || regions > 0 {
+                LayerStatus::Changed
+            } else {
+                LayerStatus::Unchanged
+            },
+            added_area_mm2: area_mm2,
+            removed_area_mm2: 0.0,
+            added_area_nm2: "0".into(),
+            removed_area_nm2: "0".into(),
+            added_regions: regions,
+            removed_regions: 0,
+        }
+    }
+
+    // A copper change + a small silk change.
+    fn report() -> DiffReport {
+        DiffReport::new(
+            vec![
+                layer("top-copper", 0.5, 3),
+                layer("top-silk", 0.02, 1),
+                layer("bottom-mask", 0.0, 0),
+            ],
+            Vec::new(),
+        )
+    }
+
+    fn gate(area: Option<f64>, regions: Option<u32>, layers: &str) -> Gate {
+        Gate {
+            fail_on_area: area,
+            fail_on_regions: regions,
+            filter: LayerFilter::parse(layers),
+        }
+    }
+
+    #[test]
+    fn filter_copper_matches_all_copper_kinds_only() {
+        let f = LayerFilter::parse("copper");
+        assert!(f.includes("top-copper"));
+        assert!(f.includes("inner-copper"));
+        assert!(!f.includes("top-silk"));
+        assert!(LayerFilter::parse("all").includes("top-silk"));
+    }
+
+    #[test]
+    fn default_gate_fails_on_any_change() {
+        // No thresholds, all layers → any change fails (the 0/1 contract).
+        assert!(gate(None, None, "all").fails(&report()));
+    }
+
+    #[test]
+    fn area_threshold_ignores_small_changes() {
+        // Total changed area is 0.52 mm²; a 1.0 mm² threshold passes it.
+        assert!(!gate(Some(1.0), None, "all").fails(&report()));
+        // …but 0.1 mm² fails.
+        assert!(gate(Some(0.1), None, "all").fails(&report()));
+    }
+
+    #[test]
+    fn scope_to_copper_ignores_silk() {
+        // Only copper counts; a copper-clean board with silk churn passes.
+        let silk_only = DiffReport::new(vec![layer("top-silk", 0.3, 2)], Vec::new());
+        assert!(!gate(None, None, "copper").fails(&silk_only));
+        // Copper changed → fails when scoped to copper.
+        assert!(gate(None, None, "copper").fails(&report()));
+    }
+
+    #[test]
+    fn region_threshold_gates_on_count() {
+        // Copper has 3 changed regions; threshold 5 passes, 2 fails.
+        assert!(!gate(None, Some(5), "copper").fails(&report()));
+        assert!(gate(None, Some(2), "copper").fails(&report()));
     }
 }

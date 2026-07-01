@@ -7,6 +7,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **CI gate thresholds (M2):** `--fail-on-area <mm²>` and `--fail-on-regions <n>`
+  gate the exit code on the *magnitude* of change, and `--gate-layers <spec>`
+  (e.g. `copper`) scopes the gate to specific layers — so a pipeline can fail on
+  copper changes and ignore silkscreen churn. With no flags the exit contract is
+  unchanged (any change ⇒ exit 1). The verdict prints to stderr.
 - **Distribution (1.0 track):** a **distroless container** (`Dockerfile` — a
   static musl `etchy` CLI in `gcr.io/distroless/static`, ~11 MB, no shell/libc)
   and a lean, tag-triggered **release workflow** (`.github/workflows/release.yml`)
