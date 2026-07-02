@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Ten trust defects from an adversarial code review** (all reproduced by
+  failing tests first): Excellon headerless files no longer resolve to an empty
+  drill layer; inline digit formats (`METRIC,LZ,0000.00`) now scale coordinates
+  correctly; `R` repeat codes emit the repeated hits instead of one phantom hole;
+  `G00`/`G01` tool-up moves no longer paint phantom holes; tool lines with
+  feed/speed fields (`T1C0.5F200S65`, `T01F200S65`) parse instead of rejecting
+  the file or being ignored. A misnamed drill file (e.g. Altium `Board.TXT`) now
+  lands on the Drill layer by content, so `--gate-layers drill` sees it; unknown
+  `--gate-layers` tokens are a loud exit 2 instead of a silently disarmed gate;
+  git mode is explicit (`--git`/`[SUBDIR]`) so a typo'd folder can't be
+  reinterpreted as a ref, and whole-repo git diffs print a scoping note.
+
 ### Added
 - **Help menu (viewer):** a toolbar **Help** menu with links to the GitHub repo,
   the website, "report an issue", and **Sponsor / fund etchy** (GitHub Sponsors),

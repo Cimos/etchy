@@ -58,6 +58,9 @@ pub fn board_from_bytes(
                     .with_context(|| format!("processing layer {name}"))?,
             )
         } else if etchy_core::looks_like_excellon(&bytes) {
+            // Content wins over the filename: an Excellon file named e.g.
+            // Board.TXT must land on the Drill layer, not "other".
+            kind = etchy_core::LayerKind::Drill;
             std::sync::Arc::new(
                 etchy_core::resolve_excellon(&bytes)
                     .with_context(|| format!("processing drill layer {name}"))?,
