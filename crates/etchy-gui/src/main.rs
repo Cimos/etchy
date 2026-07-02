@@ -177,6 +177,7 @@ fn board_from_files(
             }
             etchy_core::polygonize_gerber(bytes).ok()
         } else if etchy_core::looks_like_excellon(bytes) {
+            kind = etchy_core::LayerKind::Drill;
             etchy_core::resolve_excellon(bytes).ok()
         } else if etchy_core::looks_like_placement(bytes) {
             kind = etchy_core::LayerKind::Placement;

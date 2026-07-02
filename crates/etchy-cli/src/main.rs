@@ -97,21 +97,52 @@ struct LayerFilter {
     tokens: Vec<String>,
 }
 
+/// Every kind tag a layer report can carry (`LayerKind::kind_str`). A gate token
+/// must match at least one of these — otherwise the filter matches zero layers
+/// and the gate silently passes everything, which is how a typo like `coppr`
+/// would disarm a CI gate.
+const KIND_TAGS: &[&str] = &[
+    "top-copper",
+    "bottom-copper",
+    "inner-copper",
+    "top-mask",
+    "bottom-mask",
+    "top-silk",
+    "bottom-silk",
+    "top-paste",
+    "bottom-paste",
+    "drill",
+    "outline",
+    "documentation",
+    "placement",
+    "other",
+];
+
 impl LayerFilter {
-    fn parse(spec: &str) -> Self {
+    fn parse(spec: &str) -> Result<Self> {
         let spec = spec.trim().to_ascii_lowercase();
         if spec.is_empty() || spec == "all" {
-            return Self {
+            return Ok(Self {
                 all: true,
                 tokens: Vec::new(),
-            };
+            });
         }
-        let tokens = spec
+        let tokens: Vec<String> = spec
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        Self { all: false, tokens }
+        for t in &tokens {
+            let known = t == "docs" || KIND_TAGS.iter().any(|k| k.contains(t.as_str()));
+            if !known {
+                anyhow::bail!(
+                    "unknown --gate-layers group '{t}' (a typo here would silently disarm \
+                     the gate). Valid: all, copper, mask, silk, paste, drill, outline, \
+                     documentation/docs, placement, other"
+                );
+            }
+        }
+        Ok(Self { all: false, tokens })
     }
 
     /// Does the gate include a layer with this kind tag (e.g. `top-copper`)?
@@ -133,12 +164,12 @@ struct Gate {
 }
 
 impl Gate {
-    fn from_cli(cli: &Cli) -> Self {
-        Self {
+    fn from_cli(cli: &Cli) -> Result<Self> {
+        Ok(Self {
             fail_on_area: cli.fail_on_area,
             fail_on_regions: cli.fail_on_regions,
-            filter: LayerFilter::parse(&cli.gate_layers),
-        }
+            filter: LayerFilter::parse(&cli.gate_layers)?,
+        })
     }
 
     /// (changed area mm², changed region count) summed over the gated layers.
@@ -195,11 +226,19 @@ impl Gate {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // Validate the gate BEFORE the (expensive) diff, so a bad --gate-layers is a
+    // loud, fast exit 2 — never a silently disarmed gate.
+    let gate = match Gate::from_cli(&cli) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("etchy: error: {e:#}");
+            return Exit::Error.into();
+        }
+    };
     match run(&cli) {
         Ok(report) => {
             // The CI gate decides the exit code (#M2). Default (no thresholds,
             // all layers) = any change fails, preserving the 0/1 contract.
-            let gate = Gate::from_cli(&cli);
             let fails = gate.fails(&report);
             if gate.configured() {
                 eprintln!("{}", gate.describe(&report, fails));
@@ -314,6 +353,10 @@ fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<Gerb
                     .with_context(|| format!("processing layer {name}"))?,
             )
         } else if etchy_core::looks_like_excellon(&bytes) {
+            // Content wins over the filename: an Excellon file named e.g.
+            // Board.TXT must land on the Drill layer, not "other" — otherwise
+            // `--gate-layers drill` would exclude a real drill change.
+            kind = etchy_core::LayerKind::Drill;
             std::sync::Arc::new(
                 etchy_core::resolve_excellon(&bytes)
                     .with_context(|| format!("processing drill layer {name}"))?,
@@ -533,17 +576,55 @@ mod tests {
         Gate {
             fail_on_area: area,
             fail_on_regions: regions,
-            filter: LayerFilter::parse(layers),
+            filter: LayerFilter::parse(layers).unwrap(),
         }
     }
 
     #[test]
     fn filter_copper_matches_all_copper_kinds_only() {
-        let f = LayerFilter::parse("copper");
+        let f = LayerFilter::parse("copper").unwrap();
         assert!(f.includes("top-copper"));
         assert!(f.includes("inner-copper"));
         assert!(!f.includes("top-silk"));
-        assert!(LayerFilter::parse("all").includes("top-silk"));
+        assert!(LayerFilter::parse("all").unwrap().includes("top-silk"));
+    }
+
+    #[test]
+    fn misnamed_drill_file_still_classifies_as_drill() {
+        // Altium ships NC drill as Board.TXT — the filename heuristics call it
+        // "other", which excluded it from `--gate-layers drill` (review finding:
+        // a drilled-hole change passed the gate silently). The content sniff must
+        // win: Excellon content ⇒ LayerKind::Drill regardless of name.
+        let drl = b"M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX10.0Y10.0\nM30\n".to_vec();
+        let (board, _) = board_from_files(vec![("Board.TXT".to_string(), drl)]).unwrap();
+        assert_eq!(board.layers.len(), 1);
+        assert_eq!(board.layers[0].kind, etchy_core::LayerKind::Drill);
+    }
+
+    #[test]
+    fn filter_rejects_unknown_tokens() {
+        // A typo ('coppr') used to build a filter matching ZERO layers, so the
+        // gate passed every diff — a silently disarmed CI gate (review finding).
+        assert!(LayerFilter::parse("coppr").is_err());
+        assert!(LayerFilter::parse("copper,silkscreen-typo").is_err());
+        // Known groups and aliases still parse.
+        for ok in [
+            "copper",
+            "mask",
+            "silk",
+            "paste",
+            "drill",
+            "outline",
+            "docs",
+            "documentation",
+            "placement",
+            "other",
+            "copper,silk",
+            "all",
+            "",
+        ] {
+            assert!(LayerFilter::parse(ok).is_ok(), "'{ok}' should be valid");
+        }
     }
 
     #[test]
