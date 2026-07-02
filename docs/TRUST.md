@@ -39,10 +39,12 @@ etchy deliberately does **not** do.
   were exported with different `%FS`/unit settings, identical geometry quantizes
   onto different grids and produces spurious sub-µm "rim" differences; etchy
   **warns** about this rather than silently massaging it.
-- **Excellon scope.** Drill hits (circles), `G85` canned slots, and routed
-  (`M15`…`M16` / `G01`) slots are supported. **Arc routing** (`G02`/`G03` rout)
-  and **incremental coordinates** fail loud. Coordinates with zero-suppression but
-  no declared `LZ`/`TZ` mode fail loud rather than guess hole positions.
+- **Excellon scope.** Drill hits (circles), `G85` canned slots, routed
+  (`M15`…`M16` / `G01`) slots, `R` repeat codes, headerless files, inline digit
+  formats, and feed/speed tool fields are supported. **Arc routing** (`G02`/`G03`
+  rout) and **incremental coordinates** fail loud. Coordinates with
+  zero-suppression but no declared `LZ`/`TZ` mode fail loud rather than guess
+  hole positions.
 - **Region counts use a small noise floor** so sub-nanometre tessellation slivers
   aren't counted as changes; the changed *area* is always exact.
 - **Schematic-PDF diff is not implemented yet** (the `etchy-pdf` crate is a
