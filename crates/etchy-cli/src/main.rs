@@ -46,7 +46,9 @@ struct Cli {
     /// live (default: the repo root). Its presence implies `--git`.
     subdir: Option<PathBuf>,
     /// Treat OLD and NEW as git refs and read the committed Gerbers at each (no
-    /// checkout). Auto-enabled when OLD is not an existing directory.
+    /// checkout). Git mode is explicit — `--git` or a [SUBDIR] — so a mistyped
+    /// directory stays a loud "not a directory" error instead of being silently
+    /// reinterpreted as a ref.
     #[arg(long)]
     git: bool,
     /// Output format: a terminal summary, machine-readable JSON, or GitHub
@@ -258,15 +260,26 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> Result<DiffReport> {
-    // Git mode when asked (--git), when a [SUBDIR] is given, or auto when OLD is
-    // not an existing directory (so `etchy v1 v2` "just works" in a repo).
-    let git_mode = cli.git || cli.subdir.is_some() || !cli.old.is_dir();
+    // Git mode is EXPLICIT: --git, or a [SUBDIR] argument. It must never be
+    // inferred from "OLD isn't a directory" — a mistyped folder name that happens
+    // to resolve as a ref would silently diff committed revisions the user never
+    // asked about (review finding). A typo stays a loud "not a directory" error.
+    let git_mode = cli.git || cli.subdir.is_some();
     let (old, of, new, nf) = if git_mode {
         let subdir = cli
             .subdir
             .as_deref()
             .and_then(|p| p.to_str())
             .unwrap_or(".");
+        if cli.subdir.is_none() {
+            // Whole-repo scans flatten every Gerber/Excellon blob at the ref into
+            // one board — fine for a single-board repo, garbage when the tree
+            // holds several. Say so, loudly, rather than merging boards silently.
+            eprintln!(
+                "etchy: note: no [SUBDIR] given — diffing every fab file in the whole tree \
+                 at each ref; pass a subdirectory to scope the comparison"
+            );
+        }
         let old_ref = cli.old.to_string_lossy();
         let new_ref = cli.new.to_string_lossy();
         let (old, of) = load_board_git(&old_ref, subdir)
