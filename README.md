@@ -49,15 +49,17 @@ etchy old/ new/ --gate-layers copper --fail-on-area 0.5
 
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
 changed-first layer list, overlay / before / after / split / swipe modes, pan /
-zoom / fit, a settings panel, and an Open-A / Open-B loader (folder, `.zip`, or
-drag-and-drop). A **web viewer** build also exists (see `deploy/`).
+zoom / fit, a settings panel, an Open-A / Open-B loader (folder, `.zip`, or
+drag-and-drop), and a Help menu. A **web viewer** build also exists (see `deploy/`).
 
 ## What it does
 
-- **Visual + geometric diff** of Gerber (RS-274X/X2) and Excellon drill revisions:
-  a per-layer polygon boolean diff (`added = B − A`, `removed = A − B`) yields a
-  resolution-independent **SVG overlay**, a self-contained **HTML report**, and
-  **magnitudes** (changed area mm², region count) — all from one computation.
+- **Visual + geometric diff** of Gerber (RS-274X/X2), Excellon drill, and
+  pick-and-place (centroid) revisions: a per-layer polygon boolean diff
+  (`added = B − A`, `removed = A − B`) yields a resolution-independent **SVG
+  overlay**, a self-contained **HTML report**, and **magnitudes** (changed area
+  mm², region count) — all from one computation. Moved / rotated / added / removed
+  **components** diff as placement markers.
 - **CLI / CI-first:** exit codes, per-layer thresholds, git-refs, JSON (schema v1),
   a GitHub Action + Markdown PR summary; the egui viewer is the second surface.
 - **Same-board revisions only** — fails loud on mismatched boards, never a garbage
@@ -66,8 +68,10 @@ drag-and-drop). A **web viewer** build also exists (see `deploy/`).
 - Ships as small **static binaries** and a **distroless container**.
 
 **Non-goals:** net/connectivity diff, BOM/component diff, DRC, and Altium /
-IPC-2581 / ODB++ ingestion. Native **KiCad `.kicad_pcb`** ingestion is an accepted
-post-1.0 goal ([#122](../../issues/122)); KiCad *schematic* diff stays out.
+IPC-2581 / ODB++ ingestion. (Pick-and-place is diffed as *placement geometry* —
+where parts sit — not a BOM/component list.) Native **KiCad `.kicad_pcb`**
+ingestion is an accepted post-1.0 goal ([#122](../../issues/122)); KiCad
+*schematic* diff stays out.
 
 ## Documentation
 

@@ -45,6 +45,11 @@ etchy deliberately does **not** do.
   rout) and **incremental coordinates** fail loud. Coordinates with
   zero-suppression but no declared `LZ`/`TZ` mode fail loud rather than guess
   hole positions.
+- **Pick-and-place is placement geometry, not a BOM.** Each component is rendered
+  as a marker at its centroid + rotation and diffed geometrically (moved / rotated
+  / added / removed parts show up); etchy does **not** compare values, footprints,
+  or nets. Coordinates are assumed millimetres, and all parts land on one
+  `placement` layer (top/bottom sides aren't split yet).
 - **Region counts use a small noise floor** so sub-nanometre tessellation slivers
   aren't counted as changes; the changed *area* is always exact.
 - **Schematic-PDF diff is not implemented yet** (the `etchy-pdf` crate is a
