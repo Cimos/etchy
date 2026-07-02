@@ -140,14 +140,22 @@ pub fn looks_like_excellon(bytes: &[u8]) -> bool {
     has_m48 || (has_unit && has_tool)
 }
 
-/// Parse `T<n>C<dia>` (a tool definition) → (tool number, diameter text). Returns
-/// `None` for a bare tool select (`T<n>`) or any non-tool line. The diameter may
-/// carry trailing feed/speed fields (`T1C0.020F200S65`) on common dialects — only
-/// the leading numeric run is the diameter.
+/// Parse a tool definition → (tool number, diameter text). Returns `None` for a
+/// bare tool select (`T<n>`) or any non-tool line. Feed/speed fields sit on
+/// either side of the diameter across dialects — `T1C0.020F200S65` (trailing)
+/// AND Altium's `T1F00S00C0.00787` (leading) — so the tool number is the leading
+/// digit run after `T`, and the diameter is the numeric run after the `C`
+/// wherever it appears.
 fn is_tool_def(line: &str) -> Option<(u32, &str)> {
     let rest = line.strip_prefix('T')?;
+    let nend = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if nend == 0 {
+        return None;
+    }
+    let num: u32 = rest[..nend].parse().ok()?;
     let cpos = rest.find('C')?;
-    let num: u32 = rest[..cpos].parse().ok()?;
     let dia = rest[cpos + 1..].trim();
     let end = dia
         .find(|c: char| !(c.is_ascii_digit() || c == '.'))
@@ -702,6 +710,27 @@ mod tests {
         // Diameter 0.5 mm → area ≈ π·0.25² ≈ 0.196 mm².
         assert!(
             (ps.area_mm2() - 0.196).abs() < 0.01,
+            "got {}",
+            ps.area_mm2()
+        );
+    }
+
+    #[test]
+    fn altium_tool_def_with_feed_speed_before_c_parses() {
+        // Real Altium NC drill (validated against a production fab pack) writes
+        // tool defs as `T1F00S00C0.00787` — feed/speed BEFORE the C field, with a
+        // `;FILE_FORMAT=2:5` comment and INCH,LZ. This exact form failed to parse
+        // ("selects tool T1 not defined in the header").
+        let src = "M48\n;FILE_FORMAT=2:5\nINCH,LZ\n;TYPE=PLATED\nT1F00S00C0.00787\n%\nT1\nX0100000Y0100000\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 1);
+        // 2.5 LZ: "0100000" pads right to 7 digits → 01.00000 in = 25.4 mm.
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!((cx - 25.4).abs() < 0.1, "hole at 1.0 in, got {cx} mm");
+        // Diameter 0.00787 in = 0.2 mm → area ≈ π·0.1² ≈ 0.0314 mm².
+        assert!(
+            (ps.area_mm2() - 0.0314).abs() < 0.002,
             "got {}",
             ps.area_mm2()
         );

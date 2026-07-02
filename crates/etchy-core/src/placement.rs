@@ -83,30 +83,51 @@ pub fn resolve_placement(bytes: &[u8]) -> Result<PolygonSet> {
     Ok(crate::boolean::union(&markers, &[]))
 }
 
-/// Dispatch on shape: a comma-separated file with a recognisable header is CSV;
-/// otherwise treat it as whitespace-columned (KiCad `.pos`).
+/// Dispatch on shape: decide CSV vs whitespace-columned from the **header** line
+/// (the one naming the reference + position columns) when there is one — data
+/// rows can legally contain commas inside quoted descriptions, and banner text
+/// above the header is arbitrary. Fall back to the first content line.
 fn parse_placements(text: &str) -> Result<Vec<Placement>> {
-    let looks_csv = text
-        .lines()
-        .find(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
-        .map(|l| l.contains(','))
-        .unwrap_or(false);
-    if looks_csv {
+    let header = text.lines().find(|l| {
+        let low = l.to_ascii_lowercase();
+        let has_ref = low.contains("designator") || low.contains("ref");
+        let has_pos = low.contains("posx")
+            || low.contains("pos x")
+            || low.contains("center-x")
+            || low.contains("centerx")
+            || low.contains("mid x")
+            || low.contains("ref-x");
+        has_ref && has_pos
+    });
+    let probe = header.or_else(|| {
+        text.lines()
+            .find(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+    });
+    if probe.map(|l| l.contains(',')).unwrap_or(false) {
         parse_csv(text)
     } else {
         parse_whitespace(text)
     }
 }
 
-/// KiCad-style whitespace `.pos`: `# ` comments, then `Ref Val Package PosX PosY
-/// Rot [Side]`. Parsed from the right so a multi-token Val/Package doesn't shift
-/// the numeric columns; the optional trailing textual Side is detected.
+/// Whitespace-columned rows: KiCad `Ref Val Package PosX PosY Rot [Side]`, and
+/// Altium `Designator Comment Layer Footprint X Y Rot "Description"`. Parsed from
+/// the right so multi-token middle columns don't shift the numerics. A trailing
+/// **quoted** description (Altium; may be multi-word, may contain commas) is
+/// stripped first — leaving it in play silently dropped every row whose
+/// description had spaces, a partial parse the trust bar forbids.
 fn parse_whitespace(text: &str) -> Result<Vec<Placement>> {
     let mut out = Vec::new();
     for line in text.lines() {
-        let line = line.trim();
+        let mut line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
+        }
+        // Strip a trailing `"…"` run (the Altium Description column).
+        if line.ends_with('"') {
+            if let Some(open) = line[..line.len() - 1].rfind('"') {
+                line = line[..open].trim_end();
+            }
         }
         let f: Vec<&str> = line.split_whitespace().collect();
         if f.len() < 4 {
@@ -217,6 +238,31 @@ R1,1k,top,15.0,20.0,0\n";
         assert_eq!(p.len(), 2);
         assert_eq!(p[1].reference, "R1");
         assert!((p[1].x_mm - 15.0).abs() < 1e-9);
+    }
+
+    // Mimics a real Altium "Pick Place for X.txt": banner text, a columned header,
+    // and rows ending in a QUOTED multi-word Description (CRLF endings). Rows with
+    // multi-word descriptions were silently skipped — a partial parse (~17 of ~140
+    // components on a production board) with no error.
+    const ALTIUM_POS: &str = "Altium Designer Pick and Place Locations\r\n\
+D:\\git\\proj\\Pick Place for X.txt\r\n\
+\r\n\
+Units used: mm\r\n\
+\r\n\
+Designator   Comment        Layer       Footprint   Center-X(mm) Center-Y(mm) Rotation Description\r\n\
+R1           1K             TopLayer    0402-RES    20.6248      44.8056      0        \"RES 1K OHM 1/16W 1% 0402\"\r\n\
+U405         ICM20649       TopLayer    ICM20649    56.2356      36.0934      0        \"\"\r\n\
+SW1          FPF1320        BottomLayer FPF1320     29.9516      38.9507      270      \"LOAD SWITCH, 1.5A\"\r\n";
+
+    #[test]
+    fn altium_columned_pos_parses_every_row() {
+        let p = parse_placements(ALTIUM_POS).unwrap();
+        assert_eq!(p.len(), 3, "all rows incl. multi-word quoted descriptions");
+        assert_eq!(p[0].reference, "R1");
+        assert!((p[0].x_mm - 20.6248).abs() < 1e-6);
+        assert!((p[0].y_mm - 44.8056).abs() < 1e-6);
+        assert!((p[2].rot_deg - 270.0).abs() < 1e-9);
+        assert!(looks_like_placement(ALTIUM_POS.as_bytes()));
     }
 
     #[test]
