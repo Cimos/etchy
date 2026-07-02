@@ -20,6 +20,14 @@ etchy old/ new/ --svg out/            # one SVG overlay per changed layer
 etchy old/ new/ --format json         # machine-readable magnitudes (schema v1)
 ```
 
+**Try it right now** — the repo ships two revisions of a real board (the open
+[Mad_RP2040](https://github.com/Cimos/Mad_RP2040), Gerbers + Excellon drills):
+
+```sh
+etchy crates/etchy-gui/assets/demo/old crates/etchy-gui/assets/demo/new --html diff.html
+# 10 of 13 layers changed — open diff.html to see every overlay
+```
+
 Diff two committed revisions straight from git, no checkout:
 
 ```sh
