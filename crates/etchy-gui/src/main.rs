@@ -3217,6 +3217,22 @@ enum Role {
     Removed,
 }
 
+/// Stroke a diff region's outer edge only once its on-screen EXTENT clears this
+/// (#113): big enough that the eye is parsing shape, small enough to help as soon
+/// as adjacent added/removed slivers start to merge visually.
+const DIFF_EDGE_MIN_PX: f32 = 14.0;
+/// …and only when the region is visibly FILLED on screen (thickness in px). The
+/// thickness LOD deliberately fades sub-pixel slivers (pour rims); stroking those
+/// would resurrect them as full-length hairlines of noise.
+const DIFF_EDGE_MIN_THICK_PX: f32 = 2.5;
+
+/// The edge stroke colour for a diff fill: the same hue darkened, alpha kept, so
+/// green/red regions get a crisp boundary without introducing a new colour.
+fn diff_edge_color(fill: Color32) -> Color32 {
+    let d = |v: u8| (v as u16 * 55 / 100) as u8;
+    Color32::from_rgba_unmultiplied(d(fill.r()), d(fill.g()), d(fill.b()), fill.a())
+}
+
 /// One triangulated draw item, in WORLD space (camera-independent). For diff items
 /// `extent_nm`/`area_nm2` drive the per-frame LOD fade + min-area cull without
 /// re-triangulating; base/outline leave them 0.
@@ -3228,6 +3244,11 @@ struct CachedItem {
     /// reference isn't tied to one layer, so it uses `usize::MAX` (never dimmed).
     layer_index: usize,
     tris: Vec<[Pt; 3]>,
+    /// The region's OUTER ring (world space), stroked as a thin edge when the
+    /// region is large enough on screen — adjacent added/removed slivers from a
+    /// moved feature read as two distinct shapes instead of one smear (#113).
+    /// Empty for base/outline items (no edge drawn).
+    ring: Vec<Pt>,
     /// World bbox [minx, miny, maxx, maxy] — for off-screen culling per frame.
     bbox: [i64; 4],
     extent_nm: i64,
@@ -3290,6 +3311,7 @@ fn push_context_items(
                 side,
                 layer_index,
                 tris,
+                ring: Vec::new(),
                 bbox: bb,
                 extent_nm,
                 area_nm2,
@@ -3314,6 +3336,7 @@ fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role, la
                 side: Side::Full,
                 layer_index,
                 tris,
+                ring: outer.clone(),
                 bbox: bb,
                 extent_nm,
                 area_nm2,
@@ -3435,6 +3458,8 @@ fn transform_cache(
     mesh.vertices.reserve(cap);
     mesh.indices.reserve(cap);
     let mut hidden = 0usize;
+    // Edge strokes for sizeable diff regions (#113), appended after the fill mesh.
+    let mut strokes: Vec<Shape> = Vec::new();
     for item in &cache.items {
         if !bbox_visible(item.bbox, cam, rect) {
             continue; // off-screen: not a threshold "hidden", just nothing to draw
@@ -3457,6 +3482,7 @@ fn transform_cache(
         // Highlight/dim (#59): the active layer at full opacity, the other visible
         // layers dimmed; layer-less items (outline) never dim.
         let dim = dim_factor(item.layer_index, selected);
+        let mut edge = false;
         let (mut color, is_diff) = match item.role {
             Role::Base => (
                 base_display_color(base_of(item.layer_index), canvas, base_level),
@@ -3497,6 +3523,11 @@ fn transform_cache(
                 // layer's diffs sit behind the active layer's.
                 lod::Lod::Fade(alpha) => color = with_alpha(color, alpha * dim),
             }
+            // Edge-stroke eligibility (#113): the region must read as a filled
+            // shape (thickness), be sizeable (extent), and not be faded near-out.
+            edge = px >= DIFF_EDGE_MIN_THICK_PX
+                && region_screen_px(item.extent_nm, cam.scale) >= DIFF_EDGE_MIN_PX
+                && color.a() >= 48;
         }
         for tri in &item.tris {
             let base = mesh.vertices.len() as u32;
@@ -3509,12 +3540,27 @@ fn transform_cache(
             }
             mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
+        // Edge stroke (#113): outline sizeable added/removed regions so adjacent
+        // green/red slivers from a MOVED feature read as two shapes, not a smear.
+        if edge && !item.ring.is_empty() {
+            let pts: Vec<Pos2> = item
+                .ring
+                .iter()
+                .map(|&p| world_to_screen(cam, p, rect))
+                .collect();
+            strokes.push(Shape::closed_line(
+                pts,
+                Stroke::new(1.0, diff_edge_color(color)),
+            ));
+        }
     }
-    let shapes = if mesh.is_empty() {
+    let mut shapes = if mesh.is_empty() {
         Vec::new()
     } else {
         vec![Shape::from(mesh)]
     };
+    // Edges draw on top of the fills.
+    shapes.append(&mut strokes);
     (shapes, hidden)
 }
 
@@ -3849,6 +3895,7 @@ mod tests {
                 side: super::Side::Full,
                 layer_index: 0,
                 tris,
+                ring: Vec::new(),
                 bbox: [cx, cy, cx + s, cy + s],
                 extent_nm: s,
                 area_nm2: (s as f64) * (s as f64),
