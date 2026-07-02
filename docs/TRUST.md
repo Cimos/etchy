@@ -16,9 +16,12 @@ etchy deliberately does **not** do.
   parser runs inside a `catch_unwind` boundary, so even a panic on hostile input
   becomes a clean typed error, never a crash mid-batch.
 - **Same-board guard.** etchy diffs *revisions of one board* using absolute
-  coordinates — it does **not** auto-align. If the two inputs' overall extents
-  differ by more than a small tolerance (1 mm, or 2 % of span), it refuses with a
-  "not the same board" error instead of producing a garbage overlay.
+  coordinates — it does **not** auto-align. If the two inputs' extents differ by
+  more than a small tolerance (1 mm, or 2 % of span), it refuses with a "not the
+  same board" error instead of producing a garbage overlay. The guard compares
+  **physical board layers only** — documentation drawings (whose legend tables
+  legitimately move/grow between revisions) and placement markers are excluded,
+  so a regenerated drawing template doesn't read as a different board.
 - **Deterministic integer geometry.** All geometry is quantized to a 1 nm
   fixed-point grid and diffed with a validated integer polygon-boolean engine, so
   a given input pair always yields byte-identical results.

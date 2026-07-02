@@ -216,9 +216,27 @@ pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> 
 /// union of *all* layers (a per-layer bbox would trip on a layer that legitimately
 /// grew). See `docs/M1_ENGINE_DESIGN.md`.
 pub fn same_board_guard(old: &Board, new: &Board) -> Result<()> {
-    let (ob, nb) = match (old.bbox_nm(), new.bbox_nm()) {
+    // Physical board layers only. Documentation (drill drawings with legend
+    // tables) and placement markers are annotations whose extents legitimately
+    // change wildly between revisions — a regenerated drawing template must not
+    // read as "different board" (validated against a real Altium pack).
+    let physical = |b: &Board| {
+        b.layers
+            .iter()
+            .filter(|l| !matches!(l.kind, LayerKind::Documentation | LayerKind::Placement))
+            .filter_map(|l| l.geometry.bbox_nm())
+            .reduce(|a, b| {
+                [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ]
+            })
+    };
+    let (ob, nb) = match (physical(old), physical(new)) {
         (Some(o), Some(n)) => (o, n),
-        // One or both sides have no geometry at all — nothing to compare extents on.
+        // One or both sides have no physical geometry — nothing to compare on.
         _ => return Ok(()),
     };
 
@@ -318,6 +336,44 @@ mod tests {
         };
         assert!(matches!(
             same_board_guard(&a, &b),
+            Err(EngineError::BoardMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn guard_ignores_documentation_layer_extents() {
+        // Validated against a real Altium pack: drill DRAWINGS (Documentation)
+        // grew a legend table beside the board in one revision — same board,
+        // wildly different documentation extents. The guard must compare
+        // physical board layers only, or it false-positives on every pack whose
+        // drawing template changed.
+        let mm = 1_000_000;
+        let a = Board {
+            layers: vec![
+                layer(LayerKind::TopCopper, [0, 0, 34 * mm, 34 * mm]),
+                layer(LayerKind::Documentation, [0, 0, 35 * mm, 35 * mm]),
+            ],
+        };
+        let b = Board {
+            layers: vec![
+                layer(LayerKind::TopCopper, [0, 0, 34 * mm, 34 * mm]),
+                // The regenerated drawing: legend table way off-board.
+                layer(
+                    LayerKind::Documentation,
+                    [-10 * mm, -10 * mm, 130 * mm, 60 * mm],
+                ),
+            ],
+        };
+        assert!(
+            same_board_guard(&a, &b).is_ok(),
+            "same board; only the drawing template changed"
+        );
+        // …but mismatched COPPER still fails loud.
+        let c = Board {
+            layers: vec![layer(LayerKind::TopCopper, [0, 0, 90 * mm, 34 * mm])],
+        };
+        assert!(matches!(
+            same_board_guard(&a, &c),
             Err(EngineError::BoardMismatch { .. })
         ));
     }
