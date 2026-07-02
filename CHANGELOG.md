@@ -7,6 +7,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Real-board (Altium) validation fixes** — found by running a full production
+  fab pack end-to-end: tool definitions with feed/speed *before* the diameter
+  (`T1F00S00C0.00787`) now parse (the whole pack was rejected); Altium's columned
+  pick-and-place format (trailing quoted multi-word descriptions) now parses
+  every row (rows with spaces in the description were silently skipped — a
+  partial placement diff); and the same-board guard now compares **physical
+  layers only**, so a drill drawing regenerated with a legend table no longer
+  false-positives as "not the same board".
 - **Ten trust defects from an adversarial code review** (all reproduced by
   failing tests first): Excellon headerless files no longer resolve to an empty
   drill layer; inline digit formats (`METRIC,LZ,0000.00`) now scale coordinates
