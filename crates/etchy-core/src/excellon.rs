@@ -141,54 +141,62 @@ pub fn looks_like_excellon(bytes: &[u8]) -> bool {
 }
 
 /// Parse `T<n>C<dia>` (a tool definition) → (tool number, diameter text). Returns
-/// `None` for a bare tool select (`T<n>`) or any non-tool line.
+/// `None` for a bare tool select (`T<n>`) or any non-tool line. The diameter may
+/// carry trailing feed/speed fields (`T1C0.020F200S65`) on common dialects — only
+/// the leading numeric run is the diameter.
 fn is_tool_def(line: &str) -> Option<(u32, &str)> {
     let rest = line.strip_prefix('T')?;
     let cpos = rest.find('C')?;
     let num: u32 = rest[..cpos].parse().ok()?;
-    let dia = &rest[cpos + 1..];
-    // Diameter may carry trailing feed/speed fields on some dialects; take the
-    // leading numeric run.
-    let dia = dia.trim();
+    let dia = rest[cpos + 1..].trim();
+    let end = dia
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(dia.len());
+    let dia = &dia[..end];
+    if dia.is_empty() {
+        return None;
+    }
     Some((num, dia))
 }
 
-/// A bare tool select `T<n>` (no `C`), returning the tool number.
+/// A tool select `T<n>` in the body, returning the tool number. Tolerates
+/// trailing feed/speed/retract fields (`T01F200S65`) — but a `C` tail is a tool
+/// *definition*, not a select.
 fn tool_select(line: &str) -> Option<u32> {
     let rest = line.strip_prefix('T')?;
-    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if end == 0 {
         return None;
     }
-    rest.parse().ok()
+    let tail = &rest[end..];
+    if tail.is_empty() || tail.starts_with(['F', 'S', 'B', 'H', 'Z']) {
+        rest[..end].parse().ok()
+    } else {
+        None
+    }
 }
 
 /// Parse + resolve one Excellon drill file's bytes into filled hole/slot geometry.
+///
+/// Two passes so a **headerless** file (no `M48`, a form the sniff deliberately
+/// accepts) still resolves its body: pass 1 collects header facts (units, zero
+/// suppression, digit format, tool diameters) from their unambiguous line forms
+/// wherever they appear; pass 2 interprets the body — every line after the `M48`
+/// header's `%`/`M95` terminator, or the whole file when there is no header
+/// (header-form lines don't match any body form and are ignored there).
 pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
     let text = String::from_utf8_lossy(bytes);
-    let mut lines = text.lines().map(|l| l.trim()).peekable();
+    let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
-    // ---- Header (M48 … M95/% ) ----
+    // ---- Pass 1: header facts, from all lines ----
     let mut units: Option<Units> = None;
     let mut zeros: Option<Zeros> = None;
     let mut fmt_digits: Option<(usize, usize)> = None;
     let mut tools: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
-
-    // Consume until the header end marker (`%` or `M95`), collecting units,
-    // suppression and tool diameters. Files without an M48 header fall through
-    // with these still unset; we resolve defaults below.
-    let mut in_header = false;
-    for line in lines.by_ref() {
-        if line == "M48" {
-            in_header = true;
-            continue;
-        }
-        if line == "%" || line == "M95" {
-            break;
-        }
+    for line in &lines {
         parse_header_line(line, &mut units, &mut zeros, &mut fmt_digits, &mut tools)?;
-        if !in_header && (line == "M30" || line == "M00") {
-            break;
-        }
     }
 
     let units = units.ok_or_else(|| {
@@ -202,9 +210,20 @@ pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
     };
     let unit_nm = units.to_nm();
 
-    // ---- Body ----
+    // ---- Pass 2: body ----
+    let body_start = if lines.contains(&"M48") {
+        lines
+            .iter()
+            .position(|l| *l == "%" || *l == "M95")
+            .map(|i| i + 1)
+            .ok_or_else(|| {
+                EngineError::Parse("M48 header never terminated (missing % or M95)".into())
+            })?
+    } else {
+        0
+    };
     let mut m = Body::new(fmt, unit_nm, tools);
-    for line in lines {
+    for line in &lines[body_start..] {
         m.step(line)?;
     }
     Ok(m.finish())
@@ -235,11 +254,13 @@ fn parse_header_line(
     if let Some(rest) = line.strip_prefix("INCH") {
         *units = Some(Units::Inch);
         apply_zero_mode(rest, zeros);
+        apply_inline_format(rest, fmt_digits);
         return Ok(());
     }
     if let Some(rest) = line.strip_prefix("METRIC") {
         *units = Some(Units::Metric);
         apply_zero_mode(rest, zeros);
+        apply_inline_format(rest, fmt_digits);
         return Ok(());
     }
     if let Some((num, dia)) = is_tool_def(line) {
@@ -259,6 +280,26 @@ fn apply_zero_mode(rest: &str, zeros: &mut Option<Zeros>) {
         *zeros = Some(Zeros::Leading);
     } else if rest.contains("TZ") {
         *zeros = Some(Zeros::Trailing);
+    }
+}
+
+/// An inline digit-format token on the `INCH`/`METRIC` line, e.g.
+/// `METRIC,LZ,0000.00` (4 integer / 2 decimal digits). Decoding suppressed
+/// coordinates with the wrong split silently mis-scales every hole position, so
+/// this must win over the per-units default.
+fn apply_inline_format(rest: &str, fmt_digits: &mut Option<(usize, usize)>) {
+    for tok in rest.split(',') {
+        let tok = tok.trim();
+        if let Some((i, d)) = tok.split_once('.') {
+            if !i.is_empty()
+                && !d.is_empty()
+                && i.chars().all(|c| c == '0')
+                && d.chars().all(|c| c == '0')
+            {
+                *fmt_digits = Some((i.len(), d.len()));
+                return;
+            }
+        }
     }
 }
 
@@ -336,11 +377,45 @@ impl Body {
             self.select_tool(t)?;
             return Ok(());
         }
+        // Repeat code `R<n>X<off>Y<off>`: repeat the previous hit n times, each
+        // stepping by the (relative) offset. Must be handled before the generic
+        // coordinate dispatch, which would misread the offset as an absolute hit.
+        if let Some(rest) = line.strip_prefix('R') {
+            if rest.starts_with(|c: char| c.is_ascii_digit()) {
+                return self.repeat_hits(rest);
+            }
+        }
         // A coordinate-bearing line: drill hit, G85 slot, or routed move.
         if line.contains('X') || line.contains('Y') {
             return self.coordinate_line(line);
         }
         // G00/G01 mode words with no coordinates, feed/speed, etc. — ignore.
+        Ok(())
+    }
+
+    /// `R<n>X<off>Y<off>` (the text after `R`): n additional hits, each offset
+    /// from the previous position by the given (relative) step.
+    fn repeat_hits(&mut self, rest: &str) -> Result<()> {
+        let nend = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let n: u32 = rest[..nend]
+            .parse()
+            .map_err(|_| EngineError::Parse(format!("bad repeat count in 'R{rest}'")))?;
+        let frag = &rest[nend..];
+        if !frag.contains('X') && !frag.contains('Y') {
+            return Err(EngineError::Parse(format!(
+                "repeat code 'R{rest}' carries no X/Y offset"
+            )));
+        }
+        // Offsets are relative steps in the file's format/units; a missing axis
+        // steps by zero.
+        let (dx, dy) = self.read_xy(frag, 0.0, 0.0)?;
+        for _ in 0..n {
+            self.x += dx;
+            self.y += dy;
+            self.emit_hit(self.x, self.y)?;
+        }
         Ok(())
     }
 
@@ -368,16 +443,22 @@ impl Body {
             self.y = y2;
             return Ok(());
         }
-        // Strip a leading G00/G01 so read_xy sees only the coordinate.
-        let coord = line
-            .strip_prefix("G00")
-            .or_else(|| line.strip_prefix("G01"))
-            .unwrap_or(line);
+        // A G00/G01 word is a rout-mode MOVE: with the tool down (M15…M16) it cuts
+        // a slot; with the tool up it only repositions — emitting a hit for a
+        // tool-up rapid painted phantom holes at retract targets. A bare
+        // coordinate line (no G word) in drill mode is a hit.
+        let (coord, is_move) = if let Some(r) = line.strip_prefix("G00") {
+            (r, true)
+        } else if let Some(r) = line.strip_prefix("G01") {
+            (r, true)
+        } else {
+            (line, false)
+        };
         let (nx, ny) = self.read_xy(coord, self.x, self.y)?;
         if self.routing {
-            // Routed move with the tool down = a slot segment from here to there.
+            // Tool down: any move cuts a slot segment from here to there.
             self.emit_slot(self.x, self.y, nx, ny)?;
-        } else {
+        } else if !is_move {
             // Drill mode: a hit at the new point.
             self.emit_hit(nx, ny)?;
         }
@@ -543,6 +624,87 @@ mod tests {
         let bb = ps.bbox_nm().unwrap();
         assert!((bb[0] as f64 / 1e6 - 9.75).abs() < 0.1, "min x {}", bb[0]);
         assert!((bb[2] as f64 / 1e6 - 15.25).abs() < 0.1, "max x {}", bb[2]);
+    }
+
+    #[test]
+    fn headerless_file_still_resolves_hits() {
+        // No M48 and no %/M95 terminator — a form looks_like_excellon claims via
+        // units + tool defs. The body must not be eaten by header scanning
+        // (review finding: silently returned an empty set).
+        let src = "INCH,LZ\nT1C0.032\nT1\nX0100Y0100\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 1, "the one drill hit must survive");
+        // 2.4 LZ: "0100" right-pads to 010000 → 1.0 in = 25.4 mm.
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!(
+            (cx - 25.4).abs() < 0.1,
+            "hole at 1.0 in = 25.4 mm, got {cx}"
+        );
+    }
+
+    #[test]
+    fn inline_digit_format_overrides_default() {
+        // METRIC,LZ,0000.00 declares a 4.2 split; decoding as the default 3.3
+        // put every hole at one-tenth scale (review finding).
+        let src = "M48\nMETRIC,LZ,0000.00\nT1C1.000\n%\nT1\nX010000Y010000\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        // 4.2 LZ: "010000" → 0100.00 → 100.0 mm (not 10.0 mm under 3.3).
+        assert!(
+            (cx - 100.0).abs() < 0.1,
+            "hole at 100 mm under 4.2, got {cx}"
+        );
+    }
+
+    #[test]
+    fn repeat_code_emits_the_repeated_hits() {
+        // R2X5.0 = repeat the previous hit twice, stepping +5 mm in X each time.
+        // Was rendered as ONE phantom hole at the offset itself (review finding).
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX10.0Y10.0\nR2X5.0\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 3, "original + 2 repeats");
+        let bb = ps.bbox_nm().unwrap();
+        assert!(
+            (bb[2] as f64 / 1e6 - 20.25).abs() < 0.1,
+            "last hole at x=20 mm"
+        );
+        assert!(
+            (bb[0] as f64 / 1e6 - 9.75).abs() < 0.1,
+            "first hole at x=10 mm"
+        );
+    }
+
+    #[test]
+    fn g00_rapid_does_not_emit_a_hit() {
+        // A tool-up rapid (G00) outside routing repositions only; it was emitting
+        // a phantom hole at the move target (review finding).
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nG00X10.0Y10.0\nM15\nG01X15.0Y10.0\nM16\nG00X50.0Y50.0\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 1, "just the slot — no hole at (50,50)");
+        let bb = ps.bbox_nm().unwrap();
+        assert!(
+            bb[2] as f64 / 1e6 < 16.0,
+            "nothing near x=50, got max x {}",
+            bb[2]
+        );
+    }
+
+    #[test]
+    fn tool_lines_with_feed_speed_fields_parse() {
+        // Header def `T1C0.500F200S65` (diameter + feed/speed) and body select
+        // `T01F200S65` are a common dialect; both were mishandled (review
+        // findings: def rejected the file, select was silently ignored).
+        let src = "M48\nMETRIC,TZ\nT1C0.500F200S65\n%\nT01F200S65\nX10.0Y10.0\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 1);
+        // Diameter 0.5 mm → area ≈ π·0.25² ≈ 0.196 mm².
+        assert!(
+            (ps.area_mm2() - 0.196).abs() < 0.01,
+            "got {}",
+            ps.area_mm2()
+        );
     }
 
     #[test]
