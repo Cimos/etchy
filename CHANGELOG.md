@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Raster page-diff engine** (`etchy_core::imagediff`) — the pure-Rust foundation
+  for schematic-PDF diff (#63). Diffs two same-size RGBA pages into added / removed
+  / changed pixel tallies, a connected-region count (4-connectivity, with a
+  noise-size filter), and a brand-coloured overlay (green added / red removed /
+  amber changed on a ghosted page). Fails loud on a page-size or buffer mismatch —
+  etchy never rescales or realigns a raster. PDF rasterization wiring lands next.
+
 ### Fixed
 - **Real-board (Altium) validation fixes** — found by running a full production
   fab pack end-to-end: tool definitions with feed/speed *before* the diameter
