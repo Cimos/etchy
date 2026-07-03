@@ -115,6 +115,8 @@
   .etfb-ctx b{color:#8b93a3}
   .etfb-send{width:100%;margin-top:12px;border:0;border-radius:8px;background:#36d39a;color:#06281c;font-weight:800;padding:11px;font-size:14px;cursor:pointer}
   .etfb-send:disabled{opacity:.6;cursor:default}
+  .etfb-gh{width:100%;margin-top:8px;border:1px solid #2f6da3;border-radius:8px;background:transparent;color:#8fd0ff;font-weight:700;padding:9px;font-size:12.5px;cursor:pointer}
+  .etfb-gh:hover{border-color:#8fd0ff;color:#cfe6fb;background:rgba(47,109,163,.12)}
   #etfb-toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);z-index:2147483002;
     background:#10331f;border:1px solid #36d39a;color:#bff5e0;padding:10px 18px;border-radius:8px;font:600 13px/1 -apple-system,"Segoe UI",sans-serif;
     opacity:0;pointer-events:none;transition:.2s}
@@ -160,6 +162,7 @@
         <input type="file" id="etfb-file" accept="image/*" multiple style="display:none">
         <div class="etfb-ctx" id="etfb-ctx"></div>
         <button class="etfb-send" id="etfb-send" onclick="etfbSend()">Send feedback</button>
+        <button class="etfb-gh" id="etfb-gh" onclick="etfbGithub()">↗ Also open as a GitHub issue</button>
         <span class="etfb-kbd"><b>Ctrl+Enter</b> to send · <b>Ctrl+V</b> to paste a screenshot</span>
       </div>
     </div>
@@ -234,6 +237,51 @@
       fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
         .then(function(r){if(!r.ok)throw 0;done(true);}).catch(function(){done(false);})
         .then(function(){b.disabled=false;b.textContent='Send feedback';});};
+    // --- opt-in: open a pre-filled GitHub issue in a new tab (#68) ---
+    // Tokenless: builds a github.com/.../issues/new?title=&labels=&body= URL from
+    // the current widget state. The user chooses to click it, so publishing is an
+    // explicit action — a private board simply never gets opened here, and the body
+    // carries an explicit "don't attach confidential screenshots" note. A token +
+    // image upload would need a backend and is unsafe to embed in a public page, so
+    // screenshots are pasted by the user after the issue form opens.
+    var GH_REPO='Cimos/etchy';
+    function ghLabels(){var ls=['feedback'];
+      if(sentiment==='issue')ls.push('bug'); else if(sentiment==='idea')ls.push('enhancement');
+      return ls.join(',');}
+    function ghBody(text){var c=ctx(),app=c.app||{},L=[];
+      L.push(text,'','---',
+        '- **Sentiment:** '+sentiment,
+        '- **Category:** '+category);
+      if(sentiment==='issue')L.push('- **Severity:** '+severity);
+      L.push('- **From:** '+(el('etfb-name').value.trim()||'anon'),
+        '','**App context**',
+        '- View / layer: '+(app.layer||'—'),
+        '- Zoom: '+(app.zoomPct!=null?app.zoomPct+'%':'—'));
+      if(app.mode)L.push('- Mode: '+app.mode);
+      L.push('','**Environment**',
+        '- Screen '+c.screen+' · Window '+c.viewport+' · Scale '+c.dpr+'×',
+        '- URL: '+c.url,
+        '- Browser: '+c.ua,
+        '','_Screenshot: paste it here if the board is public. Never attach images of confidential boards._');
+      return L.join('\n');}
+    function ghUrl(text){return 'https://github.com/'+GH_REPO+'/issues/new'
+      +'?title='+encodeURIComponent(ghTitle(text))
+      +'&labels='+encodeURIComponent(ghLabels())
+      +'&body='+encodeURIComponent(ghBody(text));}
+    function ghTitle(text){var t=text.replace(/\s+/g,' ').trim().slice(0,70);
+      return text.length>70?t.replace(/\s+\S*$/,'')+'…':t;}
+    // Exposed so the headless test can assert the generated URL without a real tab.
+    window.__etfbGhUrl=ghUrl;
+    window.etfbGithub=function(){var raw=el('etfb-text').value.trim();
+      if(!raw){el('etfb-text').focus();el('etfb-text').style.borderColor='#e8b34a';return;}
+      // Keep the URL well under browser/GitHub limits (~8KB): budget the free text
+      // against the fixed overhead so the link never breaks; never raw-slice the URL
+      // (that would cut a %-escape). The user pastes any overflow into the issue.
+      var overhead=ghUrl('').length, text=raw;
+      var budget=Math.floor((6000-overhead)/3); // ~3 bytes/char worst-case encoding
+      if(budget>0&&text.length>budget)
+        text=text.slice(0,Math.max(0,budget-40))+'\n\n…(truncated — paste the rest here)';
+      window.open(ghUrl(text),'_blank','noopener');};
     // one-time hint bubble
     try{ if(!localStorage.getItem('etfb-hint-seen')){
       setTimeout(function(){var h=el('etfb-hint');if(h)h.classList.add('show');},2200);
