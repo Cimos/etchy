@@ -66,6 +66,22 @@ pub enum EngineError {
     #[error("not the same board (etchy will not auto-align): {detail}")]
     BoardMismatch { detail: String },
 
+    /// Two raster pages (e.g. schematic-PDF pages) that must line up pixel-for-pixel
+    /// differ in size. etchy diffs same-document revisions and will not rescale or
+    /// realign — a size change means the export changed, so fail loud (mirrors the
+    /// same-board guard for geometry).
+    #[error("page sizes differ ({ow}x{oh} vs {nw}x{nh}) — etchy will not rescale raster pages")]
+    ImageSizeMismatch { ow: u32, oh: u32, nw: u32, nh: u32 },
+
+    /// A raster buffer's length doesn't match its declared width×height×4 (RGBA).
+    #[error("malformed image: {len} bytes for {w}x{h} RGBA (expected {expected})")]
+    MalformedImage {
+        w: u32,
+        h: u32,
+        len: usize,
+        expected: usize,
+    },
+
     /// A single layer emitted more objects than the engine will process. Guards
     /// against a tiny file amplifying (many arcs / region loops / polarity spans)
     /// into millions of contours — a CPU/RAM exhaustion DoS. Fail loud rather

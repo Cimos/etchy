@@ -20,6 +20,7 @@ pub mod export;
 pub mod geo;
 pub mod geom;
 pub mod gerber;
+pub mod imagediff;
 pub mod model;
 pub mod naming;
 pub mod placement;
@@ -36,6 +37,7 @@ pub use geo::{
 };
 pub use geom::CIRCLE_SEGMENTS;
 pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};
+pub use imagediff::{diff_images, Image, ImageDiffOptions, ImageDiffResult, ImageDiffStats};
 pub use model::{pair_layers, same_board_guard, Board, Layer, LayerKind, LayerPairing};
 pub use naming::{classify, looks_like_gerber};
 pub use placement::{looks_like_placement, resolve_placement};
