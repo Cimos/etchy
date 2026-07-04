@@ -23,22 +23,31 @@ pub enum Lod {
     Fade(f32),
 }
 
+/// Below this fade opacity, keep showing the fixed marker dot instead of the
+/// to-scale geometry (#156). Without it a small feature (e.g. a drill hole) is a
+/// solid dot at `px <= lo` but a near-invisible ~0-alpha smear just above `lo`,
+/// so it *disappears* for a mid-zoom band and only fades back in near `hi` — the
+/// "drill holes vanish then come back as I zoom" dropout. The marker now hands off
+/// to the geometry only once the geometry is opaque enough to stand on its own.
+pub const LOD_MARKER_ALPHA_FLOOR: f32 = 0.5;
+
 /// Decide how a diff region renders from its on-screen width `px`, the fade band
 /// `[lo, hi]`, and whether it is genuine noise (area below the absolute min).
 ///
 /// - `is_noise` → [`Lod::Cull`] (the only cull path; surfaced in the caption).
-/// - else `px <= lo` → [`Lod::Marker`] (real but sub-pixel — a fixed dot, never gone).
+/// - else opacity `< LOD_MARKER_ALPHA_FLOOR` → [`Lod::Marker`] (a fixed dot; covers
+///   `px <= lo` AND the low-opacity start of the fade band, so a real feature is
+///   never invisible — the #14 phantom AND the #156 mid-zoom dropout).
 /// - else → [`Lod::Fade`] with [`geometry_alpha`] (≥ `hi` clamps to full).
-///
-/// This keeps a real diff visible (as a dot) at all zooms — the fix for the #14
-/// phantom diff that vanished when zoomed out.
 pub fn lod_render(px: f32, lo: f32, hi: f32, is_noise: bool) -> Lod {
     if is_noise {
-        Lod::Cull
-    } else if px <= lo {
+        return Lod::Cull;
+    }
+    let alpha = geometry_alpha(px, lo, hi);
+    if alpha < LOD_MARKER_ALPHA_FLOOR {
         Lod::Marker
     } else {
-        Lod::Fade(geometry_alpha(px, lo, hi))
+        Lod::Fade(alpha)
     }
 }
 
@@ -94,11 +103,29 @@ mod tests {
     }
 
     #[test]
-    fn lod_render_mid_fades() {
-        // Between lo and hi: fade with the same ramp as geometry_alpha.
+    fn lod_render_no_mid_zoom_dropout_above_lo() {
+        // #156: just above `lo` the to-scale geometry would be near-invisible
+        // (~0 alpha), so the feature must STAY a marker dot rather than vanish.
+        // At lo=1.5,hi=5.0 the floor (0.5) is reached at px=3.25.
+        for &px in &[1.6_f32, 2.0, 3.0] {
+            assert_eq!(
+                lod_render(px, 1.5, 5.0, false),
+                Lod::Marker,
+                "px={px} is above lo but sub-floor opacity — must be a marker, not invisible"
+            );
+        }
+    }
+
+    #[test]
+    fn lod_render_fades_once_opaque_enough() {
+        // At/after the floor opacity, hand off to to-scale geometry.
         match lod_render(3.25, 1.5, 5.0, false) {
             Lod::Fade(a) => assert!((a - 0.5).abs() < 1e-6, "expected ~0.5, got {a}"),
-            other => panic!("expected Fade in the ramp band, got {other:?}"),
+            other => panic!("expected Fade at the floor, got {other:?}"),
+        }
+        match lod_render(4.5, 1.5, 5.0, false) {
+            Lod::Fade(a) => assert!(a > 0.5, "expected >0.5, got {a}"),
+            other => panic!("expected Fade above the floor, got {other:?}"),
         }
     }
 
@@ -111,9 +138,9 @@ mod tests {
 
     #[test]
     fn lod_render_fade_band_is_continuous_with_geometry_alpha() {
-        // The Fade branch must agree with geometry_alpha across the band, so wiring
-        // it in can't change mid-zoom appearance.
-        for &px in &[1.6_f32, 2.0, 3.0, 4.0, 4.9] {
+        // Where it Fades (opacity at/above the floor), it must agree with
+        // geometry_alpha so wiring it in can't change that part of the ramp.
+        for &px in &[4.0_f32, 4.9] {
             let a = geometry_alpha(px, 1.5, 5.0);
             assert_eq!(lod_render(px, 1.5, 5.0, false), Lod::Fade(a));
         }
