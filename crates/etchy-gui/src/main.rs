@@ -3296,6 +3296,26 @@ const DIFF_EDGE_MIN_PX: f32 = 14.0;
 /// thickness LOD deliberately fades sub-pixel slivers (pour rims); stroking those
 /// would resurrect them as full-length hairlines of noise.
 const DIFF_EDGE_MIN_THICK_PX: f32 = 2.5;
+/// …and only for reasonably COMPACT regions (extent ≤ this × thickness). #113's
+/// intent is to delineate adjacent added/removed *blobs* (moved pads/vias); a long
+/// thin sliver (a shifted trace) has extent ≫ thickness, and stroking its outline
+/// just draws a long line that reads as a stray diagonal artifact, not a boundary
+/// (#153). The fill already shows such slivers; the outline adds nothing there.
+const DIFF_EDGE_MAX_ASPECT: i64 = 6;
+
+/// Whether a diff region should get a #113 edge stroke: it must read as a filled
+/// shape on screen (thickness), be sizeable (extent), still be visible (alpha), and
+/// be compact rather than an elongated sliver (extent ≤ MAX_ASPECT × thickness).
+/// Pure so the sliver-vs-blob decision is unit-testable (#153).
+fn diff_edge_eligible(area_nm2: f64, extent_nm: i64, scale: f64, alpha: u8) -> bool {
+    let thickness_nm = feature_thickness_nm(area_nm2, extent_nm);
+    let thickness_px = region_screen_px(thickness_nm, scale);
+    let extent_px = region_screen_px(extent_nm, scale);
+    thickness_px >= DIFF_EDGE_MIN_THICK_PX
+        && extent_px >= DIFF_EDGE_MIN_PX
+        && alpha >= 48
+        && extent_nm <= thickness_nm.saturating_mul(DIFF_EDGE_MAX_ASPECT)
+}
 
 /// The edge stroke colour for a diff fill: the same hue darkened, alpha kept, so
 /// green/red regions get a crisp boundary without introducing a new colour.
@@ -3594,11 +3614,9 @@ fn transform_cache(
                 // layer's diffs sit behind the active layer's.
                 lod::Lod::Fade(alpha) => color = with_alpha(color, alpha * dim),
             }
-            // Edge-stroke eligibility (#113): the region must read as a filled
-            // shape (thickness), be sizeable (extent), and not be faded near-out.
-            edge = px >= DIFF_EDGE_MIN_THICK_PX
-                && region_screen_px(item.extent_nm, cam.scale) >= DIFF_EDGE_MIN_PX
-                && color.a() >= 48;
+            // Edge-stroke eligibility (#113/#153): filled, sizeable, visible, and
+            // COMPACT — an elongated sliver's outline is just a stray line (#153).
+            edge = diff_edge_eligible(item.area_nm2, item.extent_nm, cam.scale, color.a());
         }
         for tri in &item.tris {
             let base = mesh.vertices.len() as u32;
@@ -4130,6 +4148,31 @@ mod tests {
         // so LOD treats it as THIN (it fades) rather than as a big feature by extent.
         assert_eq!(feature_thickness_nm(100_000.0, 10_000), 10);
         assert_eq!(feature_thickness_nm(5.0, 0), 0); // guard
+    }
+
+    #[test]
+    fn diff_edge_eligible_strokes_blobs_not_slivers() {
+        use super::diff_edge_eligible;
+        // Zoom where a 0.3mm feature is ~47px extent (scale = 47/300_000 px/nm).
+        let scale = 47.0 / 300_000.0;
+        // A compact 0.3mm x 0.3mm blob (moved pad/via): extent≈thickness → stroke it.
+        let blob_area = 300_000.0 * 300_000.0; // nm²
+        assert!(
+            diff_edge_eligible(blob_area, 300_000, scale, 255),
+            "compact blob should get an edge stroke"
+        );
+        // A long thin diagonal sliver (shifted trace): 3mm long, 0.02mm thick — same
+        // thickness-px range but extent ≫ thickness → NO stroke (that's the #153
+        // stray-diagonal artifact).
+        let sliver_area = 3_000_000.0 * 20_000.0; // nm²
+        assert!(
+            !diff_edge_eligible(sliver_area, 3_000_000, scale, 255),
+            "elongated sliver must NOT be stroked (would draw a stray line)"
+        );
+        // Faded-out region (alpha below floor) → no stroke.
+        assert!(!diff_edge_eligible(blob_area, 300_000, scale, 30));
+        // Zoomed way out (sub-pixel) → no stroke.
+        assert!(!diff_edge_eligible(blob_area, 300_000, scale / 20.0, 255));
     }
 
     #[test]
