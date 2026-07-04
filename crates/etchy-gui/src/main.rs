@@ -2395,6 +2395,15 @@ impl eframe::App for ViewApp {
                                 open_side = Some(RevSide::New);
                                 ui.close();
                             }
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(
+                                    "…or drag a folder / .zip onto the window\n\
+                                     (if the file dialog doesn't open)",
+                                )
+                                .weak()
+                                .small(),
+                            );
                         });
                     }
                     // Flexible middle (left of the actions in RTL): transient export
@@ -3731,14 +3740,46 @@ const TIER_LABELS_PX: f32 = 940.0;
 /// Below this window width (pt) the right action cluster collapses into "More".
 const TIER_MORE_PX: f32 = 900.0;
 
+/// Running under WSL? WSL sets `WSL_DISTRO_NAME`, and the kernel release contains
+/// "microsoft". On real Windows/macOS/Linux this is always false (the /proc read
+/// just fails), so it only affects the WSL dev path.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_wsl() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
+/// Open a URL in the user's browser (#159). On WSL the Linux browser handlers
+/// don't reach the Windows browser, so route through `explorer.exe`; everywhere
+/// else use egui's normal handler (Win32 ShellExecute / macOS `open` / a Linux
+/// desktop's opener).
+fn open_url(ctx: &egui::Context, url: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if is_wsl() {
+        let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+        return;
+    }
+    ctx.open_url(egui::OpenUrl::new_tab(url));
+}
+
 /// The Help menu's links + version — shared by the top bar's Help button and the
-/// narrow "More" menu (#57).
+/// narrow "More" menu (#57). Uses [`open_url`] so the links work on WSL too (#159).
 fn help_links(ui: &mut egui::Ui) {
-    ui.hyperlink_to("etchy on GitHub", URL_REPO);
-    ui.hyperlink_to("Website", URL_SITE);
-    ui.hyperlink_to("Report an issue", URL_ISSUES);
+    for (label, url) in [
+        ("etchy on GitHub", URL_REPO),
+        ("Website", URL_SITE),
+        ("Report an issue", URL_ISSUES),
+    ] {
+        if ui.link(label).clicked() {
+            open_url(ui.ctx(), url);
+        }
+    }
     ui.separator();
-    ui.hyperlink_to("Sponsor / fund etchy", URL_SPONSOR);
+    if ui.link("Sponsor / fund etchy").clicked() {
+        open_url(ui.ctx(), URL_SPONSOR);
+    }
     ui.separator();
     ui.label(format!("etchy v{}", env!("CARGO_PKG_VERSION")))
         .on_hover_text("The engine version.");
