@@ -688,6 +688,42 @@ impl SettingsTab {
     ];
 }
 
+/// How many layers the canvas shows at once (#59). A quick preset over the
+/// per-layer visibility checkboxes: Single = only the active layer (the fast
+/// default on dense boards); Highlight = every layer, active at full strength and
+/// the rest dimmed (the Altium/KiCad way of reading a stack); All = every layer at
+/// equal strength.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ViewMode {
+    #[default]
+    Single,
+    Highlight,
+    All,
+}
+
+impl ViewMode {
+    const ALL: [(ViewMode, &'static str); 3] = [
+        (ViewMode::Single, "single"),
+        (ViewMode::Highlight, "highlight"),
+        (ViewMode::All, "all"),
+    ];
+    /// Non-selected layers are dimmed only in Highlight (Single shows one layer;
+    /// All shows every layer at equal strength).
+    fn dims_others(self) -> bool {
+        matches!(self, ViewMode::Highlight)
+    }
+}
+
+/// The per-layer visibility a view mode selects (#59): Single shows only the active
+/// layer; Highlight and All show every layer (they differ only in dimming, handled
+/// by [`ViewMode::dims_others`]). Pure, so the preset is unit-testable.
+fn visibility_for_mode(mode: ViewMode, n: usize, selected: usize) -> Vec<bool> {
+    match mode {
+        ViewMode::Single => default_visible(n, selected),
+        ViewMode::Highlight | ViewMode::All => vec![true; n],
+    }
+}
+
 struct ViewApp {
     diff: BoardDiff,
     old_label: String,
@@ -725,6 +761,9 @@ struct ViewApp {
     /// Which Settings section the left rail has selected (runtime-only; not
     /// persisted — the window always opens on Display).
     settings_tab: SettingsTab,
+    /// How many layers the canvas shows at once (#59; runtime-only). Changing it
+    /// resets the per-layer visibility to the mode's preset.
+    view_mode: ViewMode,
     /// Min-area noise threshold in mm² (G9): diff regions smaller than this are
     /// dropped. 0 disables it. Always surfaced — the caption reports how many were
     /// hidden. Driven by a slider in the top bar.
@@ -842,6 +881,7 @@ impl ViewApp {
             base_overrides: Vec::new(),
             show_settings: false,
             settings_tab: SettingsTab::default(),
+            view_mode: ViewMode::default(),
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
@@ -1457,7 +1497,11 @@ impl ViewApp {
         let canvas = self.canvas_color();
         let mut out = Vec::new();
         for item in &cache.items {
-            let dim = dim_factor(item.layer_index, self.selected);
+            let dim = dim_factor(
+                item.layer_index,
+                self.selected,
+                self.view_mode.dims_others(),
+            );
             let mut color = match item.role {
                 Role::Base => {
                     let base = if item.layer_index == NO_LAYER {
@@ -2357,6 +2401,22 @@ impl eframe::App for ViewApp {
                     // stays in `visible_from_changed` (still unit-tested) so it can be
                     // re-surfaced later, but the button is removed from the row.
                 });
+                // View mode (#59): a quick preset over the per-layer checkboxes —
+                // single active layer / highlight active over dimmed rest / all equal.
+                // Selecting one resets visibility to the preset; per-row checkboxes
+                // still fine-tune afterwards.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("view").weak().small());
+                    ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
+                    ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
+                    for (mode, label) in ViewMode::ALL {
+                        if ui.selectable_label(self.view_mode == mode, label).clicked() {
+                            self.view_mode = mode;
+                            self.visible_layers =
+                                visibility_for_mode(mode, self.diff.layers.len(), self.selected);
+                        }
+                    }
+                });
                 ui.separator();
                 // Actions deferred so the per-frame group iteration doesn't borrow
                 // self mutably while it's borrowed for the group list.
@@ -3117,6 +3177,7 @@ impl ViewApp {
                     self.col_removed,
                     min_area_nm2,
                     false,
+                    self.view_mode.dims_others(),
                 );
                 self.last_hidden = hidden;
                 n = shapes.len();
@@ -3506,8 +3567,8 @@ const DIM_ALPHA: f32 = 0.4;
 /// Opacity multiplier for an item from `layer_index` given the active `selected`
 /// layer: 1.0 for the selected layer (and for layer-less items like the outline),
 /// `DIM_ALPHA` for the other visible layers (#59).
-fn dim_factor(layer_index: usize, selected: usize) -> f32 {
-    if layer_index == NO_LAYER || layer_index == selected {
+fn dim_factor(layer_index: usize, selected: usize, dim_others: bool) -> f32 {
+    if !dim_others || layer_index == NO_LAYER || layer_index == selected {
         1.0
     } else {
         DIM_ALPHA
@@ -3534,6 +3595,8 @@ fn transform_cache(
     // When true, Role::Base items are skipped here because the GPU path is drawing
     // them this frame (#106). Always false without the `gpu-transform` feature.
     skip_base: bool,
+    // Whether non-selected layers are dimmed (#59 Highlight mode).
+    dim_others: bool,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
     // instead of one Mesh+Shape per region — the FMU top-copper layer was ~5.5k
@@ -3572,7 +3635,7 @@ fn transform_cache(
         }
         // Highlight/dim (#59): the active layer at full opacity, the other visible
         // layers dimmed; layer-less items (outline) never dim.
-        let dim = dim_factor(item.layer_index, selected);
+        let dim = dim_factor(item.layer_index, selected, dim_others);
         let mut edge = false;
         let (mut color, is_diff) = match item.role {
             Role::Base => (
@@ -4028,6 +4091,7 @@ mod tests {
                     super::C_REMOVED,
                     0.0,
                     false, // skip_base: CPU path draws everything in this bench
+                    true,  // dim_others
                 );
                 sink += shapes.len();
             }
@@ -4711,6 +4775,40 @@ mod tests {
         // Out-of-range indices are ignored (guard against stale group lists).
         set_group_visibility(&mut vis, &[99], false);
         assert_eq!(vis, vec![true, true, true, true]);
+    }
+
+    #[test]
+    fn view_mode_visibility_presets() {
+        use super::{visibility_for_mode, ViewMode};
+        // Single: only the active layer is on.
+        assert_eq!(
+            visibility_for_mode(ViewMode::Single, 4, 2),
+            vec![false, false, true, false]
+        );
+        // Highlight and All: every layer on (they differ only in dimming).
+        assert_eq!(
+            visibility_for_mode(ViewMode::Highlight, 3, 0),
+            vec![true, true, true]
+        );
+        assert_eq!(
+            visibility_for_mode(ViewMode::All, 3, 0),
+            vec![true, true, true]
+        );
+    }
+
+    #[test]
+    fn dim_factor_dims_only_in_highlight() {
+        use super::{dim_factor, ViewMode, DIM_ALPHA, NO_LAYER};
+        // Highlight (dim_others=true): non-selected dim, selected/outline full.
+        assert_eq!(dim_factor(1, 0, true), DIM_ALPHA);
+        assert_eq!(dim_factor(0, 0, true), 1.0);
+        assert_eq!(dim_factor(NO_LAYER, 0, true), 1.0);
+        // All (dim_others=false): every layer at full strength.
+        assert_eq!(dim_factor(1, 0, false), 1.0);
+        // The mode's own flag: only Highlight dims.
+        assert!(ViewMode::Highlight.dims_others());
+        assert!(!ViewMode::All.dims_others());
+        assert!(!ViewMode::Single.dims_others());
     }
 
     #[test]
