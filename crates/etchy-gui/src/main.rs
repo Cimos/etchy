@@ -2504,7 +2504,34 @@ impl eframe::App for ViewApp {
                 let mut toggle: Option<(usize, bool)> = None; // (layer, show)
                 let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
                 let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
+                let mut toggle_outline = false; // board-edge visibility (#157)
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Board edge is its own reference "layer" (#157): a row in the list
+                    // with the others (an eye toggle like every layer row), not a
+                    // separate control. It's a faint outline drawn on every layer.
+                    if self.outline.is_some() {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Reference").small().color(C_COPPER));
+                        ui.horizontal(|ui| {
+                            if eye_toggle(ui, self.show_outline)
+                                .on_hover_text("Show / hide the board outline reference")
+                                .clicked()
+                            {
+                                toggle_outline = true;
+                            }
+                            let (sw, _) = ui
+                                .allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
+                            ui.painter().rect_stroke(
+                                sw,
+                                2.0,
+                                Stroke::new(1.5, C_COPPER),
+                                egui::StrokeKind::Inside,
+                            );
+                            ui.label("board edge").on_hover_text(
+                                "The board outline (Edge.Cuts/GKO), drawn faint on every layer.",
+                            );
+                        });
+                    }
                     // Group into sections (copper / mask / silk / …) in fixed order,
                     // changed-first within each (G5).
                     let groups =
@@ -2664,25 +2691,8 @@ impl eframe::App for ViewApp {
                         self.base_overrides.push((idx, c));
                     }
                 }
-                // Board-edge reference toggle, moved off the top bar (#157). It's a
-                // reference outline drawn on every layer, not a diff layer, so it sits
-                // below the list with its own faint-copper swatch.
-                if self.outline.is_some() {
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        let (sw, _) =
-                            ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-                        ui.painter().rect_stroke(
-                            sw,
-                            2.0,
-                            Stroke::new(1.5, C_COPPER),
-                            egui::StrokeKind::Inside,
-                        );
-                        ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
-                            "Show the board outline (Edge.Cuts/GKO) as a faint reference on every layer.",
-                        );
-                    });
+                if toggle_outline {
+                    self.show_outline = !self.show_outline;
                 }
             });
 
