@@ -1213,6 +1213,40 @@ fn outline_legend_visible(show_outline: bool, outline: Option<usize>, selected: 
 const C_ADDED: Color32 = Color32::from_rgb(0x46, 0xd1, 0x8a); // #46d18a
 const C_REMOVED: Color32 = Color32::from_rgb(0xff, 0x5d, 0x73); // #ff5d73
 const C_BASE: Color32 = Color32::from_rgb(90, 95, 105);
+
+/// Named added/removed colour presets offered in Settings → Colours (#155).
+/// Brand is the default green/red; Colour-safe swaps to blue/orange so red-green
+/// colour-blind viewers can still tell them apart; High-contrast maxes separation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffPalette {
+    Brand,
+    ColorSafe,
+    HighContrast,
+}
+
+impl DiffPalette {
+    const ALL: [(DiffPalette, &'static str); 3] = [
+        (DiffPalette::Brand, "brand"),
+        (DiffPalette::ColorSafe, "colour-safe"),
+        (DiffPalette::HighContrast, "high-contrast"),
+    ];
+    /// The (added, removed) colours for this palette.
+    fn colors(self) -> (Color32, Color32) {
+        match self {
+            DiffPalette::Brand => (C_ADDED, C_REMOVED),
+            // Blue / orange — distinguishable under deutan/protan colour blindness.
+            DiffPalette::ColorSafe => (
+                Color32::from_rgb(0x3b, 0x9c, 0xff),
+                Color32::from_rgb(0xff, 0x9e, 0x3d),
+            ),
+            // Maximum separation on the dark canvas.
+            DiffPalette::HighContrast => (
+                Color32::from_rgb(0x2b, 0xff, 0x88),
+                Color32::from_rgb(0xff, 0x2d, 0x55),
+            ),
+        }
+    }
+}
 /// Brand "board dark" — the canvas (PCB) background.
 const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
 
@@ -2745,16 +2779,26 @@ impl ViewApp {
     /// Settings → Colours: diff colours + per-theme canvas/grid (#53/#31/#52).
     fn settings_colours(&mut self, ui: &mut egui::Ui) {
         Self::settings_header(ui, "Diff colours");
+        // One-click palette presets (#155); the pickers below still fine-tune.
+        ui.horizontal(|ui| {
+            ui.label("Preset");
+            ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
+            ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
+            for (pal, label) in DiffPalette::ALL {
+                let (a, r) = pal.colors();
+                let active = self.col_added == a && self.col_removed == r;
+                if ui.selectable_label(active, label).clicked() {
+                    self.col_added = a;
+                    self.col_removed = r;
+                }
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("added");
             ui.color_edit_button_srgba(&mut self.col_added);
             ui.label("removed");
             ui.color_edit_button_srgba(&mut self.col_removed);
         });
-        if ui.button("reset diff to brand").clicked() {
-            self.col_added = C_ADDED;
-            self.col_removed = C_REMOVED;
-        }
         ui.add_space(6.0);
         // The pickers edit the ACTIVE theme; switch dark/light to tune the other,
         // so a charcoal canvas never bleeds into light mode.
@@ -4802,6 +4846,24 @@ mod tests {
         assert_eq!(fresh.base_overrides, app.base_overrides);
         assert_eq!(fresh.input_preset, app.input_preset);
         assert_eq!(fresh.swipe_frac, app.swipe_frac);
+    }
+
+    #[test]
+    fn diff_palette_presets() {
+        use super::{DiffPalette, C_ADDED, C_REMOVED};
+        // Brand is exactly the default brand green/red (so it doubles as "reset").
+        assert_eq!(DiffPalette::Brand.colors(), (C_ADDED, C_REMOVED));
+        // The other presets differ from brand and from each other.
+        let brand = DiffPalette::Brand.colors();
+        let safe = DiffPalette::ColorSafe.colors();
+        let hc = DiffPalette::HighContrast.colors();
+        assert_ne!(safe, brand);
+        assert_ne!(hc, brand);
+        assert_ne!(safe, hc);
+        // added != removed within each palette (so a diff is always legible).
+        for (a, r) in [brand, safe, hc] {
+            assert_ne!(a, r);
+        }
     }
 
     #[test]
