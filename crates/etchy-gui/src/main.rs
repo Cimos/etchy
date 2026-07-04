@@ -2445,15 +2445,15 @@ impl eframe::App for ViewApp {
                             );
                         state
                             .show_header(ui, |ui| {
-                                // Show/hide every layer in the group (#58). Separate
-                                // from collapsing, which only hides the list rows.
-                                let mut all = group_all_visible(&self.visible_layers, &idxs);
-                                if ui
-                                    .checkbox(&mut all, "")
+                                // Show/hide every layer in the group (#58), same eye
+                                // toggle as the rows (#4). Separate from collapsing,
+                                // which only hides the list rows.
+                                let all = group_all_visible(&self.visible_layers, &idxs);
+                                if eye_toggle(ui, all)
                                     .on_hover_text("Show / hide every layer in this group")
-                                    .changed()
+                                    .clicked()
                                 {
-                                    group_set = Some((idxs.clone(), all));
+                                    group_set = Some((idxs.clone(), !all));
                                 }
                                 ui.label(
                                     egui::RichText::new(group.title())
@@ -2487,15 +2487,14 @@ impl eframe::App for ViewApp {
                                     );
                                     let resp = ui
                                         .horizontal(|ui| {
-                                            // Per-layer visibility toggle, separate from
-                                            // the click-to-select label (#58).
-                                            let mut vis = visible;
-                                            if ui
-                                                .checkbox(&mut vis, "")
+                                            // Per-layer visibility: an Altium-style
+                                            // eye toggle, separate from the
+                                            // click-to-select label (#4/#58).
+                                            if eye_toggle(ui, visible)
                                                 .on_hover_text("Show / hide this layer")
-                                                .changed()
+                                                .clicked()
                                             {
-                                                toggle = Some((idx, vis));
+                                                toggle = Some((idx, !visible));
                                             }
                                             // Clickable colour swatch (#3): opens this
                                             // layer's colour picker; a change records a
@@ -3573,6 +3572,49 @@ fn dim_factor(layer_index: usize, selected: usize, dim_others: bool) -> f32 {
     } else {
         DIM_ALPHA
     }
+}
+
+/// An Altium-style eye toggle for layer visibility (#4): an open eye when shown, a
+/// dimmed eye with a slash when hidden. Painted (egui's default font has no eye
+/// glyph — same reason the layer swatch is a painted rect, #16). Returns the click
+/// response so the caller flips visibility. Replaces the old per-row checkbox.
+fn eye_toggle(ui: &mut egui::Ui, visible: bool) -> egui::Response {
+    let size = egui::vec2(18.0, 16.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovered = resp.hovered();
+    let c = rect.center();
+    let col = if visible {
+        if hovered {
+            C_CREAM
+        } else {
+            Color32::from_rgb(0xcd, 0xd6, 0xe4)
+        }
+    } else {
+        Color32::from_gray(if hovered { 130 } else { 90 })
+    };
+    let p = ui.painter();
+    // Almond outline (a wide ellipse) reads as an eye; a pupil dot when open.
+    let (rx, ry) = (6.5_f32, 3.6_f32);
+    let pts: Vec<Pos2> = (0..=18)
+        .map(|i| {
+            let t = i as f32 / 18.0 * std::f32::consts::TAU;
+            egui::pos2(c.x + rx * t.cos(), c.y + ry * t.sin())
+        })
+        .collect();
+    p.add(Shape::closed_line(pts, Stroke::new(1.3, col)));
+    if visible {
+        p.circle_filled(c, 2.1, col);
+    } else {
+        // Hidden: a diagonal slash across the eye.
+        p.line_segment(
+            [
+                egui::pos2(c.x - rx - 1.0, c.y + ry + 1.0),
+                egui::pos2(c.x + rx + 1.0, c.y - ry - 1.0),
+            ],
+            Stroke::new(1.3, col),
+        );
+    }
+    resp
 }
 
 /// Per-frame: transform cached world items to screen meshes, applying colour, the
