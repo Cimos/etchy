@@ -665,6 +665,29 @@ struct FilePick {
     result: anyhow::Result<LoadedBoard>,
 }
 
+/// The Settings window's left-rail sections (#121). The window shows one at a
+/// time, so the long per-layer colour list no longer buries the other controls.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Display,
+    Grid,
+    Input,
+    Colours,
+    Layers,
+}
+
+impl SettingsTab {
+    /// (tab, label) in rail order.
+    const ALL: [(SettingsTab, &'static str); 5] = [
+        (SettingsTab::Display, "Display"),
+        (SettingsTab::Grid, "Grid"),
+        (SettingsTab::Input, "Input"),
+        (SettingsTab::Colours, "Colours"),
+        (SettingsTab::Layers, "Layers"),
+    ];
+}
+
 struct ViewApp {
     diff: BoardDiff,
     old_label: String,
@@ -699,6 +722,9 @@ struct ViewApp {
     /// The Settings editor window is open. A real window (not a menu) so the nested
     /// colour-picker popup works — a menu_button closed on the first inner click.
     show_settings: bool,
+    /// Which Settings section the left rail has selected (runtime-only; not
+    /// persisted — the window always opens on Display).
+    settings_tab: SettingsTab,
     /// Min-area noise threshold in mm² (G9): diff regions smaller than this are
     /// dropped. 0 disables it. Always surfaced — the caption reports how many were
     /// hidden. Driven by a slider in the top bar.
@@ -815,6 +841,7 @@ impl ViewApp {
             grid_light: C_GRID_DEFAULT_LIGHT,
             base_overrides: Vec::new(),
             show_settings: false,
+            settings_tab: SettingsTab::default(),
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
@@ -2519,130 +2546,42 @@ impl eframe::App for ViewApp {
                 .default_pos(center)
                 .pivot(egui::Align2::CENTER_CENTER)
                 .show(ui.ctx(), |ui| {
-                    // Display: theme, measure units, and (feature build) the GPU path.
-                    ui.label(egui::RichText::new("Display").strong());
-                    ui.horizontal(|ui| {
-                        ui.label("Theme");
-                        ui.selectable_value(&mut self.theme, Theme::Dark, "dark");
-                        ui.selectable_value(&mut self.theme, Theme::Light, "light");
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Measure units");
-                        ui.selectable_value(&mut self.measure_unit, Unit::Mm, "mm");
-                        ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
-                        ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
-                    });
-                    #[cfg(feature = "gpu-transform")]
-                    if self.gpu.is_some() {
-                        ui.checkbox(&mut self.use_gpu, "GPU base transform (experimental)")
-                            .on_hover_text(
-                                "Transform the base layer on the GPU (#106). \
-                                 Off falls back to the CPU path.",
-                            );
-                    }
-                    ui.separator();
-                    // Grid overlay + snap.
-                    ui.label(egui::RichText::new("Grid").strong());
-                    ui.checkbox(&mut self.show_grid, "Show reference grid (G)");
-                    ui.horizontal(|ui| {
-                        ui.label("Spacing");
-                        ui.add(
-                            egui::DragValue::new(&mut self.grid_mm)
-                                .speed(0.1)
-                                .range(0.01..=100.0)
-                                .suffix(" mm"),
-                        );
-                    });
-                    ui.checkbox(
-                        &mut self.snap_grid,
-                        "Snap measure clicks to grid intersections",
-                    );
-                    ui.separator();
-                    // Input scheme matching the user's ECAD tool (#54).
-                    ui.label(egui::RichText::new("Input").strong());
-                    ui.horizontal(|ui| {
-                        ui.label("ECAD preset");
-                        ui.selectable_value(&mut self.input_preset, InputPreset::Altium, "Altium");
-                        ui.selectable_value(&mut self.input_preset, InputPreset::KiCad, "KiCad");
-                    })
-                    .response
-                    .on_hover_text(
-                        "Pan mouse button by ECAD tool: \
-                         Altium = right-drag, KiCad = middle/right-drag.",
-                    );
-                    ui.separator();
-                    ui.label(egui::RichText::new("Diff colours").strong());
-                    ui.horizontal(|ui| {
-                        ui.label("added");
-                        ui.color_edit_button_srgba(&mut self.col_added);
-                        ui.label("removed");
-                        ui.color_edit_button_srgba(&mut self.col_removed);
-                    });
-                    if ui.button("reset diff to brand").clicked() {
-                        self.col_added = C_ADDED;
-                        self.col_removed = C_REMOVED;
-                    }
-                    ui.separator();
-                    // Canvas + grid colours (#53) — per-theme (#31), persisted (#52).
-                    // The pickers edit the ACTIVE theme; switch dark/light to tune the
-                    // other, so a charcoal canvas never bleeds into light mode.
-                    let theme_name = match self.theme {
-                        Theme::Dark => "dark",
-                        Theme::Light => "light",
-                    };
-                    ui.label(
-                        egui::RichText::new(format!("Canvas & grid ({theme_name} mode)")).strong(),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("Canvas");
-                        ui.color_edit_button_srgba(self.canvas_color_mut());
-                        ui.label("Grid");
-                        ui.color_edit_button_srgba(self.grid_color_mut());
-                    });
-                    if ui.button("reset canvas & grid to default").clicked() {
-                        self.canvas_dark = default_canvas(Theme::Dark);
-                        self.canvas_light = default_canvas(Theme::Light);
-                        self.grid_dark = default_grid(Theme::Dark);
-                        self.grid_light = default_grid(Theme::Light);
-                    }
-                    ui.separator();
-                    ui.label(egui::RichText::new("Layer base colours").strong());
-                    egui::ScrollArea::vertical()
-                        .max_height(360.0)
-                        // Fill the window width so the scrollbar sits at the far right
-                        // instead of hugging the (narrow) content (#6).
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            // One row per LAYER (by index), so two layers of the same
-                            // kind can be coloured apart (#21).
-                            for idx in 0..self.diff.layers.len() {
-                                let kind = self.diff.layers[idx].kind;
-                                let label = self.diff.layers[idx].name();
-                                ui.horizontal(|ui| {
-                                    let mut base = resolve_base_color(
-                                        idx,
-                                        kind,
-                                        &self.base_overrides,
-                                        self.theme,
-                                    );
-                                    if ui.color_edit_button_srgba(&mut base).changed() {
-                                        if let Some(e) =
-                                            self.base_overrides.iter_mut().find(|(i, _)| *i == idx)
-                                        {
-                                            e.1 = base;
-                                        } else {
-                                            self.base_overrides.push((idx, base));
-                                        }
-                                    }
-                                    ui.label(label);
-                                    if self.base_overrides.iter().any(|(i, _)| *i == idx)
-                                        && ui.small_button("reset").clicked()
-                                    {
-                                        self.base_overrides.retain(|(i, _)| *i != idx);
-                                    }
-                                });
+                    // Copper selection accent for this window (#121): selected rail
+                    // entry, theme/units/preset toggles read brand-copper, not the
+                    // default blue.
+                    ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
+                    ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, C_COPPER);
+                    ui.set_min_width(432.0);
+                    ui.horizontal_top(|ui| {
+                        // Left rail: one section at a time, so the long per-layer list
+                        // no longer buries Display/Grid/Input/Colours.
+                        ui.vertical(|ui| {
+                            ui.set_width(96.0);
+                            for (tab, label) in SettingsTab::ALL {
+                                let on = self.settings_tab == tab;
+                                let text = if on {
+                                    egui::RichText::new(label).color(C_COPPER).strong()
+                                } else {
+                                    egui::RichText::new(label)
+                                };
+                                if ui.selectable_label(on, text).clicked() {
+                                    self.settings_tab = tab;
+                                }
                             }
                         });
+                        ui.separator();
+                        // Content pane.
+                        ui.vertical(|ui| {
+                            ui.set_min_width(312.0);
+                            match self.settings_tab {
+                                SettingsTab::Display => self.settings_display(ui),
+                                SettingsTab::Grid => self.settings_grid(ui),
+                                SettingsTab::Input => self.settings_input(ui),
+                                SettingsTab::Colours => self.settings_colours(ui),
+                                SettingsTab::Layers => self.settings_layers(ui),
+                            }
+                        });
+                    });
                 });
             self.show_settings = open;
         }
@@ -2679,6 +2618,138 @@ impl eframe::App for ViewApp {
 }
 
 impl ViewApp {
+    /// A copper section heading for the Settings panes (#121).
+    fn settings_header(ui: &mut egui::Ui, text: &str) {
+        ui.add_space(1.0);
+        ui.label(egui::RichText::new(text).color(C_COPPER).strong());
+        ui.add_space(3.0);
+    }
+
+    /// Settings → Display: theme, measure units, and (feature build) the GPU path.
+    fn settings_display(&mut self, ui: &mut egui::Ui) {
+        Self::settings_header(ui, "Display");
+        ui.horizontal(|ui| {
+            ui.label("Theme");
+            ui.selectable_value(&mut self.theme, Theme::Dark, "dark");
+            ui.selectable_value(&mut self.theme, Theme::Light, "light");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Measure units");
+            ui.selectable_value(&mut self.measure_unit, Unit::Mm, "mm");
+            ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
+            ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
+        });
+        #[cfg(feature = "gpu-transform")]
+        if self.gpu.is_some() {
+            ui.checkbox(&mut self.use_gpu, "GPU base transform (experimental)")
+                .on_hover_text(
+                    "Transform the base layer on the GPU (#106). \
+                     Off falls back to the CPU path.",
+                );
+        }
+    }
+
+    /// Settings → Grid: reference grid overlay + snap.
+    fn settings_grid(&mut self, ui: &mut egui::Ui) {
+        Self::settings_header(ui, "Grid");
+        ui.checkbox(&mut self.show_grid, "Show reference grid (G)");
+        ui.horizontal(|ui| {
+            ui.label("Spacing");
+            ui.add(
+                egui::DragValue::new(&mut self.grid_mm)
+                    .speed(0.1)
+                    .range(0.01..=100.0)
+                    .suffix(" mm"),
+            );
+        });
+        ui.checkbox(
+            &mut self.snap_grid,
+            "Snap measure clicks to grid intersections",
+        );
+    }
+
+    /// Settings → Input: pan/zoom scheme matching the user's ECAD tool (#54).
+    fn settings_input(&mut self, ui: &mut egui::Ui) {
+        Self::settings_header(ui, "Input");
+        ui.horizontal(|ui| {
+            ui.label("ECAD preset");
+            ui.selectable_value(&mut self.input_preset, InputPreset::Altium, "Altium");
+            ui.selectable_value(&mut self.input_preset, InputPreset::KiCad, "KiCad");
+        })
+        .response
+        .on_hover_text(
+            "Pan mouse button by ECAD tool: \
+             Altium = right-drag, KiCad = middle/right-drag.",
+        );
+    }
+
+    /// Settings → Colours: diff colours + per-theme canvas/grid (#53/#31/#52).
+    fn settings_colours(&mut self, ui: &mut egui::Ui) {
+        Self::settings_header(ui, "Diff colours");
+        ui.horizontal(|ui| {
+            ui.label("added");
+            ui.color_edit_button_srgba(&mut self.col_added);
+            ui.label("removed");
+            ui.color_edit_button_srgba(&mut self.col_removed);
+        });
+        if ui.button("reset diff to brand").clicked() {
+            self.col_added = C_ADDED;
+            self.col_removed = C_REMOVED;
+        }
+        ui.add_space(6.0);
+        // The pickers edit the ACTIVE theme; switch dark/light to tune the other,
+        // so a charcoal canvas never bleeds into light mode.
+        let theme_name = match self.theme {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
+        };
+        Self::settings_header(ui, &format!("Canvas & grid ({theme_name} mode)"));
+        ui.horizontal(|ui| {
+            ui.label("Canvas");
+            ui.color_edit_button_srgba(self.canvas_color_mut());
+            ui.label("Grid");
+            ui.color_edit_button_srgba(self.grid_color_mut());
+        });
+        if ui.button("reset canvas & grid to default").clicked() {
+            self.canvas_dark = default_canvas(Theme::Dark);
+            self.canvas_light = default_canvas(Theme::Light);
+            self.grid_dark = default_grid(Theme::Dark);
+            self.grid_light = default_grid(Theme::Light);
+        }
+    }
+
+    /// Settings → Layers: one base-colour row per layer (#21), scrollable.
+    fn settings_layers(&mut self, ui: &mut egui::Ui) {
+        Self::settings_header(ui, "Layer base colours");
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for idx in 0..self.diff.layers.len() {
+                    let kind = self.diff.layers[idx].kind;
+                    let label = self.diff.layers[idx].name();
+                    ui.horizontal(|ui| {
+                        let mut base =
+                            resolve_base_color(idx, kind, &self.base_overrides, self.theme);
+                        if ui.color_edit_button_srgba(&mut base).changed() {
+                            if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx)
+                            {
+                                e.1 = base;
+                            } else {
+                                self.base_overrides.push((idx, base));
+                            }
+                        }
+                        ui.label(label);
+                        if self.base_overrides.iter().any(|(i, _)| *i == idx)
+                            && ui.small_button("reset").clicked()
+                        {
+                            self.base_overrides.retain(|(i, _)| *i != idx);
+                        }
+                    });
+                }
+            });
+    }
+
     /// Active-theme canvas colour (#31). The board paints with this, so light mode
     /// keeps its own background independent of any dark-mode tuning.
     fn canvas_color(&self) -> Color32 {
