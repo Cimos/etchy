@@ -716,6 +716,15 @@ impl ViewMode {
     fn dims_others(self) -> bool {
         matches!(self, ViewMode::Highlight)
     }
+
+    /// In All view, non-selected layers draw DIFF-ONLY — their faint base copper
+    /// (the bulk of the per-frame vertices, ~70% on a 13-layer board) is dropped so
+    /// panning stays smooth on dense boards (#158). The selected layer keeps its
+    /// base for context, and Highlight keeps every layer's dimmed base as context;
+    /// only All trades the non-selected base away.
+    fn hides_unselected_base(self) -> bool {
+        matches!(self, ViewMode::All)
+    }
 }
 
 /// The per-layer visibility a view mode selects (#59): Single shows only the active
@@ -3328,6 +3337,7 @@ impl ViewApp {
                     min_area_nm2,
                     false,
                     self.view_mode.dims_others(),
+                    self.view_mode.hides_unselected_base(),
                 );
                 self.last_hidden = hidden;
                 n = shapes.len();
@@ -3828,6 +3838,9 @@ fn transform_cache(
     skip_base: bool,
     // Whether non-selected layers are dimmed (#59 Highlight mode).
     dim_others: bool,
+    // Whether non-selected layers' base copper is dropped (#158 All view) — the
+    // selected layer keeps its base; others draw diff-only, cutting ~70% of verts.
+    hide_unselected_base: bool,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
     // instead of one Mesh+Shape per region — the FMU top-copper layer was ~5.5k
@@ -3856,6 +3869,12 @@ fn transform_cache(
         if item.role == Role::Base {
             if skip_base {
                 continue; // base drawn on the GPU this frame (#106)
+            }
+            // All view (#158): drop non-selected layers' base copper (diff-only for
+            // them) — it's ~70% of the verts and just dimmed context. The selected
+            // layer keeps its base.
+            if hide_unselected_base && item.layer_index != selected {
+                continue;
             }
             let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
             if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
@@ -4301,6 +4320,7 @@ mod tests {
                     0.0,
                     false, // skip_base: CPU path draws everything in this bench
                     true,  // dim_others
+                    false, // hide_unselected_base
                 );
                 sink += shapes.len();
             }
@@ -5011,6 +5031,10 @@ mod tests {
         assert!(ViewMode::Highlight.dims_others());
         assert!(!ViewMode::All.dims_others());
         assert!(!ViewMode::Single.dims_others());
+        // Only All drops non-selected base copper (#158); Single/Highlight keep it.
+        assert!(ViewMode::All.hides_unselected_base());
+        assert!(!ViewMode::Highlight.hides_unselected_base());
+        assert!(!ViewMode::Single.hides_unselected_base());
     }
 
     #[test]
