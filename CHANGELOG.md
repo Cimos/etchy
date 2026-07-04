@@ -13,6 +13,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   noise-size filter), and a brand-coloured overlay (green added / red removed /
   amber changed on a ghosted page). Fails loud on a page-size or buffer mismatch —
   etchy never rescales or realigns a raster. PDF rasterization wiring lands next.
+- **Schematic-PDF page diff** (`etchy-pdf`, behind the `pdf` feature) — a pure-Rust
+  rasterizer (hayro, no C++/PDFium) renders each page and feeds the raster engine,
+  pairing revisions' pages by index. `diff_pdfs` returns per-page tallies + a PNG-
+  encodable overlay; `available()` reports whether the backend was compiled in. The
+  heavy PDF stack (and its higher MSRV) only builds with `--features pdf`, so the
+  default binaries stay lean. CLI wiring lands next.
 
 ### Fixed
 - **Real-board (Altium) validation fixes** — found by running a full production

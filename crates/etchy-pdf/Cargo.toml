@@ -1,15 +1,26 @@
 [package]
 name = "etchy-pdf"
-description = "etchy schematic-PDF pixel diff (feature-gated; pulls pdfium-render). Phase-0 stub."
+description = "etchy schematic-PDF pixel diff (feature-gated; pure-Rust hayro rasterizer)."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# hayro needs a newer toolchain than the workspace MSRV; this crate is opt-in
+# (the `pdf` feature) and never in the default binaries, so it carries its own MSRV.
+rust-version = "1.85"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Off by default: the pure-Rust PDF rasterizer (hayro) and its dep tree stay out
+# of the default build, which keeps the core geometric-diff binary lean and its
+# MSRV low. Turn on with `--features pdf`.
+default = []
+pdf = ["dep:hayro", "dep:png"]
+
 [dependencies]
 etchy-core = { path = "../etchy-core" }
-# pdfium-render (static feature) + image added in Milestone 3. Kept a separate,
-# feature-gated crate so the heavy C++ PDFium dependency stays out of the default
-# geometric-diff binary.
+# Pure-Rust PDF rasterizer (no C++/PDFium). Kept optional so the heavy PDF stack
+# only compiles when the `pdf` feature is requested.
+hayro = { version = "0.6", optional = true }
+# PNG encode for the overlay images (already in hayro's tree via vello_common).
+png = { version = "0.17", optional = true }
