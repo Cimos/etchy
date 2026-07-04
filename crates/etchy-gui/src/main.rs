@@ -255,8 +255,10 @@ fn main() {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Overlay,
-    Before,
-    After,
+    /// The old revision alone (was "Before"; renamed to match the CLI + RevSide, #160).
+    Old,
+    /// The new revision alone (was "After").
+    New,
     /// Side-by-side: old board left, new board right, one shared camera (G4).
     Split,
     /// Curtain wipe: one draggable divider, old board left of it, new board right,
@@ -671,6 +673,7 @@ struct FilePick {
 enum SettingsTab {
     #[default]
     Display,
+    Diff,
     Grid,
     Input,
     Colours,
@@ -679,8 +682,9 @@ enum SettingsTab {
 
 impl SettingsTab {
     /// (tab, label) in rail order.
-    const ALL: [(SettingsTab, &'static str); 5] = [
+    const ALL: [(SettingsTab, &'static str); 6] = [
         (SettingsTab::Display, "Display"),
+        (SettingsTab::Diff, "Diff"),
         (SettingsTab::Grid, "Grid"),
         (SettingsTab::Input, "Input"),
         (SettingsTab::Colours, "Colours"),
@@ -1723,8 +1727,8 @@ impl ViewApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn pick_folder(&mut self, side: RevSide) {
         let title = match side {
-            RevSide::Old => "Open revision A (old) — folder",
-            RevSide::New => "Open revision B (new) — folder",
+            RevSide::Old => "Open old revision — folder",
+            RevSide::New => "Open new revision — folder",
         };
         let mut dialog = rfd::FileDialog::new().set_title(title);
         if let Some(d) = &self.last_dir {
@@ -1739,8 +1743,8 @@ impl ViewApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn pick_zip(&mut self, side: RevSide) {
         let title = match side {
-            RevSide::Old => "Open revision A (old) — .zip fab pack",
-            RevSide::New => "Open revision B (new) — .zip fab pack",
+            RevSide::Old => "Open old revision — .zip fab pack",
+            RevSide::New => "Open new revision — .zip fab pack",
         };
         let mut dialog = rfd::FileDialog::new()
             .set_title(title)
@@ -1910,9 +1914,9 @@ impl ViewApp {
                 ui.add_space(18.0);
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(440.0);
-                    self.side_open_row(ui, RevSide::Old, "Revision A (old)");
+                    self.side_open_row(ui, RevSide::Old, "Old revision");
                     ui.add_space(10.0);
-                    self.side_open_row(ui, RevSide::New, "Revision B (new)");
+                    self.side_open_row(ui, RevSide::New, "New revision");
                 });
                 ui.add_space(12.0);
                 ui.label(
@@ -2136,8 +2140,8 @@ impl eframe::App for ViewApp {
             (
                 i.key_pressed(Key::S),
                 i.key_pressed(Key::F),
-                // Mode hotkeys (#55, #61): 1=Overlay 2=Before 3=After 4=Split 5=Swipe,
-                // + aliases O/B/A.
+                // Mode hotkeys (#55, #61): 1=Overlay 2=Old 3=New 4=Split 5=Swipe,
+                // + aliases O/B/A (B/A kept as legacy Old/New mnemonics).
                 i.key_pressed(Key::Num1) || i.key_pressed(Key::O),
                 i.key_pressed(Key::Num2) || i.key_pressed(Key::B),
                 i.key_pressed(Key::Num3) || i.key_pressed(Key::A),
@@ -2196,10 +2200,10 @@ impl eframe::App for ViewApp {
             self.mode = Mode::Overlay;
         }
         if mode_before {
-            self.mode = Mode::Before;
+            self.mode = Mode::Old;
         }
         if mode_after {
-            self.mode = Mode::After;
+            self.mode = Mode::New;
         }
         if mode_split {
             self.mode = Mode::Split;
@@ -2261,136 +2265,169 @@ impl eframe::App for ViewApp {
                 });
             });
             ui.add_space(4.0);
-            // Controls row: larger hit targets than the egui default. Wrapped so a
-            // narrow window flows controls onto a second line instead of running them
-            // off the right edge (#5).
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().button_padding = egui::vec2(14.0, 10.0);
-                ui.spacing_mut().item_spacing.x = 10.0;
-                ui.selectable_value(&mut self.mode, Mode::Overlay, "Overlay");
-                ui.selectable_value(&mut self.mode, Mode::Before, "Before");
-                ui.selectable_value(&mut self.mode, Mode::After, "After");
-                ui.selectable_value(&mut self.mode, Mode::Split, "Split");
-                ui.selectable_value(&mut self.mode, Mode::Swipe, "Swipe");
-                ui.separator();
-                ui.label("base:");
-                ui.selectable_value(&mut self.base_level, BaseLevel::Off, "off");
-                ui.selectable_value(&mut self.base_level, BaseLevel::Faint, "faint");
-                ui.selectable_value(&mut self.base_level, BaseLevel::Strong, "strong");
-                #[cfg(feature = "gpu-transform")]
-                if self.gpu.is_some() {
-                    ui.checkbox(&mut self.use_gpu, "GPU").on_hover_text(
-                        "Transform the base layer on the GPU (#106, experimental). \
-                         Off falls back to the CPU path.",
-                    );
-                }
-                if ui.selectable_label(self.show_settings, "Settings").clicked() {
-                    self.show_settings = !self.show_settings;
-                }
-                if self.outline.is_some() {
-                    ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
-                        "Show the board outline (Edge.Cuts/GKO) as a faint reference on every layer.",
-                    );
-                }
-                if ui.button("Fit").clicked() {
-                    self.cam.fitted = false;
-                }
-                // Export (#60): per-layer SVG + a copper-area CSV. Native writes
-                // ./etchy-export/; web downloads. PNG deferred. Set flags in the
-                // menu closure, act after, to avoid borrowing self inside it.
-                let (mut exp_current, mut exp_all) = (false, false);
-                ui.menu_button("Export", |ui| {
-                    if ui.button("Current layer").clicked() {
-                        exp_current = true;
-                        ui.close();
-                    }
-                    if ui.button("All changed layers").clicked() {
-                        exp_all = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    ui.label("SVG per layer + areas.csv (copper mm²). PNG: later.");
-                });
-                if exp_current {
-                    self.do_export(false);
-                }
-                if exp_all {
-                    self.do_export(true);
-                }
-                if let Some(msg) = &self.export_msg {
-                    ui.label(egui::RichText::new(msg).weak().small());
-                }
-                if ui
-                    .selectable_label(self.measure_mode, "Measure")
-                    .on_hover_text(
-                        "Click two points on the canvas to measure the distance. The result \
-                         stays drawn (Esc clears it but keeps measuring); the next click after \
-                         two points starts a fresh measurement. Toggle off to exit + clear.",
-                    )
-                    .clicked()
-                {
-                    self.measure_mode = !self.measure_mode;
-                    if !self.measure_mode {
-                        self.measure_pts.clear();
-                    }
-                }
-                // Theme, units, grid and input-preset moved into the Settings panel
-                // (#121) to declutter the toolbar; their hotkeys (S/U/G) still work.
-                ui.separator();
-                ui.add(
-                    // Linear range (user found the log feel odd — #52). Widened to
-                    // 0.1 mm² so coarser noise can be filtered (#23).
-                    egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.1)
-                        .text("noise filter (mm²)")
-                        .fixed_decimals(4),
-                )
-                .on_hover_text(
-                    "Drop diff regions smaller than this as noise; 0 = off. \
-                     The hidden count is shown in the canvas caption.",
+            // Controls row (#57): ONE non-wrapping row. Left = segmented mode + base
+            // pickers (never collapse); right = the action cluster, which folds into a
+            // "More" menu when the window is narrow; the flexible middle carries the
+            // warnings chip + transient export status. The bar never wraps — it
+            // collapses by width tier instead (replaces the old wrapped row, #5/#57).
+            // Moved OUT of the bar: noise filter → Settings > Diff (#154), board edge →
+            // Layers panel (#157), Open A/B → the Open menu (#160), GPU checkbox
+            // (already in Settings > Display).
+            // The top bar spans the full window width (laid out above the left panel),
+            // so the window width is the reliable tier measure — available_width inside
+            // the nested layout doesn't reflect the true bar width.
+            let avail = ui.ctx().content_rect().width();
+            let show_base_label = avail >= TIER_LABELS_PX;
+            let collapse_actions = avail < TIER_MORE_PX;
+            let now = ui.ctx().input(|i| i.time);
+            // Action intents, set in the (self-borrowing) closures and acted on after.
+            let mut fit = false;
+            let mut exp_current = false;
+            let mut exp_all = false;
+            let mut toggle_measure = false;
+            let mut toggle_settings = false;
+            let mut open_side: Option<RevSide> = None;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().button_padding = egui::vec2(12.0, 8.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                // Mode picker — the core control, never collapses.
+                segmented(
+                    ui,
+                    &mut self.mode,
+                    &[
+                        (Mode::Overlay, "Overlay"),
+                        (Mode::Old, "Old"),
+                        (Mode::New, "New"),
+                        (Mode::Split, "Split"),
+                        (Mode::Swipe, "Swipe"),
+                    ],
                 );
-                // Editable numeric field so the user can set any value, including
-                // beyond the slider's max (#23).
-                ui.add(
-                    egui::DragValue::new(&mut self.min_area_mm2)
-                        .speed(0.001)
-                        .range(0.0..=f64::INFINITY)
-                        .fixed_decimals(4),
-                )
-                .on_hover_text("Type or drag to set the noise filter exactly (mm²), beyond the slider's range.");
-                ui.separator();
-                // Loader (#120): reopen either revision without leaving the app.
-                if ui
-                    .button("Open A…")
-                    .on_hover_text("Open a different revision A (old)")
-                    .clicked()
-                {
-                    self.open_primary(RevSide::Old, ui.ctx());
+                if show_base_label {
+                    ui.label(egui::RichText::new("base").weak());
                 }
-                if ui
-                    .button("Open B…")
-                    .on_hover_text("Open a different revision B (new)")
-                    .clicked()
-                {
-                    self.open_primary(RevSide::New, ui.ctx());
-                }
-                ui.separator();
-                // Help: external links (open in the browser on native + web).
-                ui.menu_button("Help", |ui| {
-                    ui.hyperlink_to("etchy on GitHub", URL_REPO);
-                    ui.hyperlink_to("Website", URL_SITE);
-                    ui.hyperlink_to("Report an issue", URL_ISSUES);
-                    ui.separator();
-                    ui.hyperlink_to("Sponsor / fund etchy", URL_SPONSOR);
-                    ui.separator();
-                    ui.label(format!("etchy v{}", env!("CARGO_PKG_VERSION")))
-                        .on_hover_text("The engine version.");
+                segmented(
+                    ui,
+                    &mut self.base_level,
+                    &[
+                        (BaseLevel::Off, "off"),
+                        (BaseLevel::Faint, "faint"),
+                        (BaseLevel::Strong, "strong"),
+                    ],
+                );
+                // Right-aligned action cluster. RTL adds in reverse, so the visual
+                // order is Open · Fit · Measure · Export · Settings · Help.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if collapse_actions {
+                        ui.menu_button("More", |ui| {
+                            if ui.button("Open old revision…").clicked() {
+                                open_side = Some(RevSide::Old);
+                                ui.close();
+                            }
+                            if ui.button("Open new revision…").clicked() {
+                                open_side = Some(RevSide::New);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Fit view").clicked() {
+                                fit = true;
+                                ui.close();
+                            }
+                            if ui.selectable_label(self.measure_mode, "Measure").clicked() {
+                                toggle_measure = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Export current layer").clicked() {
+                                exp_current = true;
+                                ui.close();
+                            }
+                            if ui.button("Export all changed layers").clicked() {
+                                exp_all = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Settings").clicked() {
+                                toggle_settings = true;
+                                ui.close();
+                            }
+                            ui.menu_button("Help", help_links);
+                        });
+                    } else {
+                        ui.menu_button("Help", help_links);
+                        if ui
+                            .selectable_label(self.show_settings, "Settings")
+                            .clicked()
+                        {
+                            toggle_settings = true;
+                        }
+                        ui.menu_button("Export", |ui| {
+                            if ui.button("Current layer").clicked() {
+                                exp_current = true;
+                                ui.close();
+                            }
+                            if ui.button("All changed layers").clicked() {
+                                exp_all = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            ui.label("SVG per layer + areas.csv (copper mm²).");
+                        });
+                        if ui
+                            .selectable_label(self.measure_mode, "Measure")
+                            .on_hover_text(
+                                "Click two points on the canvas to measure the distance. \
+                                 The result stays drawn (Esc clears it but keeps measuring). \
+                                 Toggle off to exit + clear.",
+                            )
+                            .clicked()
+                        {
+                            toggle_measure = true;
+                        }
+                        if ui.button("Fit").clicked() {
+                            fit = true;
+                        }
+                        ui.menu_button("Open", |ui| {
+                            if ui.button("Old revision…").clicked() {
+                                open_side = Some(RevSide::Old);
+                                ui.close();
+                            }
+                            if ui.button("New revision…").clicked() {
+                                open_side = Some(RevSide::New);
+                                ui.close();
+                            }
+                        });
+                    }
+                    // Flexible middle (left of the actions in RTL): transient export
+                    // status + the warnings chip (stays in-row, never reflows the
+                    // canvas — #49).
+                    if let Some(msg) = &self.export_msg {
+                        ui.label(egui::RichText::new(msg).weak().small());
+                    }
+                    self.warnings_ui(ui, now);
                 });
-                ui.separator();
-                // Warning chip lives IN the controls row (no separate row that can
-                // reflow the canvas — #49). Overlay floats; ASCII glyph (no tofu).
-                let now = ui.ctx().input(|i| i.time);
-                self.warnings_ui(ui, now);
             });
+            // Act on the collected intents (outside the closures that borrow self).
+            if fit {
+                self.cam.fitted = false;
+            }
+            if exp_current {
+                self.do_export(false);
+            }
+            if exp_all {
+                self.do_export(true);
+            }
+            if toggle_measure {
+                self.measure_mode = !self.measure_mode;
+                if !self.measure_mode {
+                    self.measure_pts.clear();
+                }
+            }
+            if toggle_settings {
+                self.show_settings = !self.show_settings;
+            }
+            if let Some(side) = open_side {
+                self.open_primary(side, ui.ctx());
+            }
         });
 
         // No board loaded yet → welcome / open screen. Returning here skips the
@@ -2618,6 +2655,26 @@ impl eframe::App for ViewApp {
                         self.base_overrides.push((idx, c));
                     }
                 }
+                // Board-edge reference toggle, moved off the top bar (#157). It's a
+                // reference outline drawn on every layer, not a diff layer, so it sits
+                // below the list with its own faint-copper swatch.
+                if self.outline.is_some() {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let (sw, _) =
+                            ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
+                        ui.painter().rect_stroke(
+                            sw,
+                            2.0,
+                            Stroke::new(1.5, C_COPPER),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
+                            "Show the board outline (Edge.Cuts/GKO) as a faint reference on every layer.",
+                        );
+                    });
+                }
             });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -2668,6 +2725,7 @@ impl eframe::App for ViewApp {
                             ui.set_min_width(312.0);
                             match self.settings_tab {
                                 SettingsTab::Display => self.settings_display(ui),
+                                SettingsTab::Diff => self.settings_diff(ui),
                                 SettingsTab::Grid => self.settings_grid(ui),
                                 SettingsTab::Input => self.settings_input(ui),
                                 SettingsTab::Colours => self.settings_colours(ui),
@@ -2683,8 +2741,8 @@ impl eframe::App for ViewApp {
         let layer_name = self.diff.layers[self.selected].name().to_string();
         let mode = match self.mode {
             Mode::Overlay => "Overlay",
-            Mode::Before => "Before",
-            Mode::After => "After",
+            Mode::Old => "Old",
+            Mode::New => "New",
             Mode::Split => "Split",
             Mode::Swipe => "Swipe",
         };
@@ -2740,6 +2798,36 @@ impl ViewApp {
                      Off falls back to the CPU path.",
                 );
         }
+    }
+
+    /// Settings → Diff: the noise-filter threshold (moved off the top bar, #154).
+    fn settings_diff(&mut self, ui: &mut egui::Ui) {
+        Self::settings_header(ui, "Diff");
+        ui.label(
+            egui::RichText::new("Noise filter")
+                .small()
+                .color(Color32::from_gray(150)),
+        );
+        // Linear range 0..=0.1 mm² (#52/#23).
+        ui.add(
+            egui::Slider::new(&mut self.min_area_mm2, 0.0..=0.1)
+                .text("mm²")
+                .fixed_decimals(4),
+        )
+        .on_hover_text(
+            "Drop diff regions smaller than this as noise; 0 = off. \
+             The hidden count is shown in the canvas caption.",
+        );
+        // Editable field for any value beyond the slider's max (#23).
+        ui.add(
+            egui::DragValue::new(&mut self.min_area_mm2)
+                .speed(0.001)
+                .range(0.0..=f64::INFINITY)
+                .fixed_decimals(4),
+        )
+        .on_hover_text(
+            "Type or drag to set the noise filter exactly (mm²), beyond the slider's range.",
+        );
     }
 
     /// Settings → Grid: reference grid overlay + snap.
@@ -3067,7 +3155,7 @@ impl ViewApp {
         // GPU path (#80/#107): upload ALL visible geometry (base + diff + outline)
         // once, with per-vertex colour, whenever the inputs change — then pan/zoom
         // only updates a uniform, so frame time is O(1) in triangle count (the HDI
-        // fix). Overlay/Before/After only; Split/Swipe keep the CPU path. The cache
+        // fix). Overlay/Old/New only; Split/Swipe keep the CPU path. The cache
         // borrow is dropped before we set the hash.
         #[cfg(feature = "gpu-transform")]
         {
@@ -3075,7 +3163,7 @@ impl ViewApp {
                 let cache = self.cache.as_ref().expect("cache built above");
                 let eligible = self.use_gpu
                     && self.gpu.is_some()
-                    && matches!(self.mode, Mode::Overlay | Mode::Before | Mode::After);
+                    && matches!(self.mode, Mode::Overlay | Mode::Old | Mode::New);
                 let hash = self.gpu_input_hash(cache);
                 if eligible && self.gpu_hash != Some(hash) {
                     Some((self.build_gpu_tris(cache), hash))
@@ -3192,7 +3280,7 @@ impl ViewApp {
             let gpu_active = self.use_gpu
                 && self.gpu.is_some()
                 && self.gpu_hash.is_some()
-                && matches!(self.mode, Mode::Overlay | Mode::Before | Mode::After);
+                && matches!(self.mode, Mode::Overlay | Mode::Old | Mode::New);
             #[cfg(not(feature = "gpu-transform"))]
             let gpu_active = false;
 
@@ -3239,14 +3327,14 @@ impl ViewApp {
             );
         }
 
-        // In Before/After the whole board is drawn in its layer colour (not the
+        // In Old/New the whole board is drawn in its layer colour (not the
         // green "added") — say so, so it's not mistaken for the diff (#3). Split and
         // Swipe likewise show the RAW boards, not the computed diff, and skip the
         // noise filter — spell that out so a filtered Overlay and a raw Split aren't
         // read as disagreeing about "what changed" (#91).
         let mode_note = match self.mode {
-            Mode::Before => Some("showing OLD board (before)"),
-            Mode::After => Some("showing NEW board (after)"),
+            Mode::Old => Some("showing OLD board"),
+            Mode::New => Some("showing NEW board"),
             Mode::Split => {
                 Some("raw boards: OLD (left) | NEW (right) — diff + noise filter apply in Overlay")
             }
@@ -3585,8 +3673,8 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
     for &li in &key.visible {
         let layer = &diff.layers[li];
         match key.mode {
-            Mode::Before => push_context_items(&mut items, &layer.old, Role::Base, Side::Full, li),
-            Mode::After => push_context_items(&mut items, &layer.new, Role::Base, Side::Full, li),
+            Mode::Old => push_context_items(&mut items, &layer.old, Role::Base, Side::Full, li),
+            Mode::New => push_context_items(&mut items, &layer.new, Role::Base, Side::Full, li),
             Mode::Overlay => {
                 if key.base_on {
                     push_context_items(&mut items, &layer.new, Role::Base, Side::Full, li);
@@ -3606,6 +3694,55 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
 /// Alpha multiplier for visible-but-not-selected layers (#59, Altium "dim"
 /// default). The selected (active) layer stays full opacity so it reads on top.
 const DIM_ALPHA: f32 = 0.4;
+
+/// A rounded **segmented control** (#57): a pill-group of options, zero gap
+/// between them, the selected one filled copper with board-dark text. Used for the
+/// top-bar mode and base pickers. egui 0.34 has no built-in segmented widget.
+fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
+    egui::Frame::default()
+        .stroke(Stroke::new(1.0, ui.visuals().widgets.inactive.bg_fill))
+        .corner_radius(8.0)
+        .inner_margin(2.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                // Selected segment reads brand copper with board-dark text.
+                ui.visuals_mut().selection.bg_fill = C_COPPER;
+                ui.visuals_mut().selection.stroke = Stroke::NONE;
+                for (opt, label) in options {
+                    let on = *value == *opt;
+                    let text = if on {
+                        egui::RichText::new(*label).color(C_CANVAS).strong()
+                    } else {
+                        egui::RichText::new(*label)
+                    };
+                    if ui.selectable_label(on, text).clicked() {
+                        *value = *opt;
+                    }
+                }
+            });
+        });
+}
+
+// Width tiers in egui POINTS (screen_rect width; ~half the CSS px at ppp 2). The
+// full inline bar's content needs ~900 pt, so below that the actions collapse.
+/// Below this window width (pt) the top bar drops the muted "base" prefix label.
+const TIER_LABELS_PX: f32 = 940.0;
+/// Below this window width (pt) the right action cluster collapses into "More".
+const TIER_MORE_PX: f32 = 900.0;
+
+/// The Help menu's links + version — shared by the top bar's Help button and the
+/// narrow "More" menu (#57).
+fn help_links(ui: &mut egui::Ui) {
+    ui.hyperlink_to("etchy on GitHub", URL_REPO);
+    ui.hyperlink_to("Website", URL_SITE);
+    ui.hyperlink_to("Report an issue", URL_ISSUES);
+    ui.separator();
+    ui.hyperlink_to("Sponsor / fund etchy", URL_SPONSOR);
+    ui.separator();
+    ui.label(format!("etchy v{}", env!("CARGO_PKG_VERSION")))
+        .on_hover_text("The engine version.");
+}
 
 /// Opacity multiplier for an item from `layer_index` given the active `selected`
 /// layer: 1.0 for the selected layer (and for layer-less items like the outline),
@@ -4247,7 +4384,7 @@ mod tests {
         );
         assert_ne!(
             base,
-            build_geom_key(&[0], Mode::Before, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0], Mode::Old, BaseLevel::Faint, true, Some(1))
         );
         // With multiple layers shown, the outline still draws (it's enabled and
         // exists), so a visible-set change is what flips the key.
@@ -5003,7 +5140,7 @@ mod tests {
         );
         assert_ne!(
             base,
-            build_geom_key(&[0, 2], Mode::Before, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 2], Mode::Old, BaseLevel::Faint, true, Some(1))
         );
     }
 
