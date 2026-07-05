@@ -32,6 +32,15 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
             return LayerKind::InnerCopper(n);
         }
     }
+    // KiCad inner-copper extensions: `.gl2` .. `.gl99` ("Copper,L<n>,Inr").
+    // KiCad names inner layers by their physical stack position, so `.gl2`/`.gl3`
+    // are the inner copper of a 4-layer board. Does not clash with top/bottom
+    // copper (`.gtl`/`.gbl`) which start with `gt`/`gb`, not `gl` (#176).
+    if let Some(n) = e.strip_prefix("gl").and_then(|d| d.parse::<u8>().ok()) {
+        if (1..=99).contains(&n) {
+            return LayerKind::InnerCopper(n);
+        }
+    }
     // Altium fabrication-documentation gerbers: drill drawing (`.gd*`), drill
     // guide (`.gg*`), pad master (`.gpt`/`.gpb`). These are drawings/masters, not
     // board copper and not the real Excellon drill file — classify by extension
@@ -131,6 +140,18 @@ mod tests {
         assert_eq!(classify("board", "gm"), LayerKind::Outline);
         assert_eq!(classify("board", "gtp"), LayerKind::TopPaste);
         assert_eq!(classify("board", "gbp"), LayerKind::BottomPaste);
+    }
+
+    #[test]
+    fn classify_kicad_gl_inner_copper() {
+        // KiCad emits inner copper as `.gl<n>` (e.g. Mad_RP2040.gl2 =
+        // "Copper,L2,Inr"). These must be Copper, not Other (#176).
+        assert_eq!(classify("Mad_RP2040", "gl2"), LayerKind::InnerCopper(2));
+        assert_eq!(classify("Mad_RP2040", "gl3"), LayerKind::InnerCopper(3));
+        assert!(classify("Mad_RP2040", "gl2").is_copper());
+        // Top/bottom copper (`.gtl`/`.gbl`) are unaffected by the `gl` branch.
+        assert_eq!(classify("board", "gtl"), LayerKind::TopCopper);
+        assert_eq!(classify("board", "gbl"), LayerKind::BottomCopper);
     }
 
     #[test]
