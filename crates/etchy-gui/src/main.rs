@@ -3055,17 +3055,27 @@ impl ViewApp {
             let hovering_div = response
                 .hover_pos()
                 .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX);
-            // A divider drag is any primary drag whose PRESS began on/near the
-            // divider. Key off press_origin (the button-DOWN position) — not the
-            // drag-start position, which egui only reports AFTER the pointer crosses
-            // its drag threshold. That threshold movement could push a grab near the
-            // band edge outside GRAB_PX, so the grab was missed and, now that
-            // left-drag pans too, the board moved with the wipe (#171). press_origin
-            // is immune to the threshold, so a grab anywhere in the band always wins.
-            let press_near_div = ui
-                .input(|i| i.pointer.press_origin())
-                .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX);
-            self.swipe_drag = press_near_div && response.dragged_by(egui::PointerButton::Primary);
+            // LATCH the divider grab at drag START, then hold it for the whole
+            // gesture. Two things have to be right (#171):
+            //  - Detect the grab from press_origin (the button-DOWN point), not the
+            //    drag-start point egui reports only after the drag threshold — that
+            //    threshold movement could push a grab near the band edge outside the
+            //    band and miss it.
+            //  - Compare against the PRE-drag div_x (swipe_frac hasn't moved yet at
+            //    drag-start) ONCE, then latch. div_x follows the pointer as the wipe
+            //    moves, so re-checking every frame would drop the grab after GRAB_PX
+            //    of travel and — since left-drag now pans — the board would pan with
+            //    the wipe. The latch persists while the primary drag is held.
+            if response.drag_started_by(egui::PointerButton::Primary)
+                && ui
+                    .input(|i| i.pointer.press_origin())
+                    .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX)
+            {
+                self.swipe_drag = true;
+            }
+            if !response.dragged_by(egui::PointerButton::Primary) {
+                self.swipe_drag = false;
+            }
             if self.swipe_drag {
                 if let Some(p) = response.interact_pointer_pos() {
                     let frac = (p.x - rect.left()) / rect.width().max(1.0);
