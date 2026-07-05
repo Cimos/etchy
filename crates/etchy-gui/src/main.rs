@@ -94,10 +94,7 @@ mod native {
     }
 
     fn label(p: &Path) -> String {
-        p.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?")
-            .to_string()
+        derive_label(p)
     }
 
     /// Load both revisions from CLI paths into source boards + their diff.
@@ -202,13 +199,15 @@ fn demo_seed() -> (LoadedBoard, LoadedBoard, BoardDiff) {
     static NEW: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/new");
     let (ob, of) = board_from_files(&OLD);
     let (nb, nf) = board_from_files(&NEW);
+    // Derive the demo labels through the same helper native uses (#177), from the
+    // board's release layout, so web and native present the same old->new text.
     let old = LoadedBoard {
-        label: "Mad_RP2040 v0.0.0".into(),
+        label: derive_label(std::path::Path::new("Mad_RP2040/v0.0.0")),
         board: ob,
         fmt: of,
     };
     let new = LoadedBoard {
-        label: "Mad_RP2040 v0.0.1".into(),
+        label: derive_label(std::path::Path::new("Mad_RP2040/v0.0.1")),
         board: nb,
         fmt: nf,
     };
@@ -821,6 +820,9 @@ struct ViewApp {
     grid_mm: f64,
     /// Snap measure clicks to the nearest grid intersection (#51).
     snap_grid: bool,
+    /// Always-on cursor crosshair + coordinate readout (#179), independent of
+    /// measure mode. On by default; the toggle lands in the Measure tab later.
+    show_crosshair: bool,
     /// Input scheme matching the user's ECAD tool (#54). MVP: controls which mouse
     /// button pans the canvas. Persisted via #52.
     input_preset: InputPreset,
@@ -914,9 +916,13 @@ impl ViewApp {
             measure_mode: false,
             measure_pts: Vec::new(),
             measure_unit: Unit::Mm,
-            show_grid: false,
+            // Grid + snap + crosshair default ON (#179): the snapped-cursor crosshair
+            // and coordinate readout are available all the time, not only in measure
+            // mode.
+            show_grid: true,
             grid_mm: 1.0,
-            snap_grid: false,
+            snap_grid: true,
+            show_crosshair: true,
             input_preset: InputPreset::default(),
             swipe_frac: 0.5,
             swipe_drag: false,
@@ -2013,6 +2019,56 @@ fn diff_from_sources(old: &LoadedBoard, new: &LoadedBoard) -> anyhow::Result<Boa
     Ok(d)
 }
 
+/// Derive a human-meaningful old/new label from an input path (#177), shared by
+/// the native (dir args / drops) and web (demo) surfaces so both present the same
+/// old->new text. A bare basename is often generic — "old"/"new"/"a" or a plain
+/// version like "v0.0.1" — and carries no board identity; when it is, prefix the
+/// parent directory name (".../Mad_RP2040/old" -> "Mad_RP2040 old",
+/// "Mad_RP2040/v0.0.0" -> "Mad_RP2040 v0.0.0"). Otherwise the basename stands.
+fn derive_label(path: &std::path::Path) -> String {
+    let base = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim();
+    if base.is_empty() {
+        return "?".to_string();
+    }
+    if is_generic_rev_name(base) {
+        if let Some(parent) = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+        {
+            let parent = parent.trim();
+            if !parent.is_empty() && !is_generic_rev_name(parent) {
+                return format!("{parent} {base}");
+            }
+        }
+    }
+    base.to_string()
+}
+
+/// Whether a directory-name segment is a generic revision marker that carries no
+/// board identity on its own — a bare rev word or a plain version string — so the
+/// label derivation knows to borrow the parent directory name instead (#177).
+fn is_generic_rev_name(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "old" | "new" | "a" | "b" | "before" | "after" | "prev" | "previous" | "current" | "curr"
+    ) || is_version_like(&n)
+}
+
+/// A plain version string like "v1", "v0.0.1", "1.0", "2" — an optional leading
+/// 'v' then only digits and dots. Such a name names a revision, not the board.
+fn is_version_like(name: &str) -> bool {
+    let s = name.strip_prefix('v').unwrap_or(name);
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_ascii_digit())
+        && s.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
 /// Basename of a filename string (handles `/` and `\`). Web-only (native uses
 /// `path_label`).
 #[cfg(target_arch = "wasm32")]
@@ -2846,10 +2902,7 @@ impl ViewApp {
                 .text("mm²")
                 .fixed_decimals(4),
         )
-        .on_hover_text(
-            "Drop diff regions smaller than this as noise; 0 = off. \
-             The hidden count is shown in the canvas caption.",
-        );
+        .on_hover_text("Drop diff regions smaller than this as noise; 0 = off.");
         // Editable field for any value beyond the slider's max (#23).
         ui.add(
             egui::DragValue::new(&mut self.min_area_mm2)
@@ -2878,6 +2931,14 @@ impl ViewApp {
         ui.checkbox(
             &mut self.snap_grid,
             "Snap measure clicks to grid intersections",
+        );
+        ui.checkbox(
+            &mut self.show_crosshair,
+            "Cursor crosshair + coordinate readout",
+        )
+        .on_hover_text(
+            "Show a crosshair and live coordinates at the cursor, always \
+                 (not only in measure mode). Snaps to the grid when snap is on.",
         );
     }
 
@@ -3016,7 +3077,6 @@ impl ViewApp {
     }
 
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
-        let layer = &self.diff.layers[self.selected];
         let size = ui.available_size();
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
         // Clicking the board dismisses the Settings window (#19).
@@ -3419,35 +3479,12 @@ impl ViewApp {
             );
         }
 
-        // Per-layer caption + a tiny legend.
-        let mut cap = format!(
-            "{}  —  {}   (+{} / −{} regions)",
-            layer.name(),
-            status_str(layer.status),
-            layer.change.added_region_count,
-            layer.change.removed_region_count,
-        );
-        if self.mode == Mode::Overlay && self.min_area_mm2 > 0.0 && self.last_hidden > 0 {
-            cap.push_str(&format!(
-                "   ·   {} hidden < {:.4} mm²",
-                self.last_hidden, self.min_area_mm2
-            ));
-        }
-        // #112: spell out when only some layers are shown, so a single visible
-        // layer reads as "one layer of many" rather than "missing traces". The
-        // default view shows just the most-changed layer, which surprised users.
-        let shown = self.visible_layers.iter().filter(|&&v| v).count();
-        let total = self.visible_layers.len();
-        if shown < total {
-            cap.push_str(&format!("   ·   showing {shown} of {total} layers"));
-        }
-        painter.text(
-            rect.left_top() + egui::vec2(8.0, 8.0),
-            egui::Align2::LEFT_TOP,
-            cap,
-            egui::FontId::proportional(14.0),
-            Color32::from_gray(200),
-        );
+        // The per-layer status caption that used to sit at the canvas top-left was
+        // removed from the viewer surface (#178) — the layer name, status, region
+        // counts, hidden count and "showing N of M" now live in the panels, keeping
+        // the board itself clean. The underlying counts (`self.last_hidden`,
+        // `layer.change`) are untouched; only the on-canvas chrome is gone. Just the
+        // legend stays on-canvas as the colour key.
         if self.mode == Mode::Overlay {
             let outline_row =
                 outline_legend_visible(self.show_outline, self.outline, self.selected);
@@ -3460,27 +3497,24 @@ impl ViewApp {
             );
         }
 
-        // Measure tool overlay (#22/#50): crosshairs at the cursor, the ruler points,
-        // the segment, and a sticky distance label offset off the line.
-        if self.measure_mode {
-            // World [f64;2] → screen, matching world_to_screen's float transform.
-            let w2s = |w: [f64; 2]| -> Pos2 {
-                let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
-                let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
-                Pos2::new(x as f32, y as f32)
-            };
-            // Crosshairs at the hover position to aid alignment (#50). Faint, clipped
-            // to the canvas rect (full width + full height through the cursor).
-            // With snap on (#52, fix #3) the crosshair locks LIVE to the nearest
-            // grid intersection as the mouse moves, so the user sees where the next
-            // click will land; the placed point just follows this snapped cursor.
+        // Always-on crosshair + coordinate readout (#179): a snapped-cursor
+        // crosshair and a live world-coordinate readout, drawn regardless of measure
+        // mode (default on). Snaps to the grid when snap-to-grid is on, so what the
+        // readout shows is exactly where a measure click would land. In measure mode
+        // the crosshair is always drawn so the ruler stays aligned even if the
+        // standalone crosshair is toggled off.
+        if self.show_crosshair || self.measure_mode {
             if let Some(ptr) = response.hover_pos() {
-                let cross_at = if self.snap_grid {
-                    let w = screen_to_world(&self.cam, ptr, rect);
-                    w2s(snap_world_to_grid(w, self.grid_mm))
+                let w_raw = screen_to_world(&self.cam, ptr, rect);
+                let w = if self.snap_grid {
+                    snap_world_to_grid(w_raw, self.grid_mm)
                 } else {
-                    ptr
+                    w_raw
                 };
+                let cross_at = Pos2::new(
+                    (rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale) as f32,
+                    (rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale) as f32,
+                );
                 let cross = Stroke::new(1.0, C_CROSSHAIR);
                 painter.line_segment(
                     [
@@ -3496,7 +3530,24 @@ impl ViewApp {
                     ],
                     cross,
                 );
+                // Coordinate readout on a copper chip, offset from the crosshair
+                // centre so it doesn't sit under the lines.
+                let mm = etchy_core::NM_PER_MM as f64;
+                let txt = format!("{:.3}, {:.3} mm", w[0] / mm, w[1] / mm);
+                measure_label(&painter, cross_at + egui::vec2(46.0, -14.0), &txt);
             }
+        }
+
+        // Measure tool overlay (#22/#50): the ruler points, the segment, and a
+        // sticky distance label offset off the line. The cursor crosshair is drawn
+        // above (always-on, #179).
+        if self.measure_mode {
+            // World [f64;2] → screen, matching world_to_screen's float transform.
+            let w2s = |w: [f64; 2]| -> Pos2 {
+                let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
+                let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
+                Pos2::new(x as f32, y as f32)
+            };
             for w in &self.measure_pts {
                 painter.circle_filled(w2s(*w), 3.0, C_COPPER);
             }
@@ -4077,16 +4128,6 @@ fn legend(
     }
 }
 
-fn status_str(s: etchy_core::LayerStatus) -> &'static str {
-    use etchy_core::LayerStatus::*;
-    match s {
-        Unchanged => "unchanged",
-        Changed => "changed",
-        AddedLayer => "added layer",
-        RemovedLayer => "removed layer",
-    }
-}
-
 // ---- coordinate transforms (world nm <-> screen px) ----
 
 fn world_to_screen(cam: &Camera, p: Pt, rect: Rect) -> Pos2 {
@@ -4283,12 +4324,72 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_display_color, build_geom_key, cycle_base, distance_mm, geom_cache_dirty,
-        group_layers, layer_group, outline_legend_visible, pans_on, pick_outline_index,
-        region_screen_px, scroll_to_camera_action, short_layer_name, step_in_order, warning_phase,
-        BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, Theme, WarningPhase,
+        base_display_color, build_geom_key, cycle_base, derive_label, distance_mm,
+        geom_cache_dirty, group_layers, is_version_like, layer_group, outline_legend_visible,
+        pans_on, pick_outline_index, region_screen_px, scroll_to_camera_action, short_layer_name,
+        step_in_order, warning_phase, BaseLevel, CameraAction, InputPreset, LayerGroup, Mode,
+        Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn derive_label_borrows_parent_for_generic_rev_dirs() {
+        use std::path::Path;
+        // A bare rev-word basename ("old"/"new") is meaningless alone → prefix the
+        // parent directory so web and native present the same board name (#177).
+        assert_eq!(
+            derive_label(Path::new("gerbers/Mad_RP2040/old")),
+            "Mad_RP2040 old"
+        );
+        assert_eq!(
+            derive_label(Path::new("gerbers/Mad_RP2040/new")),
+            "Mad_RP2040 new"
+        );
+        // Plain version basenames borrow the parent too — this is how the web demo
+        // seeds "Mad_RP2040 v0.0.0"/"v0.0.1", matching the native derivation.
+        assert_eq!(
+            derive_label(Path::new("Mad_RP2040/v0.0.0")),
+            "Mad_RP2040 v0.0.0"
+        );
+        assert_eq!(
+            derive_label(Path::new("Mad_RP2040/v0.0.1")),
+            "Mad_RP2040 v0.0.1"
+        );
+        // Other generic markers.
+        assert_eq!(derive_label(Path::new("board/before")), "board before");
+        assert_eq!(derive_label(Path::new("board/A")), "board A");
+    }
+
+    #[test]
+    fn derive_label_keeps_meaningful_basenames() {
+        use std::path::Path;
+        // A meaningful basename stands on its own — no parent prefix.
+        assert_eq!(
+            derive_label(Path::new("gerbers/Mad_RP2040_v1")),
+            "Mad_RP2040_v1"
+        );
+        assert_eq!(derive_label(Path::new("some/where/RevB_fab")), "RevB_fab");
+        // A generic basename with a generic (or absent) parent stays as-is rather
+        // than producing "new new" or borrowing nothing useful.
+        assert_eq!(derive_label(Path::new("old/new")), "new");
+        assert_eq!(derive_label(Path::new("new")), "new");
+        // Empty path → sentinel, never a panic.
+        assert_eq!(derive_label(Path::new("")), "?");
+    }
+
+    #[test]
+    fn version_like_detects_plain_versions_only() {
+        assert!(is_version_like("v1"));
+        assert!(is_version_like("v0.0.1"));
+        assert!(is_version_like("1.0"));
+        assert!(is_version_like("2"));
+        // Not versions: a leading letter (other than the v prefix), or trailing text.
+        assert!(!is_version_like("rev1"));
+        assert!(!is_version_like("v1a"));
+        assert!(!is_version_like("board"));
+        assert!(!is_version_like(""));
+        assert!(!is_version_like("v"));
+    }
 
     // Manual perf bench for the per-frame mesh build (#80), worst case = everything
     // on-screen, nothing culled. Ignored in CI (timing is machine-dependent).
