@@ -3382,7 +3382,15 @@ impl ViewApp {
                 .into_iter()
                 .filter(|&i| Some(i) != self.outline)
                 .collect();
-            if v.is_empty() {
+            // Anti-blank fallback: if nothing is on, show the selected layer so the
+            // canvas isn't empty. But the outline is a normal layer now (PR B) — if
+            // the user hid everything and toggled ONLY the outline on, that IS
+            // content, so don't force the (hidden) selected layer back on.
+            let outline_visible = self
+                .outline
+                .and_then(|o| self.visible_layers.get(o).copied())
+                .unwrap_or(false);
+            if v.is_empty() && !outline_visible {
                 vec![self.selected]
             } else {
                 v
