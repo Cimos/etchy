@@ -2349,8 +2349,8 @@ impl eframe::App for ViewApp {
             )
         });
         if toggle_measure {
-            // M arms/disarms measure mode (#50), mirroring the rail Measure icon and
-            // the top-bar control. Suppressed while typing via the `typing` guard.
+            // M arms/disarms measure mode (#50), mirroring the rail Measure icon.
+            // Suppressed while typing via the `typing` guard.
             self.measure_mode = !self.measure_mode;
             if !self.measure_mode {
                 self.measure_pts.clear();
@@ -2453,25 +2453,23 @@ impl eframe::App for ViewApp {
             });
             ui.add_space(4.0);
             // Controls row (#57): ONE non-wrapping row. Left = the segmented mode
-            // picker (never collapses); right = the action cluster, which folds into a
-            // "More" menu when the window is narrow; the flexible middle carries the
-            // warnings chip + transient export status. The bar never wraps — it
+            // picker (never collapses); right = the reduced action cluster — Open ·
+            // Fit · Help — which folds into a "More" menu when the window is narrow;
+            // the flexible middle carries the warnings chip. The bar never wraps — it
             // collapses by width tier instead (replaces the old wrapped row, #5/#57).
             // Moved OUT of the bar: base opacity → Layers panel slider (#12/#6), noise
             // filter → Settings > Diff (#154), board edge → Layers panel (#157), Open
-            // A/B → the Open menu (#160), GPU checkbox (already in Settings > Display).
-            // The top bar spans the full window width (laid out above the left panel),
-            // so the window width is the reliable tier measure — available_width inside
-            // the nested layout doesn't reflect the true bar width.
+            // A/B → the Open menu (#160), GPU checkbox (Settings > Display), and — this
+            // slice (#57) — Measure → rail Measure tab, Export → rail Export tab,
+            // Settings → the rail cog. The top bar spans the full window width (laid
+            // out above the left panel), so the window width is the reliable tier
+            // measure — available_width inside the nested layout doesn't reflect the
+            // true bar width.
             let avail = ui.ctx().content_rect().width();
             let collapse_actions = avail < TIER_MORE_PX;
             let now = ui.ctx().input(|i| i.time);
             // Action intents, set in the (self-borrowing) closures and acted on after.
             let mut fit = false;
-            let mut exp_current = false;
-            let mut exp_all = false;
-            let mut toggle_measure = false;
-            let mut toggle_settings = false;
             let mut open_side: Option<RevSide> = None;
             ui.horizontal(|ui| {
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 8.0);
@@ -2489,7 +2487,8 @@ impl eframe::App for ViewApp {
                     ],
                 );
                 // Right-aligned action cluster. RTL adds in reverse, so the visual
-                // order is Open · Fit · Measure · Export · Settings · Help.
+                // order is Open · Fit · Help. Measure/Export/Settings moved to the rail
+                // (Measure tab, Export tab, Settings cog — #57).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if collapse_actions {
                         ui.menu_button("More", |ui| {
@@ -2506,57 +2505,10 @@ impl eframe::App for ViewApp {
                                 fit = true;
                                 ui.close();
                             }
-                            if ui.selectable_label(self.measure_mode, "Measure").clicked() {
-                                toggle_measure = true;
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Export current layer").clicked() {
-                                exp_current = true;
-                                ui.close();
-                            }
-                            if ui.button("Export all changed layers").clicked() {
-                                exp_all = true;
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Settings").clicked() {
-                                toggle_settings = true;
-                                ui.close();
-                            }
                             ui.menu_button("Help", help_links);
                         });
                     } else {
                         ui.menu_button("Help", help_links);
-                        if ui
-                            .selectable_label(self.show_settings, "Settings")
-                            .clicked()
-                        {
-                            toggle_settings = true;
-                        }
-                        ui.menu_button("Export", |ui| {
-                            if ui.button("Current layer").clicked() {
-                                exp_current = true;
-                                ui.close();
-                            }
-                            if ui.button("All changed layers").clicked() {
-                                exp_all = true;
-                                ui.close();
-                            }
-                            ui.separator();
-                            ui.label("SVG per layer + areas.csv (copper mm²).");
-                        });
-                        if ui
-                            .selectable_label(self.measure_mode, "Measure")
-                            .on_hover_text(
-                                "Click two points on the canvas to measure the distance. \
-                                 Completed measurements stay in the Measure tab list and on \
-                                 the board; toggle off to stop measuring.",
-                            )
-                            .clicked()
-                        {
-                            toggle_measure = true;
-                        }
                         if ui.button("Fit").clicked() {
                             fit = true;
                         }
@@ -2580,33 +2532,15 @@ impl eframe::App for ViewApp {
                             );
                         });
                     }
-                    // Flexible middle (left of the actions in RTL): transient export
-                    // status + the warnings chip (stays in-row, never reflows the
-                    // canvas — #49).
-                    if let Some(msg) = &self.export_msg {
-                        ui.label(egui::RichText::new(msg).weak().small());
-                    }
+                    // Flexible middle (left of the actions in RTL): the warnings chip
+                    // (stays in-row, never reflows the canvas — #49). Export status now
+                    // shows in the rail Export panel.
                     self.warnings_ui(ui, now);
                 });
             });
             // Act on the collected intents (outside the closures that borrow self).
             if fit {
                 self.cam.fitted = false;
-            }
-            if exp_current {
-                self.do_export(false);
-            }
-            if exp_all {
-                self.do_export(true);
-            }
-            if toggle_measure {
-                self.measure_mode = !self.measure_mode;
-                if !self.measure_mode {
-                    self.measure_pts.clear();
-                }
-            }
-            if toggle_settings {
-                self.show_settings = !self.show_settings;
             }
             if let Some(side) = open_side {
                 self.open_primary(side, ui.ctx());
@@ -4245,10 +4179,12 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
         });
 }
 
-// Width tiers in egui POINTS (screen_rect width; ~half the CSS px at ppp 2). The
-// full inline bar's content needs ~900 pt, so below that the actions collapse.
+// Width tiers in egui POINTS (screen_rect width; ~half the CSS px at ppp 2). With
+// the reduced Open/Fit/Help cluster (#57) the inline bar needs ~660 pt (down from
+// ~900 when Measure/Export/Settings still lived here), so below that the actions
+// fold into "More" and Open/Fit/Help never clip.
 /// Below this window width (pt) the right action cluster collapses into "More".
-const TIER_MORE_PX: f32 = 900.0;
+const TIER_MORE_PX: f32 = 660.0;
 
 /// Running under WSL? WSL sets `WSL_DISTRO_NAME`, and the kernel release contains
 /// "microsoft". On real Windows/macOS/Linux this is always false (the /proc read
