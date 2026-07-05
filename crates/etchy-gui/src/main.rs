@@ -275,6 +275,51 @@ enum BaseLevel {
     Strong,
 }
 
+/// Which side panel the activity rail (Feature 1) has expanded. The rail drives
+/// one docked panel at a time; `None` collapses it (rail-only, canvas full width).
+/// Runtime-only — not persisted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PanelTab {
+    Layers,
+    Measure,
+    Export,
+}
+
+impl PanelTab {
+    /// The rail's panel tabs, top to bottom. Measure/Export are stubs for now
+    /// (Features 3/4 fill their bodies); the seam lives here so later PRs only add
+    /// the panel content, not the shell.
+    const ALL: [PanelTab; 3] = [PanelTab::Layers, PanelTab::Measure, PanelTab::Export];
+
+    fn label(self) -> &'static str {
+        match self {
+            PanelTab::Layers => "Layers",
+            PanelTab::Measure => "Measure",
+            PanelTab::Export => "Export",
+        }
+    }
+}
+
+/// Which edge the activity rail (and the panel it drives) live on (Feature 8).
+/// Flippable from Settings; persisted with a stable serde string repr (like
+/// `Theme`/`BaseLevel`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum RailSide {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Rail click semantics: clicking the active tab collapses the panel; clicking any
+/// other tab switches to (and opens) it. Pure → unit-testable off-screen.
+fn toggle_panel(current: Option<PanelTab>, clicked: PanelTab) -> Option<PanelTab> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked)
+    }
+}
+
 /// Input scheme matching the user's ECAD tool (#54). MVP: it only controls which
 /// mouse button pans the canvas (the real differentiator between tools) — scroll
 /// stays zoom-to-cursor for all three. A full per-key remapper is a follow-up.
@@ -866,6 +911,11 @@ struct ViewApp {
     /// Transient status line from the last export (#60), shown by the Export
     /// control. Not persisted.
     export_msg: Option<String>,
+    /// Which side panel the activity rail has expanded (Feature 1); `None` =
+    /// rail-only (canvas full width). Runtime-only — not persisted.
+    active_panel: Option<PanelTab>,
+    /// Which edge the activity rail lives on (Feature 8); persisted via #52.
+    rail_side: RailSide,
 }
 
 impl ViewApp {
@@ -945,6 +995,10 @@ impl ViewApp {
             #[cfg(feature = "gpu-transform")]
             gpu_hash: None,
             export_msg: None,
+            // The Layers panel is open by default, matching the old always-visible
+            // left panel; the rail can collapse it.
+            active_panel: Some(PanelTab::Layers),
+            rail_side: RailSide::default(),
         }
     }
 
@@ -1459,6 +1513,25 @@ impl<'de> serde::Deserialize<'de> for InputPreset {
     }
 }
 
+/// Rail side persists as a stable string (same rationale as `Theme`).
+impl serde::Serialize for RailSide {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            RailSide::Left => "left",
+            RailSide::Right => "right",
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for RailSide {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        // Unknown / legacy values fall back to the default (left), never error.
+        Ok(match String::deserialize(d)?.as_str() {
+            "right" => RailSide::Right,
+            _ => RailSide::Left,
+        })
+    }
+}
+
 /// `Color32` -> unmultiplied sRGBA bytes, for storage (Color32 isn't Serialize).
 fn color_to_rgba(c: Color32) -> [u8; 4] {
     c.to_srgba_unmultiplied()
@@ -1493,6 +1566,8 @@ struct Settings {
     visible_layers: Vec<usize>,
     /// Swipe/curtain divider position, normalized 0..1 (#61).
     swipe_frac: f32,
+    /// Which edge the activity rail lives on (Feature 8).
+    rail_side: RailSide,
 }
 
 impl Default for Settings {
@@ -1511,6 +1586,7 @@ impl Default for Settings {
             input_preset: InputPreset::default(),
             visible_layers: Vec::new(),
             swipe_frac: 0.5,
+            rail_side: RailSide::default(),
         }
     }
 }
@@ -1638,6 +1714,7 @@ impl ViewApp {
             input_preset: self.input_preset,
             visible_layers: visible_indices(&self.visible_layers),
             swipe_frac: self.swipe_frac,
+            rail_side: self.rail_side,
         }
     }
 
@@ -1671,6 +1748,7 @@ impl ViewApp {
             }
         }
         self.swipe_frac = clamp_swipe_frac(s.swipe_frac);
+        self.rail_side = s.rail_side;
     }
 }
 
@@ -2292,16 +2370,11 @@ impl eframe::App for ViewApp {
             self.applied_theme = Some(self.theme);
         }
         egui::Panel::top("top").show_inside(ui, |ui| {
-            // Title row: a single "etchy" wordmark (one lockup, matching the web),
-            // the revisions, and the headline totals.
+            // Title row: the etchy E monogram (Feature 8, replacing the old "etchy"
+            // wordmark), the revisions, and the headline totals.
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("etchy")
-                        .size(24.0)
-                        .strong()
-                        .color(C_COPPER),
-                );
+                etchy_monogram(ui, 26.0);
                 ui.add_space(8.0);
                 ui.label(
                     // ASCII "->" — egui's default font has no arrow glyph (→ renders
@@ -2522,249 +2595,69 @@ impl eframe::App for ViewApp {
             });
         }
 
-        egui::Panel::left("layers")
-            .resizable(true)
-            .default_size(260.0)
+        // Activity rail (Feature 1): a slim VS Code-style strip on `rail_side`
+        // (Feature 8) — the E monogram on top, one icon per side panel, the
+        // Settings cog pinned at the bottom. Replaces the always-open left Layers
+        // panel; the Layers body moved verbatim into `layers_panel_ui`, so this
+        // slice is layout-only.
+        let rail = match self.rail_side {
+            RailSide::Left => egui::Panel::left("rail"),
+            RailSide::Right => egui::Panel::right("rail"),
+        };
+        rail.exact_size(48.0)
+            .resizable(false)
             .show_inside(ui, |ui| {
-                ui.heading("Layers");
-                // Quick visibility actions (#58): show/hide every layer, or only the
-                // changed ones. They never move the selection or camera.
-                ui.horizontal(|ui| {
-                    if ui.small_button("Show all").clicked() {
-                        for v in self.visible_layers.iter_mut() {
-                            *v = true;
-                        }
-                    }
-                    if ui.small_button("Hide all").clicked() {
-                        // Hide-all clears EVERY layer (#2) — including the selected
-                        // one. (Split/Swipe still force the active layer visible in
-                        // those modes so their view is never blank.)
-                        for v in self.visible_layers.iter_mut() {
-                            *v = false;
-                        }
-                    }
-                    // "Show changed" button hidden per feedback #8 — the capability
-                    // stays in `visible_from_changed` (still unit-tested) so it can be
-                    // re-surfaced later, but the button is removed from the row.
-                });
-                // View mode (#59): a quick preset over the per-layer checkboxes —
-                // single active layer / highlight active over dimmed rest / all equal.
-                // Selecting one resets visibility to the preset; per-row checkboxes
-                // still fine-tune afterwards.
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("view").weak().small());
-                    ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
-                    ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
-                    for (mode, label) in ViewMode::ALL {
-                        if ui.selectable_label(self.view_mode == mode, label).clicked() {
-                            self.view_mode = mode;
-                            self.visible_layers =
-                                visibility_for_mode(mode, self.diff.layers.len(), self.selected);
-                        }
-                    }
-                });
-                ui.separator();
-                // Actions deferred so the per-frame group iteration doesn't borrow
-                // self mutably while it's borrowed for the group list.
-                let mut select: Option<usize> = None;
-                let mut toggle: Option<(usize, bool)> = None; // (layer, show)
-                let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
-                let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
-                let mut toggle_outline = false; // board-edge visibility (#157)
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Board edge is its own reference "layer" (#157): a row in the list
-                    // with the others (an eye toggle like every layer row), not a
-                    // separate control. It's a faint outline drawn on every layer.
-                    if self.outline.is_some() {
+                // Settings cog pinned to the bottom of the rail.
+                egui::Panel::bottom("rail_settings")
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| {
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Reference").small().color(C_COPPER));
-                        ui.horizontal(|ui| {
-                            if eye_toggle(ui, self.show_outline)
-                                .on_hover_text("Show / hide the board outline reference")
+                        ui.vertical_centered(|ui| {
+                            if rail_button(ui, self.show_settings, draw_cog_icon)
+                                .on_hover_text("Settings")
                                 .clicked()
                             {
-                                toggle_outline = true;
+                                self.show_settings = !self.show_settings;
                             }
-                            let (sw, _) = ui
-                                .allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-                            ui.painter().rect_stroke(
-                                sw,
-                                2.0,
-                                Stroke::new(1.5, C_COPPER),
-                                egui::StrokeKind::Inside,
-                            );
-                            ui.label("board edge").on_hover_text(
-                                "The board outline (Edge.Cuts/GKO), drawn faint on every layer.",
-                            );
                         });
-                    }
-                    // Group into sections (copper / mask / silk / …) in fixed order,
-                    // changed-first within each (G5).
-                    let groups =
-                        group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
-                    for (group, idxs) in groups {
                         ui.add_space(4.0);
-                        // Group header (#36 collapse + #58 show/hide-all): a
-                        // CollapsingState lets the header carry BOTH the disclosure
-                        // triangle (rotates down=open / right=collapsed) AND a group
-                        // show/hide-all checkbox; the body holds the layer rows. egui
-                        // (with eframe persistence) remembers each group's open state.
-                        let gid = ui.make_persistent_id(("layer-group", group.title()));
-                        let state =
-                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                ui.ctx(),
-                                gid,
-                                true,
-                            );
-                        state
-                            .show_header(ui, |ui| {
-                                // Show/hide every layer in the group (#58), same eye
-                                // toggle as the rows (#4). Separate from collapsing,
-                                // which only hides the list rows.
-                                let all = group_all_visible(&self.visible_layers, &idxs);
-                                if eye_toggle(ui, all)
-                                    .on_hover_text("Show / hide every layer in this group")
-                                    .clicked()
-                                {
-                                    group_set = Some((idxs.clone(), !all));
-                                }
-                                ui.label(
-                                    egui::RichText::new(group.title())
-                                        .small()
-                                        .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
-                                );
-                            })
-                            // Indent the rows under the header (#1) so the group name
-                            // reads as the parent, left of its layers.
-                            .body(|ui| {
-                                for idx in &idxs {
-                                    let idx = *idx;
-                                    let l = &self.diff.layers[idx];
-                                    // Row: a per-layer visibility checkbox, a small
-                                    // colour swatch (painted rect, not a font glyph —
-                                    // the default font lacks ● and renders tofu,
-                                    // #16), the layer name, then a compact change
-                                    // micro-label (#25).
-                                    let kind = l.kind;
-                                    let changed = l.is_changed();
-                                    let added = l.change.added_area_mm2();
-                                    let removed = l.change.removed_area_mm2();
-                                    let name = short_layer_name(kind);
-                                    let visible =
-                                        self.visible_layers.get(idx).copied().unwrap_or(false);
-                                    let swatch = resolve_base_color(
-                                        idx,
-                                        kind,
-                                        &self.base_overrides,
-                                        self.theme,
-                                    );
-                                    let resp = ui
-                                        .horizontal(|ui| {
-                                            // Per-layer visibility: an Altium-style
-                                            // eye toggle, separate from the
-                                            // click-to-select label (#4/#58).
-                                            if eye_toggle(ui, visible)
-                                                .on_hover_text("Show / hide this layer")
-                                                .clicked()
-                                            {
-                                                toggle = Some((idx, !visible));
-                                            }
-                                            // Clickable colour swatch (#3): opens this
-                                            // layer's colour picker; a change records a
-                                            // per-layer base override (applied below).
-                                            let mut sw = swatch;
-                                            if ui
-                                                .color_edit_button_srgba(&mut sw)
-                                                .on_hover_text("Layer colour — click to change")
-                                                .changed()
-                                            {
-                                                set_color = Some((idx, sw));
-                                            }
-                                            // Visible layers read brighter; hidden grey.
-                                            let label = match (visible, changed) {
-                                                (true, true) => egui::RichText::new(&name).strong(),
-                                                (true, false) => egui::RichText::new(&name),
-                                                (false, _) => egui::RichText::new(&name)
-                                                    .weak()
-                                                    .color(Color32::GRAY),
-                                            };
-                                            let r =
-                                                ui.selectable_label(idx == self.selected, label);
-                                            // Compact %-change micro-label on changed
-                                            // layers (#114): the changed area as a
-                                            // share of the layer's new-revision area.
-                                            // The mm² deltas move into the hover text so
-                                            // the row stays scannable. If the layer is
-                                            // gone in the new rev (area 0), fall back to
-                                            // the raw deltas.
-                                            if changed {
-                                                let area = self
-                                                    .new_area_mm2
-                                                    .get(idx)
-                                                    .copied()
-                                                    .unwrap_or(0.0);
-                                                let txt = if area > 0.0 {
-                                                    format!(
-                                                        "Δ {:.1}%",
-                                                        (added + removed) / area * 100.0
-                                                    )
-                                                } else {
-                                                    format!("+{added:.3} −{removed:.3}")
-                                                };
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(
-                                                        egui::Align::Center,
-                                                    ),
-                                                    |ui| {
-                                                        // Δ% in copper so the change
-                                                        // magnitude reads at a glance (#20).
-                                                        ui.label(
-                                                            egui::RichText::new(txt)
-                                                                .small()
-                                                                .color(C_COPPER),
-                                                        )
-                                                        .on_hover_text(format!(
-                                                            "+{added:.4} mm² added · \
-                                                             −{removed:.4} mm² removed · \
-                                                             layer area {area:.3} mm²"
-                                                        ));
-                                                    },
-                                                );
-                                            }
-                                            r
-                                        })
-                                        .inner;
-                                    if resp.clicked() {
-                                        select = Some(idx);
-                                    }
-                                }
-                            });
-                    }
+                    });
+                // Monogram + panel tabs fill the rest, top-down.
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(6.0);
+                        etchy_monogram(ui, 30.0);
+                        ui.add_space(10.0);
+                        for tab in PanelTab::ALL {
+                            let active = self.active_panel == Some(tab);
+                            if rail_button(ui, active, |p, r, c| draw_panel_icon(tab, p, r, c))
+                                .on_hover_text(tab.label())
+                                .clicked()
+                            {
+                                self.active_panel = toggle_panel(self.active_panel, tab);
+                            }
+                            ui.add_space(2.0);
+                        }
+                    });
                 });
-                // Apply deferred actions.
-                if let Some((idxs, show)) = group_set {
-                    set_group_visibility(&mut self.visible_layers, &idxs, show);
-                }
-                if let Some((idx, show)) = toggle {
-                    if let Some(v) = self.visible_layers.get_mut(idx) {
-                        *v = show;
-                    }
-                }
-                if let Some(idx) = select {
-                    self.select(idx);
-                }
-                // Per-layer colour override from the inline swatch picker (#3).
-                if let Some((idx, c)) = set_color {
-                    if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx) {
-                        e.1 = c;
-                    } else {
-                        self.base_overrides.push((idx, c));
-                    }
-                }
-                if toggle_outline {
-                    self.show_outline = !self.show_outline;
-                }
             });
+
+        // The docked panel the rail drives; shown only when a tab is active
+        // (`None` = collapsed, canvas full width), on the same edge as the rail.
+        if let Some(tab) = self.active_panel {
+            let panel = match self.rail_side {
+                RailSide::Left => egui::Panel::left("panel"),
+                RailSide::Right => egui::Panel::right("panel"),
+            };
+            panel
+                .resizable(true)
+                .default_size(260.0)
+                .show_inside(ui, |ui| match tab {
+                    PanelTab::Layers => self.layers_panel_ui(ui),
+                    PanelTab::Measure => self.measure_panel_ui(ui),
+                    PanelTab::Export => self.export_panel_ui(ui),
+                });
+        }
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_canvas(ui);
@@ -2858,6 +2751,259 @@ impl eframe::App for ViewApp {
 }
 
 impl ViewApp {
+    /// The Layers panel body (Feature 1): moved verbatim out of `fn ui` so the
+    /// rail slice stays layout-only. All layer behaviour (eye toggles, groups,
+    /// view modes, Δ%, per-layer colour, board-edge reference) is unchanged.
+    fn layers_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Layers");
+        // Quick visibility actions (#58): show/hide every layer, or only the
+        // changed ones. They never move the selection or camera.
+        ui.horizontal(|ui| {
+            if ui.small_button("Show all").clicked() {
+                for v in self.visible_layers.iter_mut() {
+                    *v = true;
+                }
+            }
+            if ui.small_button("Hide all").clicked() {
+                // Hide-all clears EVERY layer (#2) — including the selected
+                // one. (Split/Swipe still force the active layer visible in
+                // those modes so their view is never blank.)
+                for v in self.visible_layers.iter_mut() {
+                    *v = false;
+                }
+            }
+            // "Show changed" button hidden per feedback #8 — the capability
+            // stays in `visible_from_changed` (still unit-tested) so it can be
+            // re-surfaced later, but the button is removed from the row.
+        });
+        // View mode (#59): a quick preset over the per-layer checkboxes —
+        // single active layer / highlight active over dimmed rest / all equal.
+        // Selecting one resets visibility to the preset; per-row checkboxes
+        // still fine-tune afterwards.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("view").weak().small());
+            ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
+            ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
+            for (mode, label) in ViewMode::ALL {
+                if ui.selectable_label(self.view_mode == mode, label).clicked() {
+                    self.view_mode = mode;
+                    self.visible_layers =
+                        visibility_for_mode(mode, self.diff.layers.len(), self.selected);
+                }
+            }
+        });
+        ui.separator();
+        // Actions deferred so the per-frame group iteration doesn't borrow
+        // self mutably while it's borrowed for the group list.
+        let mut select: Option<usize> = None;
+        let mut toggle: Option<(usize, bool)> = None; // (layer, show)
+        let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
+        let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
+        let mut toggle_outline = false; // board-edge visibility (#157)
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Board edge is its own reference "layer" (#157): a row in the list
+            // with the others (an eye toggle like every layer row), not a
+            // separate control. It's a faint outline drawn on every layer.
+            if self.outline.is_some() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Reference").small().color(C_COPPER));
+                ui.horizontal(|ui| {
+                    if eye_toggle(ui, self.show_outline)
+                        .on_hover_text("Show / hide the board outline reference")
+                        .clicked()
+                    {
+                        toggle_outline = true;
+                    }
+                    let (sw, _) =
+                        ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
+                    ui.painter().rect_stroke(
+                        sw,
+                        2.0,
+                        Stroke::new(1.5, C_COPPER),
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.label("board edge").on_hover_text(
+                        "The board outline (Edge.Cuts/GKO), drawn faint on every layer.",
+                    );
+                });
+            }
+            // Group into sections (copper / mask / silk / …) in fixed order,
+            // changed-first within each (G5).
+            let groups = group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
+            for (group, idxs) in groups {
+                ui.add_space(4.0);
+                // Group header (#36 collapse + #58 show/hide-all): a
+                // CollapsingState lets the header carry BOTH the disclosure
+                // triangle (rotates down=open / right=collapsed) AND a group
+                // show/hide-all checkbox; the body holds the layer rows. egui
+                // (with eframe persistence) remembers each group's open state.
+                let gid = ui.make_persistent_id(("layer-group", group.title()));
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    gid,
+                    true,
+                );
+                state
+                    .show_header(ui, |ui| {
+                        // Show/hide every layer in the group (#58), same eye
+                        // toggle as the rows (#4). Separate from collapsing,
+                        // which only hides the list rows.
+                        let all = group_all_visible(&self.visible_layers, &idxs);
+                        if eye_toggle(ui, all)
+                            .on_hover_text("Show / hide every layer in this group")
+                            .clicked()
+                        {
+                            group_set = Some((idxs.clone(), !all));
+                        }
+                        ui.label(
+                            egui::RichText::new(group.title())
+                                .small()
+                                .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
+                        );
+                    })
+                    // Indent the rows under the header (#1) so the group name
+                    // reads as the parent, left of its layers.
+                    .body(|ui| {
+                        for idx in &idxs {
+                            let idx = *idx;
+                            let l = &self.diff.layers[idx];
+                            // Row: a per-layer visibility checkbox, a small
+                            // colour swatch (painted rect, not a font glyph —
+                            // the default font lacks ● and renders tofu,
+                            // #16), the layer name, then a compact change
+                            // micro-label (#25).
+                            let kind = l.kind;
+                            let changed = l.is_changed();
+                            let added = l.change.added_area_mm2();
+                            let removed = l.change.removed_area_mm2();
+                            let name = short_layer_name(kind);
+                            let visible = self.visible_layers.get(idx).copied().unwrap_or(false);
+                            let swatch =
+                                resolve_base_color(idx, kind, &self.base_overrides, self.theme);
+                            let resp = ui
+                                .horizontal(|ui| {
+                                    // Per-layer visibility: an Altium-style
+                                    // eye toggle, separate from the
+                                    // click-to-select label (#4/#58).
+                                    if eye_toggle(ui, visible)
+                                        .on_hover_text("Show / hide this layer")
+                                        .clicked()
+                                    {
+                                        toggle = Some((idx, !visible));
+                                    }
+                                    // Clickable colour swatch (#3): opens this
+                                    // layer's colour picker; a change records a
+                                    // per-layer base override (applied below).
+                                    let mut sw = swatch;
+                                    if square_color_swatch(ui, &mut sw)
+                                        .on_hover_text("Layer colour — click to change")
+                                        .changed()
+                                    {
+                                        set_color = Some((idx, sw));
+                                    }
+                                    // Visible layers read brighter; hidden grey.
+                                    let label = match (visible, changed) {
+                                        (true, true) => egui::RichText::new(&name).strong(),
+                                        (true, false) => egui::RichText::new(&name),
+                                        (false, _) => {
+                                            egui::RichText::new(&name).weak().color(Color32::GRAY)
+                                        }
+                                    };
+                                    let r = ui.selectable_label(idx == self.selected, label);
+                                    // Compact %-change micro-label on changed
+                                    // layers (#114): the changed area as a
+                                    // share of the layer's new-revision area.
+                                    // The mm² deltas move into the hover text so
+                                    // the row stays scannable. If the layer is
+                                    // gone in the new rev (area 0), fall back to
+                                    // the raw deltas.
+                                    if changed {
+                                        let area =
+                                            self.new_area_mm2.get(idx).copied().unwrap_or(0.0);
+                                        let txt = if area > 0.0 {
+                                            format!("Δ {:.1}%", (added + removed) / area * 100.0)
+                                        } else {
+                                            format!("+{added:.3} −{removed:.3}")
+                                        };
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                // Δ% in copper so the change
+                                                // magnitude reads at a glance (#20).
+                                                ui.label(
+                                                    egui::RichText::new(txt)
+                                                        .small()
+                                                        .color(C_COPPER),
+                                                )
+                                                .on_hover_text(format!(
+                                                    "+{added:.4} mm² added · \
+                                                             −{removed:.4} mm² removed · \
+                                                             layer area {area:.3} mm²"
+                                                ));
+                                            },
+                                        );
+                                    }
+                                    r
+                                })
+                                .inner;
+                            if resp.clicked() {
+                                select = Some(idx);
+                            }
+                        }
+                    });
+            }
+        });
+        // Apply deferred actions.
+        if let Some((idxs, show)) = group_set {
+            set_group_visibility(&mut self.visible_layers, &idxs, show);
+        }
+        if let Some((idx, show)) = toggle {
+            if let Some(v) = self.visible_layers.get_mut(idx) {
+                *v = show;
+            }
+        }
+        if let Some(idx) = select {
+            self.select(idx);
+        }
+        // Per-layer colour override from the inline swatch picker (#3).
+        if let Some((idx, c)) = set_color {
+            if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx) {
+                e.1 = c;
+            } else {
+                self.base_overrides.push((idx, c));
+            }
+        }
+        if toggle_outline {
+            self.show_outline = !self.show_outline;
+        }
+    }
+
+    /// Measure tab (stub). Feature 3 fills this with the measurement list, snap
+    /// and crosshair toggles, and unit selector; the seam lives here for PR A.
+    fn measure_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Measure");
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Measurement tools move here in a later change.").weak());
+        ui.label(
+            egui::RichText::new("For now, use the Measure control in the top bar.")
+                .weak()
+                .small(),
+        );
+    }
+
+    /// Export tab (stub). Feature 4 fills this with the export preview and format
+    /// list; the seam lives here for PR A.
+    fn export_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Export");
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Export options move here in a later change.").weak());
+        ui.label(
+            egui::RichText::new("For now, use the Export menu in the top bar.")
+                .weak()
+                .small(),
+        );
+    }
+
     /// A copper section heading for the Settings panes (#121).
     fn settings_header(ui: &mut egui::Ui, text: &str) {
         ui.add_space(1.0);
@@ -2879,6 +3025,13 @@ impl ViewApp {
             ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
             ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
         });
+        ui.horizontal(|ui| {
+            ui.label("Activity rail");
+            ui.selectable_value(&mut self.rail_side, RailSide::Left, "left");
+            ui.selectable_value(&mut self.rail_side, RailSide::Right, "right");
+        })
+        .response
+        .on_hover_text("Which edge the activity rail and its panel dock to (Feature 8).");
         #[cfg(feature = "gpu-transform")]
         if self.gpu.is_some() {
             ui.checkbox(&mut self.use_gpu, "GPU base transform (experimental)")
@@ -3016,7 +3169,7 @@ impl ViewApp {
                     ui.horizontal(|ui| {
                         let mut base =
                             resolve_base_color(idx, kind, &self.base_overrides, self.theme);
-                        if ui.color_edit_button_srgba(&mut base).changed() {
+                        if square_color_swatch(ui, &mut base).changed() {
                             if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx)
                             {
                                 e.1 = base;
@@ -3933,6 +4086,159 @@ fn eye_toggle(ui: &mut egui::Ui, visible: bool) -> egui::Response {
     resp
 }
 
+/// The etchy brand mark (Feature 8): a copper rounded-square "E" monogram. Drawn
+/// with the painter (a copper fill + a letter galley — letters render fine; only
+/// symbol glyphs are tofu, #16/#30). Replaces the top-bar wordmark and marks the
+/// top of the activity rail.
+fn etchy_monogram(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, size * 0.22, C_COPPER);
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "E",
+        egui::FontId::proportional(size * 0.66),
+        C_CANVAS,
+    );
+    resp
+}
+
+/// A small SQUARE colour swatch (Feature 7) that opens egui's colour picker on
+/// click. `color_edit_button_srgba` is normally a rounded, interact-sized button;
+/// scoping the interact size down and zeroing the widget corner radius makes it a
+/// compact square while keeping the picker popup intact.
+fn square_color_swatch(ui: &mut egui::Ui, color: &mut Color32) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size = egui::vec2(14.0, 14.0);
+        let v = ui.visuals_mut();
+        v.widgets.inactive.corner_radius = egui::CornerRadius::ZERO;
+        v.widgets.hovered.corner_radius = egui::CornerRadius::ZERO;
+        v.widgets.active.corner_radius = egui::CornerRadius::ZERO;
+        v.widgets.open.corner_radius = egui::CornerRadius::ZERO;
+        ui.color_edit_button_srgba(color)
+    })
+    .inner
+}
+
+/// One activity-rail cell (Feature 1): a fixed-size button that paints a
+/// hover/active background (copper accent when active, matching the app's selection
+/// accent) then draws its glyph via the painter — never a font symbol (the bundled
+/// font renders many symbols as tofu, #16/#30). Returns the click response.
+fn rail_button(
+    ui: &mut egui::Ui,
+    active: bool,
+    draw: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(40.0, 34.0), Sense::click());
+    let hovered = resp.hovered();
+    if active {
+        ui.painter()
+            .rect_filled(rect, 5.0, C_COPPER.gamma_multiply(0.30));
+    } else if hovered {
+        ui.painter()
+            .rect_filled(rect, 5.0, C_COPPER.gamma_multiply(0.12));
+    }
+    let col = if active {
+        C_COPPER
+    } else if hovered {
+        C_CREAM
+    } else {
+        Color32::from_rgb(0xcd, 0xd6, 0xe4)
+    };
+    let icon = Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));
+    draw(ui.painter(), icon, col);
+    resp
+}
+
+/// Draw the glyph for a panel tab's rail icon (painter marks, glyph-free).
+fn draw_panel_icon(tab: PanelTab, p: &egui::Painter, r: Rect, col: Color32) {
+    match tab {
+        PanelTab::Layers => draw_layers_icon(p, r, col),
+        PanelTab::Measure => draw_measure_icon(p, r, col),
+        PanelTab::Export => draw_export_icon(p, r, col),
+    }
+}
+
+/// Layers icon: three stacked bars reading as a layer list.
+fn draw_layers_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let bar_h = (r.height() * 0.16).max(2.0);
+    for i in 0..3 {
+        let y = r.min.y + r.height() * (0.10 + i as f32 * 0.33);
+        let bar = Rect::from_min_size(egui::pos2(r.min.x, y), egui::vec2(r.width(), bar_h));
+        p.rect_filled(bar, 1.0, col);
+    }
+}
+
+/// Measure icon: a ruler — an outlined bar with tick marks along its top edge.
+fn draw_measure_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let bar = Rect::from_min_max(
+        egui::pos2(r.min.x, r.center().y - r.height() * 0.20),
+        egui::pos2(r.max.x, r.center().y + r.height() * 0.20),
+    );
+    p.rect_stroke(bar, 1.0, Stroke::new(1.4, col), StrokeKind::Inside);
+    for i in 1..4 {
+        let x = r.min.x + r.width() * (i as f32 / 4.0);
+        p.line_segment(
+            [
+                egui::pos2(x, bar.min.y),
+                egui::pos2(x, bar.min.y + r.height() * 0.16),
+            ],
+            Stroke::new(1.2, col),
+        );
+    }
+}
+
+/// Export icon: a down arrow above a tray line ("write to disk").
+fn draw_export_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let cx = r.center().x;
+    let tip_y = r.center().y + r.height() * 0.10;
+    p.line_segment(
+        [egui::pos2(cx, r.min.y), egui::pos2(cx, tip_y)],
+        Stroke::new(1.6, col),
+    );
+    let aw = r.width() * 0.20;
+    let ah = r.height() * 0.16;
+    p.line_segment(
+        [egui::pos2(cx - aw, tip_y - ah), egui::pos2(cx, tip_y)],
+        Stroke::new(1.6, col),
+    );
+    p.line_segment(
+        [egui::pos2(cx + aw, tip_y - ah), egui::pos2(cx, tip_y)],
+        Stroke::new(1.6, col),
+    );
+    p.line_segment(
+        [egui::pos2(r.min.x, r.max.y), egui::pos2(r.max.x, r.max.y)],
+        Stroke::new(1.6, col),
+    );
+}
+
+/// Settings cog icon: a toothed ring with a hub.
+fn draw_cog_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let c = r.center();
+    let ring_r = r.width().min(r.height()) * 0.30;
+    let tooth = ring_r * 0.5;
+    for i in 0..8 {
+        let a = i as f32 / 8.0 * std::f32::consts::TAU;
+        let (s, cs) = a.sin_cos();
+        p.line_segment(
+            [
+                egui::pos2(c.x + cs * ring_r, c.y + s * ring_r),
+                egui::pos2(c.x + cs * (ring_r + tooth), c.y + s * (ring_r + tooth)),
+            ],
+            Stroke::new(1.5, col),
+        );
+    }
+    let ring: Vec<Pos2> = (0..=24)
+        .map(|i| {
+            let a = i as f32 / 24.0 * std::f32::consts::TAU;
+            egui::pos2(c.x + a.cos() * ring_r, c.y + a.sin() * ring_r)
+        })
+        .collect();
+    p.add(Shape::closed_line(ring, Stroke::new(1.5, col)));
+    p.circle_filled(c, ring_r * 0.42, col);
+}
+
 /// Per-frame: transform cached world items to screen meshes, applying colour, the
 /// highlight/dim (#59), the LOD fade (diff only), and the min-area cull (returns the
 /// hidden count). No triangulation here — this is the cheap part that runs every
@@ -4405,8 +4711,9 @@ mod tests {
         base_display_color, build_geom_key, cycle_base, derive_label, distance_mm, format_coord_mm,
         geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group,
         outline_legend_visible, pans_on, pick_outline_index, region_screen_px,
-        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, warning_phase,
-        BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, Theme, WarningPhase,
+        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, toggle_panel,
+        warning_phase, BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, PanelTab, RailSide,
+        Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
 
@@ -5117,6 +5424,37 @@ mod tests {
     }
 
     #[test]
+    fn rail_side_serde_round_trips() {
+        for s in [RailSide::Left, RailSide::Right] {
+            let json = serde_json::to_string(&s).expect("serialize");
+            let back: RailSide = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(s, back);
+        }
+        // Unknown / legacy values fall back to the default (left), never error.
+        assert_eq!(
+            serde_json::from_str::<RailSide>("\"bogus\"").expect("deserialize"),
+            RailSide::Left,
+        );
+        assert_eq!(RailSide::default(), RailSide::Left);
+    }
+
+    #[test]
+    fn toggle_panel_opens_switches_and_collapses() {
+        // Clicking an inactive tab opens it; clicking the active tab collapses the
+        // panel; clicking a different tab switches to it.
+        assert_eq!(toggle_panel(None, PanelTab::Layers), Some(PanelTab::Layers));
+        assert_eq!(toggle_panel(Some(PanelTab::Layers), PanelTab::Layers), None);
+        assert_eq!(
+            toggle_panel(Some(PanelTab::Layers), PanelTab::Measure),
+            Some(PanelTab::Measure)
+        );
+        assert_eq!(
+            toggle_panel(Some(PanelTab::Measure), PanelTab::Layers),
+            Some(PanelTab::Layers)
+        );
+    }
+
+    #[test]
     fn settings_serde_round_trips() {
         use super::{color_to_rgba, rgba_to_color, Settings};
         use egui::Color32;
@@ -5134,6 +5472,7 @@ mod tests {
             input_preset: InputPreset::KiCad,
             visible_layers: vec![0, 2, 5],
             swipe_frac: 0.42,
+            rail_side: RailSide::Right,
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
