@@ -318,6 +318,18 @@ fn toggle_panel(current: Option<PanelTab>, clicked: PanelTab) -> Option<PanelTab
     }
 }
 
+/// Rail-click semantics for the Measure tab — the one icon with a side effect
+/// beyond show/hide (#50). Clicking it opens the Measure panel *and* arms measure
+/// mode; clicking it again while active collapses the panel *and* disarms. Returns
+/// `(next_panel, armed)` where `armed` is the measure-mode flag: it follows the
+/// panel, so arming always tracks whether Measure ends up open. Pure →
+/// unit-testable off-screen.
+fn measure_rail_click(current: Option<PanelTab>) -> (Option<PanelTab>, bool) {
+    let next = toggle_panel(current, PanelTab::Measure);
+    let armed = next == Some(PanelTab::Measure);
+    (next, armed)
+}
+
 /// Input scheme matching the user's ECAD tool (#54). MVP: it only controls which
 /// mouse button pans the canvas (the real differentiator between tools) — scroll
 /// stays zoom-to-cursor for all three. A full per-key remapper is a follow-up.
@@ -871,8 +883,12 @@ struct ViewApp {
     /// Measure tool active (#22): canvas clicks drop ruler points instead of
     /// panning; Esc clears and exits.
     measure_mode: bool,
-    /// The last (up to) two world-space points of the ruler.
+    /// The in-progress ruler buffer (#50): 0 or 1 world-space points. A second
+    /// click completes the pair into `measurements` and empties this.
     measure_pts: Vec<[f64; 2]>,
+    /// Completed measurements (#50): the running list the Measure tab shows and the
+    /// canvas draws. Runtime-only and per-board — cleared on load.
+    measurements: Vec<Measurement>,
     /// Unit the measure label is shown in (#50): mm / inch / mil.
     measure_unit: Unit,
     /// Grid overlay on (#51): faint world-spaced lines over the canvas.
@@ -981,6 +997,7 @@ impl ViewApp {
             cache: None,
             measure_mode: false,
             measure_pts: Vec::new(),
+            measurements: Vec::new(),
             measure_unit: Unit::Mm,
             // Grid + snap + crosshair default ON (#179): the snapped-cursor crosshair
             // and coordinate readout are available all the time, not only in measure
@@ -1790,6 +1807,7 @@ impl ViewApp {
         self.cache = None;
         self.cam = Camera::default(); // fitted=false → auto-fit next frame
         self.measure_pts.clear();
+        self.measurements.clear(); // world coords are per-board
         self.warning_shown_at = None;
         self.warning_expanded = false;
         self.load_error = None;
@@ -2312,11 +2330,12 @@ impl eframe::App for ViewApp {
                 i.key_pressed(Key::Escape),
                 i.key_pressed(Key::U),
                 i.key_pressed(Key::G),
-                i.modifiers.ctrl && i.key_pressed(Key::M),
+                i.key_pressed(Key::M),
             )
         });
         if toggle_measure {
-            // Ctrl+M toggles measure mode (#52, fix #4), mirroring the button.
+            // M arms/disarms measure mode (#50), mirroring the rail Measure icon and
+            // the top-bar control. Suppressed while typing via the `typing` guard.
             self.measure_mode = !self.measure_mode;
             if !self.measure_mode {
                 self.measure_pts.clear();
@@ -2629,11 +2648,28 @@ impl eframe::App for ViewApp {
                         ui.add_space(10.0);
                         for tab in PanelTab::ALL {
                             let active = self.active_panel == Some(tab);
+                            let hover = if tab == PanelTab::Measure {
+                                "Measure — arms the tool and opens the panel (M)"
+                            } else {
+                                tab.label()
+                            };
                             if rail_button(ui, active, |p, r, c| draw_panel_icon(tab, p, r, c))
-                                .on_hover_text(tab.label())
+                                .on_hover_text(hover)
                                 .clicked()
                             {
-                                self.active_panel = toggle_panel(self.active_panel, tab);
+                                if tab == PanelTab::Measure {
+                                    // The Measure icon both arms the tool and opens
+                                    // the panel; re-clicking disarms + collapses. It
+                                    // arms even while the panel is collapsed (#50).
+                                    let (next, armed) = measure_rail_click(self.active_panel);
+                                    self.active_panel = next;
+                                    self.measure_mode = armed;
+                                    if !armed {
+                                        self.measure_pts.clear();
+                                    }
+                                } else {
+                                    self.active_panel = toggle_panel(self.active_panel, tab);
+                                }
                             }
                             ui.add_space(2.0);
                         }
@@ -2982,12 +3018,88 @@ impl ViewApp {
     fn measure_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Measure");
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Measurement tools move here in a later change.").weak());
-        ui.label(
-            egui::RichText::new("For now, use the Measure control in the top bar.")
-                .weak()
-                .small(),
-        );
+
+        // Armed toggle — mirrors the rail Measure icon and the M hotkey. Arming lets
+        // canvas clicks drop ruler points; disarming clears the in-progress point
+        // but keeps the completed list.
+        let mut armed = self.measure_mode;
+        if ui
+            .checkbox(&mut armed, "Armed — click two points on the canvas")
+            .on_hover_text(
+                "Arm the measure tool (also the rail Measure icon or the M key). \
+                 Click two points on the canvas to add a measurement.",
+            )
+            .changed()
+        {
+            self.measure_mode = armed;
+            if !armed {
+                self.measure_pts.clear();
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.snap_grid, "Snap clicks to grid")
+            .on_hover_text("Snap each placed point to the nearest grid intersection (#51).");
+        ui.checkbox(&mut self.show_crosshair, "Cursor crosshair + readout")
+            .on_hover_text(
+                "Show a crosshair and live coordinates at the cursor, always \
+                 (not only while measuring).",
+            );
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("Units");
+            ui.selectable_value(&mut self.measure_unit, Unit::Mm, "mm");
+            ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
+            ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Measurements ({})", self.measurements.len())).strong(),
+            );
+            if !self.measurements.is_empty() {
+                // Push "Clear all" to the trailing edge.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Clear all").clicked() {
+                        self.measurements.clear();
+                    }
+                });
+            }
+        });
+        ui.add_space(4.0);
+
+        if self.measurements.is_empty() {
+            ui.label(
+                egui::RichText::new("No measurements yet. Arm the tool and click two points.")
+                    .weak()
+                    .small(),
+            );
+        } else {
+            let unit = self.measure_unit;
+            let mut remove: Option<usize> = None;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (i, m) in self.measurements.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Remove this measurement")
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                            ui.label(format_distance(distance_mm(m.a, m.b), unit));
+                        });
+                    }
+                });
+            if let Some(i) = remove {
+                measurement_remove(&mut self.measurements, i);
+            }
+        }
     }
 
     /// Export tab (stub). Feature 4 fills this with the export preview and format
@@ -3305,11 +3417,11 @@ impl ViewApp {
                     if self.snap_grid {
                         w = snap_world_to_grid(w, self.grid_mm);
                     }
-                    // A completed pair persists; the next click starts a fresh one (#50).
-                    if self.measure_pts.len() >= 2 {
-                        self.measure_pts.clear();
+                    // The second click completes the pair onto the running list; the
+                    // next click starts a fresh one (#50).
+                    if let Some(m) = measure_click(&mut self.measure_pts, w) {
+                        self.measurements.push(m);
                     }
-                    self.measure_pts.push(w);
                 }
             }
             // Pan with secondary/middle drag while measuring (#52, fix #2):
@@ -3739,35 +3851,32 @@ impl ViewApp {
             }
         }
 
-        // Measure tool overlay (#22/#50): the ruler points, the segment, and a
-        // sticky distance label offset off the line. The cursor crosshair is drawn
-        // above (always-on, #179).
+        // Measure tool overlay (#22/#50): completed rulers from the running list,
+        // plus the in-progress point while the tool is armed. Each ruler is a
+        // segment with a distance label offset off the line. The cursor crosshair
+        // is drawn above (always-on, #179).
+        // World [f64;2] → screen, matching world_to_screen's float transform.
+        let w2s = |w: [f64; 2]| -> Pos2 {
+            let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
+            let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
+            Pos2::new(x as f32, y as f32)
+        };
+        // Completed measurements persist on-canvas so they stay visible for
+        // reference even when the tool is disarmed; the Measure tab list mirrors
+        // them (delete/clear there update the canvas too).
+        for m in &self.measurements {
+            draw_ruler(
+                &painter,
+                w2s(m.a),
+                w2s(m.b),
+                &format_distance(distance_mm(m.a, m.b), self.measure_unit),
+            );
+        }
         if self.measure_mode {
-            // World [f64;2] → screen, matching world_to_screen's float transform.
-            let w2s = |w: [f64; 2]| -> Pos2 {
-                let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
-                let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
-                Pos2::new(x as f32, y as f32)
-            };
+            // In-progress: the first point of the pair (the second click completes
+            // it into the list above).
             for w in &self.measure_pts {
                 painter.circle_filled(w2s(*w), 3.0, C_COPPER);
-            }
-            if self.measure_pts.len() == 2 {
-                let (a, b) = (self.measure_pts[0], self.measure_pts[1]);
-                let (sa, sb) = (w2s(a), w2s(b));
-                painter.line_segment([sa, sb], Stroke::new(1.5, C_COPPER));
-                // Label OFF the line (#50): offset ~14 px perpendicular to the
-                // segment, on a filled copper chip with dark text for legibility.
-                let mid = Pos2::new((sa.x + sb.x) / 2.0, (sa.y + sb.y) / 2.0);
-                let (dx, dy) = (sb.x - sa.x, sb.y - sa.y);
-                let len = (dx * dx + dy * dy).sqrt().max(1.0);
-                let off = egui::vec2(-dy / len, dx / len) * 14.0;
-                let dist_mm = distance_mm(a, b);
-                measure_label(
-                    &painter,
-                    mid + off,
-                    &format_distance(dist_mm, self.measure_unit),
-                );
             }
             // Hint at the bottom-left.
             painter.text(
@@ -4488,6 +4597,48 @@ fn distance_mm(a: [f64; 2], b: [f64; 2]) -> f64 {
     (dx * dx + dy * dy).sqrt() / etchy_core::NM_PER_MM as f64
 }
 
+/// A completed measurement: the two world-space endpoints of a ruler (#50). The
+/// Measure tab keeps a running list of these; `distance_mm(a, b)` gives the length
+/// in the chosen unit.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Measurement {
+    a: [f64; 2],
+    b: [f64; 2],
+}
+
+/// Build a completed `Measurement` from two world points (#50) — the pure kernel
+/// behind finishing a ruler.
+fn finish_measurement(a: [f64; 2], b: [f64; 2]) -> Measurement {
+    Measurement { a, b }
+}
+
+/// Apply a measure click at world point `p` to the in-progress buffer `pts` (#50).
+/// The buffer holds 0 or 1 points: a click on an empty buffer stores the first
+/// point and returns `None`; a click when a point is already placed completes the
+/// pair — it empties the buffer and returns the finished `Measurement` (the caller
+/// pushes it onto the running list). The next click then starts a fresh pair. Pure
+/// so the click→state transition is unit-testable off-screen.
+fn measure_click(pts: &mut Vec<[f64; 2]>, p: [f64; 2]) -> Option<Measurement> {
+    match pts.first().copied() {
+        Some(a) => {
+            pts.clear();
+            Some(finish_measurement(a, p))
+        }
+        None => {
+            pts.push(p);
+            None
+        }
+    }
+}
+
+/// Remove the measurement at `idx` from the running list if in range (#50).
+/// Bounds-checked so a stale index carried across a frame can never panic.
+fn measurement_remove(list: &mut Vec<Measurement>, idx: usize) {
+    if idx < list.len() {
+        list.remove(idx);
+    }
+}
+
 /// Unit the measure tool reports distances in (#50). Cycles mm → inch → mil.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Unit {
@@ -4630,6 +4781,21 @@ fn measure_label(painter: &egui::Painter, at: Pos2, text: &str) {
     painter.galley(rect.min + pad, galley, C_CANVAS);
 }
 
+/// Draw one complete measure ruler in screen space (#50): both endpoints, the
+/// segment, and the distance `label` offset ~14 px perpendicular to the line so it
+/// never sits on top of it. Shared by the completed-measurement loop so every
+/// ruler looks identical.
+fn draw_ruler(painter: &egui::Painter, a: Pos2, b: Pos2, label: &str) {
+    painter.circle_filled(a, 3.0, C_COPPER);
+    painter.circle_filled(b, 3.0, C_COPPER);
+    painter.line_segment([a, b], Stroke::new(1.5, C_COPPER));
+    let mid = Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let off = egui::vec2(-dy / len, dx / len) * 14.0;
+    measure_label(painter, mid + off, label);
+}
+
 /// A small, unobtrusive status chip anchored into a canvas corner — copper text
 /// on a translucent dark surface so it stays legible over any board colour while
 /// reading as chrome, not diff content. `anchor`/`align` place it against a corner
@@ -4717,10 +4883,11 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 mod tests {
     use super::{
         base_display_color, build_geom_key, cycle_base_opacity, derive_label, distance_mm,
-        format_coord_mm, geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group,
-        legacy_base_opacity, pans_on, pick_outline_index, region_screen_px,
-        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, toggle_panel,
-        warning_phase, CameraAction, InputPreset, LayerGroup, Mode, PanelTab, RailSide, Theme,
+        finish_measurement, format_coord_mm, geom_cache_dirty, group_layers, hidden_note,
+        is_version_like, layer_group, legacy_base_opacity, measure_click, measure_rail_click,
+        measurement_remove, pans_on, pick_outline_index, region_screen_px, scroll_to_camera_action,
+        short_layer_name, single_layer_hint, step_in_order, toggle_panel, warning_phase,
+        CameraAction, InputPreset, LayerGroup, Measurement, Mode, PanelTab, RailSide, Theme,
         WarningPhase, BASE_OPACITY_FAINT, BASE_OPACITY_STRONG,
     };
     use etchy_core::LayerKind;
@@ -5528,6 +5695,91 @@ mod tests {
         assert_eq!(measure_escape(true, false), (false, false));
         // Not in measure mode: Esc is a no-op.
         assert_eq!(measure_escape(false, false), (false, false));
+    }
+
+    #[test]
+    fn finish_measurement_carries_both_endpoints() {
+        let m = finish_measurement([1.0, 2.0], [3.0, 4.0]);
+        assert_eq!(
+            m,
+            Measurement {
+                a: [1.0, 2.0],
+                b: [3.0, 4.0]
+            }
+        );
+    }
+
+    #[test]
+    fn measure_click_completes_a_pair_then_resets() {
+        // Two clicks produce one Measurement and leave the buffer empty, ready for
+        // the next pair (#50).
+        let mut pts: Vec<[f64; 2]> = Vec::new();
+        // First click: stores the point, nothing completed yet.
+        assert_eq!(measure_click(&mut pts, [0.0, 0.0]), None);
+        assert_eq!(pts, vec![[0.0, 0.0]]);
+        // Second click: completes the pair and empties the buffer.
+        let done = measure_click(&mut pts, [3_000_000.0, 4_000_000.0]);
+        assert_eq!(
+            done,
+            Some(Measurement {
+                a: [0.0, 0.0],
+                b: [3_000_000.0, 4_000_000.0],
+            })
+        );
+        assert!(pts.is_empty(), "buffer resets after completing a pair");
+        // Third click starts a fresh pair.
+        assert_eq!(measure_click(&mut pts, [5.0, 6.0]), None);
+        assert_eq!(pts, vec![[5.0, 6.0]]);
+    }
+
+    #[test]
+    fn measurement_remove_deletes_index_and_is_bounds_safe() {
+        let mut list = vec![
+            Measurement {
+                a: [0.0, 0.0],
+                b: [1.0, 0.0],
+            },
+            Measurement {
+                a: [0.0, 0.0],
+                b: [2.0, 0.0],
+            },
+            Measurement {
+                a: [0.0, 0.0],
+                b: [3.0, 0.0],
+            },
+        ];
+        // Removes the requested index and keeps the rest in order.
+        measurement_remove(&mut list, 1);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].b, [1.0, 0.0]);
+        assert_eq!(list[1].b, [3.0, 0.0]);
+        // Out-of-range index is a no-op, never a panic.
+        measurement_remove(&mut list, 9);
+        assert_eq!(list.len(), 2);
+        // Clearing empties the list.
+        list.clear();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn measure_rail_click_arms_on_open_disarms_on_collapse() {
+        // Clicking Measure from any non-Measure state opens the panel and arms.
+        assert_eq!(
+            measure_rail_click(None),
+            (Some(PanelTab::Measure), true),
+            "opening Measure arms the tool"
+        );
+        assert_eq!(
+            measure_rail_click(Some(PanelTab::Layers)),
+            (Some(PanelTab::Measure), true),
+            "switching to Measure from another tab arms the tool"
+        );
+        // Clicking the active Measure tab collapses the panel and disarms.
+        assert_eq!(
+            measure_rail_click(Some(PanelTab::Measure)),
+            (None, false),
+            "collapsing Measure disarms the tool"
+        );
     }
 
     #[test]
