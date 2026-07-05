@@ -2535,8 +2535,8 @@ impl eframe::App for ViewApp {
                             .selectable_label(self.measure_mode, "Measure")
                             .on_hover_text(
                                 "Click two points on the canvas to measure the distance. \
-                                 The result stays drawn (Esc clears it but keeps measuring). \
-                                 Toggle off to exit + clear.",
+                                 Completed measurements stay in the Measure tab list and on \
+                                 the board; toggle off to stop measuring.",
                             )
                             .clicked()
                         {
