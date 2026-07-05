@@ -3254,6 +3254,13 @@ impl ViewApp {
             } else {
                 split_rects(rect, 0.5, 6.0)
             };
+            // Projection target per side. Swipe is a CURTAIN over one board: both
+            // halves project through the SAME full-canvas rect so the divider bisects
+            // a single board (left=old, right=new) and it reads as one board with a
+            // wipe — only the clip differs. Split compares the two revs whole, so each
+            // half projects into its own sub-rect (a full board per side). (#171
+            // follow-up: "half and half on the dividing line" at fit.)
+            let (ltarget, rtarget) = if swipe { (rect, rect) } else { (lr, rr) };
             // One mesh per side (not per item) → a single clipped draw per half,
             // matching the smooth non-split path instead of a painter per item.
             let mut lmesh = egui::epaint::Mesh::default();
@@ -3268,11 +3275,13 @@ impl ViewApp {
                     self.base_level,
                 );
                 match item.side {
-                    Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, lr, base_col),
-                    Side::Right => append_tris(&mut rmesh, &item.tris, &self.cam, rr, base_col),
+                    Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, ltarget, base_col),
+                    Side::Right => {
+                        append_tris(&mut rmesh, &item.tris, &self.cam, rtarget, base_col)
+                    }
                     Side::Full => {
-                        append_tris(&mut lmesh, &item.tris, &self.cam, lr, C_OUTLINE_FAINT);
-                        append_tris(&mut rmesh, &item.tris, &self.cam, rr, C_OUTLINE_FAINT);
+                        append_tris(&mut lmesh, &item.tris, &self.cam, ltarget, C_OUTLINE_FAINT);
+                        append_tris(&mut rmesh, &item.tris, &self.cam, rtarget, C_OUTLINE_FAINT);
                     }
                 }
             }
