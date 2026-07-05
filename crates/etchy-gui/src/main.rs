@@ -1391,7 +1391,8 @@ const MARKER_PX: f32 = 3.0;
 const BASE_SIMPLIFY_TOL_NM: f64 = 2000.0;
 /// Default min-area threshold (mm²). Diff regions smaller than this are treated
 /// as noise (e.g. the sub-µm rims from a units/precision mismatch) and dropped —
-/// but the count is always surfaced in the caption, never silently.
+/// but the count is always surfaced on the canvas (the top-left hidden-count chip,
+/// `hidden_note`), never silently.
 const MIN_AREA_MM2: f64 = 0.0004;
 
 // ===========================================================================
@@ -3479,12 +3480,11 @@ impl ViewApp {
             );
         }
 
-        // The per-layer status caption that used to sit at the canvas top-left was
-        // removed from the viewer surface (#178) — the layer name, status, region
-        // counts, hidden count and "showing N of M" now live in the panels, keeping
-        // the board itself clean. The underlying counts (`self.last_hidden`,
-        // `layer.change`) are untouched; only the on-canvas chrome is gone. Just the
-        // legend stays on-canvas as the colour key.
+        // The busy per-layer status caption (layer name, status, region counts) was
+        // removed from the board surface (#178) to keep it clean — but the colour
+        // legend and the two trust/context signals below stay on-canvas, because
+        // those must remain visible. The underlying counts (`self.last_hidden`,
+        // `layer.change`) are untouched.
         if self.mode == Mode::Overlay {
             let outline_row =
                 outline_legend_visible(self.show_outline, self.outline, self.selected);
@@ -3494,6 +3494,33 @@ impl ViewApp {
                 self.col_added,
                 self.col_removed,
                 outline_row,
+            );
+            // TRUST — no silent misses (#178): the noise filter's hidden-region
+            // count is the one signal that must never disappear (see MIN_AREA_MM2).
+            // Surface it as a small top-left chip, and ONLY when something is
+            // actually hidden — nothing hidden, nothing drawn. Overlay-only: Split /
+            // Swipe / Old / New show raw boards and clear `last_hidden`.
+            if let Some(note) = hidden_note(self.last_hidden, self.min_area_mm2) {
+                corner_chip(
+                    &painter,
+                    rect.left_top() + egui::vec2(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    &note,
+                );
+            }
+        }
+
+        // #112 context hint: when exactly one layer of several is visible, a lone
+        // trace reads as "my traces vanished" rather than "one layer of many". A
+        // minimal bottom-right chip restores that context without the old busy
+        // caption; it shows only in that single-of-many case.
+        let shown = self.visible_layers.iter().filter(|&&v| v).count();
+        if let Some(hint) = single_layer_hint(shown, self.visible_layers.len()) {
+            corner_chip(
+                &painter,
+                rect.right_bottom() + egui::vec2(-8.0, -8.0),
+                egui::Align2::RIGHT_BOTTOM,
+                &hint,
             );
         }
 
@@ -3531,9 +3558,11 @@ impl ViewApp {
                     cross,
                 );
                 // Coordinate readout on a copper chip, offset from the crosshair
-                // centre so it doesn't sit under the lines.
+                // centre so it doesn't sit under the lines. When snap is on the
+                // value is grid-quantised, so the readout says "· grid" (#178) — the
+                // three decimals aren't false precision, they're an on-grid point.
                 let mm = etchy_core::NM_PER_MM as f64;
-                let txt = format!("{:.3}, {:.3} mm", w[0] / mm, w[1] / mm);
+                let txt = format_coord_mm(w[0] / mm, w[1] / mm, self.snap_grid);
                 measure_label(&painter, cross_at + egui::vec2(46.0, -14.0), &txt);
             }
         }
@@ -4175,6 +4204,42 @@ fn format_distance(mm: f64, unit: Unit) -> String {
     }
 }
 
+/// Format the live cursor coordinate readout (#179), in millimetres. When the
+/// value is grid-snapped (#178 fix) it carries a "· grid" suffix so the three
+/// decimals on a quantised value don't read as false precision — the readout is
+/// honest about being on the grid.
+fn format_coord_mm(x_mm: f64, y_mm: f64, snapped: bool) -> String {
+    let base = format!("{x_mm:.3}, {y_mm:.3} mm");
+    if snapped {
+        format!("{base} · grid")
+    } else {
+        base
+    }
+}
+
+/// The noise-filter's hidden-region trust line (#178): when the min-area filter
+/// dropped `hidden` regions, name the count and the threshold that hid them, so
+/// the suppression is never silent (see `MIN_AREA_MM2`). Nothing hidden → no line.
+fn hidden_note(hidden: usize, min_area_mm2: f64) -> Option<String> {
+    if hidden == 0 {
+        None
+    } else {
+        Some(format!("{hidden} hidden < {min_area_mm2:.4} mm²"))
+    }
+}
+
+/// The "one layer of many" hint (#112): when exactly one layer of several is
+/// visible, a lone trace reads as "my traces vanished" rather than "one layer of
+/// many". Only that single-of-many case produces a hint — anything else is None
+/// so the corner stays clean.
+fn single_layer_hint(shown: usize, total: usize) -> Option<String> {
+    if shown == 1 && total > 1 {
+        Some(format!("{shown} / {total} layers"))
+    } else {
+        None
+    }
+}
+
 /// Snap a millimetre coordinate to the nearest grid multiple (#51) — the pure
 /// kernel behind snap-to-grid. `grid_mm <= 0` (or non-finite) leaves it unchanged.
 /// Rounds half away from zero so the behaviour is symmetric across the origin.
@@ -4251,6 +4316,19 @@ fn measure_label(painter: &egui::Painter, at: Pos2, text: &str) {
     painter.galley(rect.min + pad, galley, C_CANVAS);
 }
 
+/// A small, unobtrusive status chip anchored into a canvas corner — copper text
+/// on a translucent dark surface so it stays legible over any board colour while
+/// reading as chrome, not diff content. `anchor`/`align` place it against a corner
+/// (e.g. `LEFT_TOP` for top-left, `RIGHT_BOTTOM` for bottom-right).
+fn corner_chip(painter: &egui::Painter, anchor: Pos2, align: egui::Align2, text: &str) {
+    let font = egui::FontId::proportional(12.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, C_COPPER);
+    let pad = egui::vec2(6.0, 3.0);
+    let rect = align.anchor_size(anchor, galley.size() + pad * 2.0);
+    painter.rect_filled(rect, 3.0, C_SURFACE.gamma_multiply(0.85));
+    painter.galley(rect.min + pad, galley, C_COPPER);
+}
+
 fn fit(cam: &mut Camera, bb: [i64; 4], rect: Rect) {
     let (w, h) = ((bb[2] - bb[0]) as f64, (bb[3] - bb[1]) as f64);
     cam.center = [
@@ -4324,13 +4402,54 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_display_color, build_geom_key, cycle_base, derive_label, distance_mm,
-        geom_cache_dirty, group_layers, is_version_like, layer_group, outline_legend_visible,
-        pans_on, pick_outline_index, region_screen_px, scroll_to_camera_action, short_layer_name,
-        step_in_order, warning_phase, BaseLevel, CameraAction, InputPreset, LayerGroup, Mode,
-        Theme, WarningPhase,
+        base_display_color, build_geom_key, cycle_base, derive_label, distance_mm, format_coord_mm,
+        geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group,
+        outline_legend_visible, pans_on, pick_outline_index, region_screen_px,
+        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, warning_phase,
+        BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn hidden_note_only_when_something_is_hidden() {
+        // TRUST (#178): the noise-filter's hidden count must never be dropped
+        // silently. When nothing is hidden there is no chip; when regions are
+        // hidden it names the count and the threshold that hid them.
+        assert_eq!(hidden_note(0, 0.0004), None);
+        assert_eq!(hidden_note(0, 0.0), None);
+        assert_eq!(
+            hidden_note(3, 0.0004).as_deref(),
+            Some("3 hidden < 0.0004 mm²")
+        );
+        assert_eq!(
+            hidden_note(1, 0.01).as_deref(),
+            Some("1 hidden < 0.0100 mm²")
+        );
+    }
+
+    #[test]
+    fn single_layer_hint_only_when_one_of_many_shows() {
+        // #112: a lone visible layer of several reads as "traces vanished" without
+        // a hint. Show it only when exactly one of two-or-more layers is visible.
+        assert_eq!(single_layer_hint(1, 13).as_deref(), Some("1 / 13 layers"));
+        assert_eq!(single_layer_hint(1, 2).as_deref(), Some("1 / 2 layers"));
+        // Not a single-of-many situation → no hint (no clutter).
+        assert_eq!(single_layer_hint(2, 13), None); // more than one shown
+        assert_eq!(single_layer_hint(13, 13), None); // all shown
+        assert_eq!(single_layer_hint(1, 1), None); // only one layer exists
+        assert_eq!(single_layer_hint(0, 5), None); // none shown
+    }
+
+    #[test]
+    fn coord_readout_flags_grid_snap() {
+        // MED (#178): snapped coords quantize to the grid, so the readout must say
+        // so — otherwise 3 decimals on a 1 mm-grid value reads as false precision.
+        assert_eq!(format_coord_mm(12.5, -3.25, false), "12.500, -3.250 mm");
+        assert_eq!(
+            format_coord_mm(12.0, -3.0, true),
+            "12.000, -3.000 mm · grid"
+        );
+    }
 
     #[test]
     fn derive_label_borrows_parent_for_generic_rev_dirs() {
