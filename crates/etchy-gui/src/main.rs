@@ -451,16 +451,17 @@ fn build_geom_key(
     visible: &[usize],
     mode: Mode,
     base_level: BaseLevel,
-    show_outline: bool,
+    outline_visible: bool,
     outline: Option<usize>,
 ) -> GeomKey {
     GeomKey {
         visible: visible.to_vec(),
         mode,
         base_on: base_level != BaseLevel::Off,
-        // The outline reference draws whenever it's enabled and exists; with several
-        // layers shown there's no single "selected" layer to suppress it for.
-        outline_effective: show_outline && outline.is_some(),
+        // The faint outline reference draws whenever the outline layer is visible and
+        // exists (#157: its normal `visible_layers` eye now gates it). It's drawn on
+        // every layer, so there's no single "selected" layer to suppress it for.
+        outline_effective: outline_visible && outline.is_some(),
     }
 }
 
@@ -489,14 +490,19 @@ fn visible_from_changed(changed: &[bool]) -> Vec<bool> {
     changed.to_vec()
 }
 
-/// On-load visibility (#9/#10 perf): only the selected layer is shown; multiple
-/// layers are opt-in via the per-row/per-group checkboxes. Rendering one layer by
-/// default keeps the common case fast on dense boards (the old default showed every
-/// changed layer at once). An out-of-range `selected` just yields nothing forced on.
-fn default_visible(n: usize, selected: usize) -> Vec<bool> {
+/// On-load visibility (#9/#10 perf): the selected layer plus the board outline are
+/// shown; every other layer is opt-in via the per-row/per-group checkboxes.
+/// Rendering one layer by default keeps the common case fast on dense boards (the old
+/// default showed every changed layer at once). The outline is on by default so the
+/// board edge reads as orientation context from the start (#157); it's a normal layer
+/// row now, toggled like any other. Out-of-range `selected`/`outline` are ignored.
+fn default_visible(n: usize, selected: usize, outline: Option<usize>) -> Vec<bool> {
     let mut v = vec![false; n];
     if let Some(s) = v.get_mut(selected) {
         *s = true;
+    }
+    if let Some(o) = outline.and_then(|oi| v.get_mut(oi)) {
+        *o = true;
     }
     v
 }
@@ -775,12 +781,18 @@ impl ViewMode {
     }
 }
 
-/// The per-layer visibility a view mode selects (#59): Single shows only the active
-/// layer; Highlight and All show every layer (they differ only in dimming, handled
-/// by [`ViewMode::dims_others`]). Pure, so the preset is unit-testable.
-fn visibility_for_mode(mode: ViewMode, n: usize, selected: usize) -> Vec<bool> {
+/// The per-layer visibility a view mode selects (#59): Single shows the active layer
+/// (plus the board outline for orientation, #157); Highlight and All show every layer
+/// (they differ only in dimming, handled by [`ViewMode::dims_others`]). Pure, so the
+/// preset is unit-testable.
+fn visibility_for_mode(
+    mode: ViewMode,
+    n: usize,
+    selected: usize,
+    outline: Option<usize>,
+) -> Vec<bool> {
     match mode {
-        ViewMode::Single => default_visible(n, selected),
+        ViewMode::Single => default_visible(n, selected, outline),
         ViewMode::Highlight | ViewMode::All => vec![true; n],
     }
 }
@@ -845,10 +857,11 @@ struct ViewApp {
     /// the splash has finished/been dismissed. `None` until the first frame.
     splash_start: Option<f64>,
     splash_done: bool,
-    /// Index of the board-outline layer (Edge.Cuts/GKO), drawn faintly on every
-    /// layer for orientation (G10); None if the board has no outline layer.
+    /// Index of the board-outline layer (Edge.Cuts/GKO), drawn faintly on every layer
+    /// for orientation (G10); None if the board has no outline layer. It's a normal
+    /// layer row now (#157) — its `visible_layers` bit drives the faint reference, so
+    /// there's no separate `show_outline` control.
     outline: Option<usize>,
-    show_outline: bool,
     /// World-space tessellation cache (G6): rebuilt only when the GeomKey changes,
     /// so pan/zoom/colour edits skip re-triangulation.
     cache: Option<TessCache>,
@@ -926,10 +939,11 @@ impl ViewApp {
         order.sort_by_key(|&i| !diff.layers[i].is_changed()); // changed first, stable
         let selected = order.first().copied().unwrap_or(0);
         let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
-        // Default visibility (#9/#10 perf): show only the selected layer on load;
-        // multi-layer is opt-in via the checkboxes. Keeps the common case fast on
-        // dense boards. `selected` is the most-changed layer (changed-first order).
-        let visible_layers = default_visible(diff.layers.len(), selected);
+        // Default visibility (#9/#10 perf): show the selected layer plus the board
+        // outline on load; every other layer is opt-in via the checkboxes. Keeps the
+        // common case fast on dense boards. `selected` is the most-changed layer
+        // (changed-first order); the outline is on for orientation (#157).
+        let visible_layers = default_visible(diff.layers.len(), selected, outline);
         let new_area_mm2 = layer_new_areas(&diff);
         Self {
             diff,
@@ -961,7 +975,6 @@ impl ViewApp {
             splash_start: None,
             splash_done: false,
             outline,
-            show_outline: true,
             cache: None,
             measure_mode: false,
             measure_pts: Vec::new(),
@@ -1276,12 +1289,6 @@ fn warning_phase(
 /// Takes a count + kind accessor so it's testable without building `LayerView`s.
 fn pick_outline_index(n: usize, kind_of: impl Fn(usize) -> etchy_core::LayerKind) -> Option<usize> {
     (0..n).find(|&i| kind_of(i) == etchy_core::LayerKind::Outline)
-}
-
-/// Whether to show the "board edge" legend row: only when the outline is enabled,
-/// exists, and isn't the layer currently being viewed (G10).
-fn outline_legend_visible(show_outline: bool, outline: Option<usize>, selected: usize) -> bool {
-    show_outline && outline.is_some_and(|i| i != selected)
 }
 
 // Brand palette (assets/brand/README.md): diff accents + board-dark canvas.
@@ -1762,7 +1769,7 @@ impl ViewApp {
         order.sort_by_key(|&i| !diff.layers[i].is_changed());
         let selected = order.first().copied().unwrap_or(0);
         let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
-        let visible_layers = default_visible(diff.layers.len(), selected);
+        let visible_layers = default_visible(diff.layers.len(), selected, outline);
         self.diff = diff;
         self.old_label = old_label;
         self.new_label = new_label;
@@ -2270,7 +2277,6 @@ impl eframe::App for ViewApp {
             mode_swipe,
             next,
             prev,
-            toggle_outline,
             escape,
             cycle_unit,
             toggle_grid,
@@ -2280,7 +2286,7 @@ impl eframe::App for ViewApp {
             if typing {
                 return (
                     false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false,
+                    false, false,
                 );
             }
             (
@@ -2295,7 +2301,6 @@ impl eframe::App for ViewApp {
                 i.key_pressed(Key::Num5),
                 i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
                 i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
-                i.key_pressed(Key::E),
                 i.key_pressed(Key::Escape),
                 i.key_pressed(Key::U),
                 i.key_pressed(Key::G),
@@ -2335,9 +2340,6 @@ impl eframe::App for ViewApp {
         }
         if toggle_base {
             self.base_level = cycle_base(self.base_level);
-        }
-        if toggle_outline {
-            self.show_outline = !self.show_outline;
         }
         if fit {
             self.cam.fitted = false;
@@ -2751,9 +2753,9 @@ impl eframe::App for ViewApp {
 }
 
 impl ViewApp {
-    /// The Layers panel body (Feature 1): moved verbatim out of `fn ui` so the
-    /// rail slice stays layout-only. All layer behaviour (eye toggles, groups,
-    /// view modes, Δ%, per-layer colour, board-edge reference) is unchanged.
+    /// The Layers panel body (Feature 1): moved out of `fn ui` so the rail slice stays
+    /// layout-only. Holds all layer behaviour — eye toggles, groups, view modes, Δ%,
+    /// per-layer colour. The board outline is a normal layer row here now (#157).
     fn layers_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Layers");
         // Quick visibility actions (#58): show/hide every layer, or only the
@@ -2787,8 +2789,12 @@ impl ViewApp {
             for (mode, label) in ViewMode::ALL {
                 if ui.selectable_label(self.view_mode == mode, label).clicked() {
                     self.view_mode = mode;
-                    self.visible_layers =
-                        visibility_for_mode(mode, self.diff.layers.len(), self.selected);
+                    self.visible_layers = visibility_for_mode(
+                        mode,
+                        self.diff.layers.len(),
+                        self.selected,
+                        self.outline,
+                    );
                 }
             }
         });
@@ -2799,34 +2805,11 @@ impl ViewApp {
         let mut toggle: Option<(usize, bool)> = None; // (layer, show)
         let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
         let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
-        let mut toggle_outline = false; // board-edge visibility (#157)
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // Board edge is its own reference "layer" (#157): a row in the list
-            // with the others (an eye toggle like every layer row), not a
-            // separate control. It's a faint outline drawn on every layer.
-            if self.outline.is_some() {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Reference").small().color(C_COPPER));
-                ui.horizontal(|ui| {
-                    if eye_toggle(ui, self.show_outline)
-                        .on_hover_text("Show / hide the board outline reference")
-                        .clicked()
-                    {
-                        toggle_outline = true;
-                    }
-                    let (sw, _) =
-                        ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-                    ui.painter().rect_stroke(
-                        sw,
-                        2.0,
-                        Stroke::new(1.5, C_COPPER),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.label("board edge").on_hover_text(
-                        "The board outline (Edge.Cuts/GKO), drawn faint on every layer.",
-                    );
-                });
-            }
+            // The board outline is a normal layer row now (#157) — it lives under
+            // Mechanical > outline with an ordinary eye toggle, no separate "board
+            // edge" reference control. Its visibility drives the faint orientation
+            // outline drawn on every layer (see draw_canvas / build_cache).
             // Group into sections (copper / mask / silk / …) in fixed order,
             // changed-first within each (G5).
             let groups = group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
@@ -2972,9 +2955,6 @@ impl ViewApp {
             } else {
                 self.base_overrides.push((idx, c));
             }
-        }
-        if toggle_outline {
-            self.show_outline = !self.show_outline;
         }
     }
 
@@ -3383,13 +3363,25 @@ impl ViewApp {
         // cheap world→screen transform + colour/alpha/min-area cull run per frame,
         // so pan/zoom and colour edits never re-triangulate. The cache rebuilds only
         // when the GeomKey (selection inputs) changes.
-        // The visible set: every layer the user has shown (#58/#59). Split renders
-        // the active layer only (a stacked old|new of many layers reads as mud), so
-        // it keys off just the selected layer and falls back to it when nothing is on.
+        // The board outline is drawn as the faint orientation reference (Side::Full,
+        // on every layer / into both split halves), NOT as a stacked base layer — so
+        // its `visible_layers` bit gates that reference (`outline_effective`) and is
+        // kept OUT of the stacked `visible` set below (#157: board edge is a normal
+        // layer row, but it still renders faint, not as bright copper).
+        let outline_visible = self
+            .outline
+            .is_some_and(|oi| self.visible_layers.get(oi).copied().unwrap_or(false));
+        // The visible set: every layer the user has shown (#58/#59), minus the
+        // outline (handled above). Split renders the active layer only (a stacked
+        // old|new of many layers reads as mud), so it keys off just the selected layer
+        // and falls back to it when nothing is on.
         let visible = if self.mode == Mode::Split || self.mode == Mode::Swipe {
             vec![self.selected]
         } else {
-            let v = visible_indices(&self.visible_layers);
+            let v: Vec<usize> = visible_indices(&self.visible_layers)
+                .into_iter()
+                .filter(|&i| Some(i) != self.outline)
+                .collect();
             if v.is_empty() {
                 vec![self.selected]
             } else {
@@ -3400,7 +3392,7 @@ impl ViewApp {
             &visible,
             self.mode,
             self.base_level,
-            self.show_outline,
+            outline_visible,
             self.outline,
         );
         if geom_cache_dirty(self.cache.as_ref().map(|c| &c.key), &key) {
@@ -3639,15 +3631,7 @@ impl ViewApp {
         // those must remain visible. The underlying counts (`self.last_hidden`,
         // `layer.change`) are untouched.
         if self.mode == Mode::Overlay {
-            let outline_row =
-                outline_legend_visible(self.show_outline, self.outline, self.selected);
-            legend(
-                &painter,
-                rect,
-                self.col_added,
-                self.col_removed,
-                outline_row,
-            );
+            legend(&painter, rect, self.col_added, self.col_removed);
             // TRUST — no silent misses (#178): the noise filter's hidden-region
             // count is the one signal that must never disappear (see MIN_AREA_MM2).
             // Surface it as a small top-left chip, and ONLY when something is
@@ -3666,8 +3650,16 @@ impl ViewApp {
         // #112 context hint: when exactly one layer of several is visible, a lone
         // trace reads as "my traces vanished" rather than "one layer of many". A
         // minimal bottom-right chip restores that context without the old busy
-        // caption; it shows only in that single-of-many case.
-        let shown = self.visible_layers.iter().filter(|&&v| v).count();
+        // caption; it shows only in that single-of-many case. The board outline is
+        // orientation context, not one of the layers being compared, so it's left out
+        // of the "shown" tally (#157) — one real layer + the outline still reads as
+        // "1 / N".
+        let shown = self
+            .visible_layers
+            .iter()
+            .enumerate()
+            .filter(|&(i, &v)| v && Some(i) != self.outline)
+            .count();
         if let Some(hint) = single_layer_hint(shown, self.visible_layers.len()) {
             corner_chip(
                 &painter,
@@ -4438,18 +4430,9 @@ fn push_screen_quad(mesh: &mut egui::epaint::Mesh, at: Pos2, px: f32, color: Col
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-fn legend(
-    painter: &egui::Painter,
-    rect: Rect,
-    added: Color32,
-    removed: Color32,
-    outline_row: bool,
-) {
+fn legend(painter: &egui::Painter, rect: Rect, added: Color32, removed: Color32) {
     let mut y = rect.right_top() + egui::vec2(-150.0, 8.0);
-    let mut rows = vec![(added, "added"), (removed, "removed")];
-    if outline_row {
-        rows.push((C_OUTLINE_FAINT, "board edge"));
-    }
+    let rows = [(added, "added"), (removed, "removed")];
     for (c, txt) in rows {
         painter.rect_filled(Rect::from_min_size(y, egui::vec2(12.0, 12.0)), 2.0, c);
         painter.text(
@@ -4709,11 +4692,10 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 mod tests {
     use super::{
         base_display_color, build_geom_key, cycle_base, derive_label, distance_mm, format_coord_mm,
-        geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group,
-        outline_legend_visible, pans_on, pick_outline_index, region_screen_px,
-        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, toggle_panel,
-        warning_phase, BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, PanelTab, RailSide,
-        Theme, WarningPhase,
+        geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group, pans_on,
+        pick_outline_index, region_screen_px, scroll_to_camera_action, short_layer_name,
+        single_layer_hint, step_in_order, toggle_panel, warning_phase, BaseLevel, CameraAction,
+        InputPreset, LayerGroup, Mode, PanelTab, RailSide, Theme, WarningPhase,
     };
     use etchy_core::LayerKind;
 
@@ -5228,14 +5210,6 @@ mod tests {
     }
 
     #[test]
-    fn outline_legend_visible_only_when_shown_and_not_selected() {
-        assert!(outline_legend_visible(true, Some(2), 1)); // shown, different layer
-        assert!(!outline_legend_visible(true, Some(2), 2)); // viewing the outline itself
-        assert!(!outline_legend_visible(false, Some(2), 1)); // hidden
-        assert!(!outline_legend_visible(true, None, 1)); // no outline layer
-    }
-
-    #[test]
     fn warning_label_is_count_aware() {
         use super::warning_label;
         assert_eq!(warning_label(0), "");
@@ -5628,18 +5602,24 @@ mod tests {
     #[test]
     fn view_mode_visibility_presets() {
         use super::{visibility_for_mode, ViewMode};
-        // Single: only the active layer is on.
+        // Single: the active layer plus the board outline are on (#157).
         assert_eq!(
-            visibility_for_mode(ViewMode::Single, 4, 2),
+            visibility_for_mode(ViewMode::Single, 4, 2, Some(0)),
+            vec![true, false, true, false]
+        );
+        // No outline layer: Single is just the active layer.
+        assert_eq!(
+            visibility_for_mode(ViewMode::Single, 4, 2, None),
             vec![false, false, true, false]
         );
-        // Highlight and All: every layer on (they differ only in dimming).
+        // Highlight and All: every layer on (they differ only in dimming); the
+        // outline is already covered by the all-on set.
         assert_eq!(
-            visibility_for_mode(ViewMode::Highlight, 3, 0),
+            visibility_for_mode(ViewMode::Highlight, 3, 0, Some(2)),
             vec![true, true, true]
         );
         assert_eq!(
-            visibility_for_mode(ViewMode::All, 3, 0),
+            visibility_for_mode(ViewMode::All, 3, 0, None),
             vec![true, true, true]
         );
     }
@@ -5692,15 +5672,25 @@ mod tests {
     }
 
     #[test]
-    fn default_visible_shows_only_the_selected_layer() {
+    fn default_visible_shows_the_selected_layer_and_outline() {
         use super::default_visible;
-        // On load only the selected layer is visible; multi-layer is opt-in (#9/#10
-        // perf — fewer layers transformed by default).
-        assert_eq!(default_visible(4, 2), vec![false, false, true, false]);
-        assert_eq!(default_visible(1, 0), vec![true]);
+        // On load the selected layer plus the board outline are visible; every other
+        // layer is opt-in (#9/#10 perf), and the outline reads as orientation from the
+        // start (#157).
+        assert_eq!(
+            default_visible(4, 2, Some(0)),
+            vec![true, false, true, false]
+        );
+        // No outline layer: just the selected one, as before.
+        assert_eq!(default_visible(4, 2, None), vec![false, false, true, false]);
+        // Outline == selected: a single true, no double-set panic.
+        assert_eq!(default_visible(3, 1, Some(1)), vec![false, true, false]);
+        // Out-of-range outline is ignored (only the selected turns on).
+        assert_eq!(default_visible(2, 0, Some(9)), vec![true, false]);
+        assert_eq!(default_visible(1, 0, None), vec![true]);
         // Empty board / out-of-range selected: no panic, nothing forced on.
-        assert_eq!(default_visible(0, 0), Vec::<bool>::new());
-        assert_eq!(default_visible(3, 9), vec![false, false, false]);
+        assert_eq!(default_visible(0, 0, None), Vec::<bool>::new());
+        assert_eq!(default_visible(3, 9, None), vec![false, false, false]);
     }
 
     #[test]
