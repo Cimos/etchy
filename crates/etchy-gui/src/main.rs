@@ -265,15 +265,13 @@ enum Mode {
     Swipe,
 }
 
-/// How strongly to draw the unchanged base (the new layer) behind the diff (G3).
-/// An always-available faint base keeps unchanged copper visible so green/red
-/// changes read against it instead of floating in black (#8).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BaseLevel {
-    Off,
-    Faint,
-    Strong,
-}
+/// Base-opacity stops matching the retired off/faint/strong control (#12/#6), kept
+/// as named constants so the slider's default and the `S`-key cycle reproduce the
+/// previous look exactly. The base is the unchanged copper drawn behind the diff
+/// (G3) — an always-available faint base keeps it visible so green/red changes read
+/// against it instead of floating in black (#8).
+const BASE_OPACITY_FAINT: f32 = 0.4;
+const BASE_OPACITY_STRONG: f32 = 0.8;
 
 /// Which side panel the activity rail (Feature 1) has expanded. The rail drives
 /// one docked panel at a time; `None` collapses it (rail-only, canvas full width).
@@ -302,7 +300,7 @@ impl PanelTab {
 
 /// Which edge the activity rail (and the panel it drives) live on (Feature 8).
 /// Flippable from Settings; persisted with a stable serde string repr (like
-/// `Theme`/`BaseLevel`).
+/// `Theme`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum RailSide {
     #[default]
@@ -323,7 +321,7 @@ fn toggle_panel(current: Option<PanelTab>, clicked: PanelTab) -> Option<PanelTab
 /// Input scheme matching the user's ECAD tool (#54). MVP: it only controls which
 /// mouse button pans the canvas (the real differentiator between tools) — scroll
 /// stays zoom-to-cursor for all three. A full per-key remapper is a follow-up.
-/// Persisted via #52 with a stable serde string repr (like `Theme`/`BaseLevel`).
+/// Persisted via #52 with a stable serde string repr (like `Theme`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum InputPreset {
     /// KiCad: middle OR right drag pans.
@@ -393,14 +391,12 @@ fn wheel_points(unit: egui::MouseWheelUnit, delta: egui::Vec2, viewport_h: f32) 
 }
 
 /// Opaque display colour for the unchanged base: the layer colour blended toward
-/// the canvas by level (Faint = dim, Strong = near-full). Opaque (not low-alpha)
-/// so unchanged copper reads as dim copper, not near-black over the dark canvas.
-fn base_display_color(layer: Color32, canvas: Color32, level: BaseLevel) -> Color32 {
-    let t = match level {
-        BaseLevel::Off => 0.0,
-        BaseLevel::Faint => 0.4,
-        BaseLevel::Strong => 0.8,
-    };
+/// the canvas by `t` (0 = pure canvas / base off, 1 = the full layer colour).
+/// Opaque (not low-alpha) so unchanged copper reads as dim copper, not near-black
+/// over the dark canvas. `t` is the continuous base opacity (#12/#6); the old
+/// off/faint/strong stops map to 0.0 / 0.4 / 0.8.
+fn base_display_color(layer: Color32, canvas: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
     let mix = |a: u8, b: u8| (b as f32 + (a as f32 - b as f32) * t).round() as u8;
     Color32::from_rgb(
         mix(layer.r(), canvas.r()),
@@ -420,12 +416,17 @@ fn measure_escape(measure_mode: bool, has_points: bool) -> (bool, bool) {
     }
 }
 
-/// Cycle Off → Faint → Strong → Off (the `S` key / base selector).
-fn cycle_base(level: BaseLevel) -> BaseLevel {
-    match level {
-        BaseLevel::Off => BaseLevel::Faint,
-        BaseLevel::Faint => BaseLevel::Strong,
-        BaseLevel::Strong => BaseLevel::Off,
+/// Step the base opacity through the off/faint/strong stops (the `S` key), so the
+/// keyboard keeps the three familiar levels even though the panel slider is now
+/// continuous (#12/#6): 0 → faint → strong → 0. Any in-between slider value below
+/// strong steps up to strong; strong or above wraps back to off.
+fn cycle_base_opacity(t: f32) -> f32 {
+    if t <= 0.0 {
+        BASE_OPACITY_FAINT
+    } else if t < BASE_OPACITY_STRONG {
+        BASE_OPACITY_STRONG
+    } else {
+        0.0
     }
 }
 
@@ -450,14 +451,14 @@ struct GeomKey {
 fn build_geom_key(
     visible: &[usize],
     mode: Mode,
-    base_level: BaseLevel,
+    base_opacity: f32,
     outline_visible: bool,
     outline: Option<usize>,
 ) -> GeomKey {
     GeomKey {
         visible: visible.to_vec(),
         mode,
-        base_on: base_level != BaseLevel::Off,
+        base_on: base_opacity > 0.0,
         // The faint outline reference draws whenever the outline layer is visible and
         // exists (#157: its normal `visible_layers` eye now gates it). It's drawn on
         // every layer, so there's no single "selected" layer to suppress it for.
@@ -811,8 +812,10 @@ struct ViewApp {
     /// (#114) doesn't reshoelace every frame. Denominator for "how much changed".
     new_area_mm2: Vec<f64>,
     mode: Mode,
-    /// Always-available faint base behind the diff (G3): Off / Faint / Strong.
-    base_level: BaseLevel,
+    /// Opacity of the always-available base copper behind the diff (G3), 0..=1
+    /// (#12/#6). 0 hides the base; the old off/faint/strong stops are 0.0/0.4/0.8.
+    /// Driven by the slider at the top of the Layers panel.
+    base_opacity: f32,
     /// User-configurable diff colors (G3, Altium-compare style). Default to the
     /// brand green/red; a "Settings" popover edits them.
     col_added: Color32,
@@ -954,7 +957,7 @@ impl ViewApp {
             visible_layers,
             new_area_mm2,
             mode: Mode::Overlay,
-            base_level: BaseLevel::Faint,
+            base_opacity: BASE_OPACITY_FAINT,
             col_added: C_ADDED,
             col_removed: C_REMOVED,
             canvas_dark: C_CANVAS,
@@ -1481,23 +1484,14 @@ impl<'de> serde::Deserialize<'de> for Theme {
     }
 }
 
-/// Base level persists as a stable string (same rationale as `Theme`).
-impl serde::Serialize for BaseLevel {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(match self {
-            BaseLevel::Off => "off",
-            BaseLevel::Faint => "faint",
-            BaseLevel::Strong => "strong",
-        })
-    }
-}
-impl<'de> serde::Deserialize<'de> for BaseLevel {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        Ok(match String::deserialize(d)?.as_str() {
-            "off" => BaseLevel::Off,
-            "strong" => BaseLevel::Strong,
-            _ => BaseLevel::Faint,
-        })
+/// Map a legacy persisted base level (pre-#12 off/faint/strong string) to the
+/// equivalent continuous opacity, so old configs keep their look after the slider
+/// migration. Unknown values fall back to faint (the old default).
+fn legacy_base_opacity(level: &str) -> f32 {
+    match level {
+        "off" => 0.0,
+        "strong" => BASE_OPACITY_STRONG,
+        _ => BASE_OPACITY_FAINT,
     }
 }
 
@@ -1555,7 +1549,14 @@ fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color32 {
 #[serde(default)]
 struct Settings {
     theme: Theme,
-    base_level: BaseLevel,
+    /// Base opacity 0..=1 (#12/#6). Replaces the old off/faint/strong `base_level`
+    /// segment. An old persisted `base_level` string is migrated in `apply_settings`.
+    base_opacity: f32,
+    /// Legacy off/faint/strong base level, read only for migration from pre-#12
+    /// configs. Never written (new configs persist `base_opacity`), so a fresh
+    /// round-trip always sees `None` here.
+    #[serde(default, skip_serializing)]
+    base_level: Option<String>,
     /// Per-layer base-colour overrides, keyed by layer index (#21).
     base_overrides: Vec<(usize, [u8; 4])>,
     min_area_mm2: f64,
@@ -1581,7 +1582,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
-            base_level: BaseLevel::Faint,
+            base_opacity: BASE_OPACITY_FAINT,
+            base_level: None,
             base_overrides: Vec::new(),
             min_area_mm2: MIN_AREA_MM2,
             col_added: color_to_rgba(C_ADDED),
@@ -1653,7 +1655,7 @@ impl ViewApp {
                             self.theme,
                         )
                     };
-                    base_display_color(base, canvas, self.base_level)
+                    base_display_color(base, canvas, self.base_opacity)
                 }
                 Role::Outline => C_OUTLINE_FAINT,
                 Role::Added => self.col_added,
@@ -1678,7 +1680,7 @@ impl ViewApp {
     }
 
     /// Hash of everything that affects the uploaded GPU mesh — geometry/visibility
-    /// (the cache key), selection, base level, theme, and colours — so we re-upload
+    /// (the cache key), selection, base opacity, theme, and colours — so we re-upload
     /// only on a real change, never per pan frame.
     #[cfg(feature = "gpu-transform")]
     fn gpu_input_hash(&self, cache: &TessCache) -> u64 {
@@ -1689,7 +1691,7 @@ impl ViewApp {
         cache.key.base_on.hash(&mut h);
         cache.key.outline_effective.hash(&mut h);
         self.selected.hash(&mut h);
-        (self.base_level as u8).hash(&mut h);
+        self.base_opacity.to_bits().hash(&mut h);
         (self.theme as u8).hash(&mut h);
         self.canvas_color().to_array().hash(&mut h);
         self.col_added.to_array().hash(&mut h);
@@ -1705,7 +1707,8 @@ impl ViewApp {
     fn to_settings(&self) -> Settings {
         Settings {
             theme: self.theme,
-            base_level: self.base_level,
+            base_opacity: self.base_opacity,
+            base_level: None, // legacy field is read-only; new configs store base_opacity
             base_overrides: self
                 .base_overrides
                 .iter()
@@ -1730,7 +1733,12 @@ impl ViewApp {
     fn apply_settings(&mut self, s: Settings) {
         self.theme = s.theme;
         self.applied_theme = None; // force re-applying the egui visuals next frame
-        self.base_level = s.base_level;
+                                   // Migrate a pre-#12 off/faint/strong string if present; otherwise use the
+                                   // stored continuous opacity (new configs never write the legacy field).
+        self.base_opacity = match s.base_level.as_deref() {
+            Some(level) => legacy_base_opacity(level),
+            None => s.base_opacity.clamp(0.0, 1.0),
+        };
         self.base_overrides = s
             .base_overrides
             .into_iter()
@@ -2339,7 +2347,9 @@ impl eframe::App for ViewApp {
             self.show_grid = !self.show_grid;
         }
         if toggle_base {
-            self.base_level = cycle_base(self.base_level);
+            // S still steps the three familiar off/faint/strong stops (#12/#6); the
+            // Layers-panel slider handles fine-grained values.
+            self.base_opacity = cycle_base_opacity(self.base_opacity);
         }
         if fit {
             self.cam.fitted = false;
@@ -2408,19 +2418,18 @@ impl eframe::App for ViewApp {
                 });
             });
             ui.add_space(4.0);
-            // Controls row (#57): ONE non-wrapping row. Left = segmented mode + base
-            // pickers (never collapse); right = the action cluster, which folds into a
+            // Controls row (#57): ONE non-wrapping row. Left = the segmented mode
+            // picker (never collapses); right = the action cluster, which folds into a
             // "More" menu when the window is narrow; the flexible middle carries the
             // warnings chip + transient export status. The bar never wraps — it
             // collapses by width tier instead (replaces the old wrapped row, #5/#57).
-            // Moved OUT of the bar: noise filter → Settings > Diff (#154), board edge →
-            // Layers panel (#157), Open A/B → the Open menu (#160), GPU checkbox
-            // (already in Settings > Display).
+            // Moved OUT of the bar: base opacity → Layers panel slider (#12/#6), noise
+            // filter → Settings > Diff (#154), board edge → Layers panel (#157), Open
+            // A/B → the Open menu (#160), GPU checkbox (already in Settings > Display).
             // The top bar spans the full window width (laid out above the left panel),
             // so the window width is the reliable tier measure — available_width inside
             // the nested layout doesn't reflect the true bar width.
             let avail = ui.ctx().content_rect().width();
-            let show_base_label = avail >= TIER_LABELS_PX;
             let collapse_actions = avail < TIER_MORE_PX;
             let now = ui.ctx().input(|i| i.time);
             // Action intents, set in the (self-borrowing) closures and acted on after.
@@ -2443,18 +2452,6 @@ impl eframe::App for ViewApp {
                         (Mode::New, "New"),
                         (Mode::Split, "Split"),
                         (Mode::Swipe, "Swipe"),
-                    ],
-                );
-                if show_base_label {
-                    ui.label(egui::RichText::new("base").weak());
-                }
-                segmented(
-                    ui,
-                    &mut self.base_level,
-                    &[
-                        (BaseLevel::Off, "off"),
-                        (BaseLevel::Faint, "faint"),
-                        (BaseLevel::Strong, "strong"),
                     ],
                 );
                 // Right-aligned action cluster. RTL adds in reverse, so the visual
@@ -2797,6 +2794,17 @@ impl ViewApp {
                     );
                 }
             }
+        });
+        // Base opacity (#12/#6): the unchanged base copper's strength, moved here
+        // from the top bar and made continuous. 0 hides the base; the old off/faint/
+        // strong stops are 0%/40%/80%. `S` still steps those three stops.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("base").weak().small());
+            ui.add(
+                egui::Slider::new(&mut self.base_opacity, 0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            )
+            .on_hover_text("Opacity of the unchanged base copper behind the diff (0 hides it).");
         });
         ui.separator();
         // Actions deferred so the per-frame group iteration doesn't borrow
@@ -3399,7 +3407,7 @@ impl ViewApp {
         let key = build_geom_key(
             &visible,
             self.mode,
-            self.base_level,
+            self.base_opacity,
             outline_visible,
             self.outline,
         );
@@ -3475,7 +3483,7 @@ impl ViewApp {
                 let base_col = base_display_color(
                     base_of(item.layer_index),
                     self.canvas_color(),
-                    self.base_level,
+                    self.base_opacity,
                 );
                 match item.side {
                     Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, lr, base_col),
@@ -3579,7 +3587,7 @@ impl ViewApp {
                     cache,
                     &self.cam,
                     rect,
-                    self.base_level,
+                    self.base_opacity,
                     self.selected,
                     base_of,
                     self.canvas_color(),
@@ -3982,8 +3990,6 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
 
 // Width tiers in egui POINTS (screen_rect width; ~half the CSS px at ppp 2). The
 // full inline bar's content needs ~900 pt, so below that the actions collapse.
-/// Below this window width (pt) the top bar drops the muted "base" prefix label.
-const TIER_LABELS_PX: f32 = 940.0;
 /// Below this window width (pt) the right action cluster collapses into "More".
 const TIER_MORE_PX: f32 = 900.0;
 
@@ -4249,7 +4255,7 @@ fn transform_cache(
     cache: &TessCache,
     cam: &Camera,
     rect: Rect,
-    base_level: BaseLevel,
+    base_opacity: f32,
     selected: usize,
     base_of: impl Fn(usize) -> Color32,
     canvas: Color32,
@@ -4309,7 +4315,7 @@ fn transform_cache(
         let dim = dim_factor(item.layer_index, selected, dim_others);
         let (mut color, is_diff) = match item.role {
             Role::Base => (
-                base_display_color(base_of(item.layer_index), canvas, base_level),
+                base_display_color(base_of(item.layer_index), canvas, base_opacity),
                 false,
             ),
             Role::Outline => (C_OUTLINE_FAINT, false),
@@ -4699,11 +4705,12 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_display_color, build_geom_key, cycle_base, derive_label, distance_mm, format_coord_mm,
-        geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group, pans_on,
-        pick_outline_index, region_screen_px, scroll_to_camera_action, short_layer_name,
-        single_layer_hint, step_in_order, toggle_panel, warning_phase, BaseLevel, CameraAction,
-        InputPreset, LayerGroup, Mode, PanelTab, RailSide, Theme, WarningPhase,
+        base_display_color, build_geom_key, cycle_base_opacity, derive_label, distance_mm,
+        format_coord_mm, geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group,
+        legacy_base_opacity, pans_on, pick_outline_index, region_screen_px,
+        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, toggle_panel,
+        warning_phase, CameraAction, InputPreset, LayerGroup, Mode, PanelTab, RailSide, Theme,
+        WarningPhase, BASE_OPACITY_FAINT, BASE_OPACITY_STRONG,
     };
     use etchy_core::LayerKind;
 
@@ -4876,7 +4883,7 @@ mod tests {
                     &cache,
                     &cam,
                     rect,
-                    BaseLevel::Faint,
+                    BASE_OPACITY_FAINT,
                     0,
                     |_| super::C_BASE,
                     egui::Color32::BLACK,
@@ -4922,14 +4929,16 @@ mod tests {
     #[test]
     fn base_display_color_dims_toward_canvas() {
         use super::{C_CANVAS, C_COPPER};
-        // Off shows the canvas (base not drawn); Strong reads closer to the real
-        // layer colour than Faint — both opaque so unchanged copper isn't black.
-        assert_eq!(
-            base_display_color(C_COPPER, C_CANVAS, BaseLevel::Off),
-            C_CANVAS
-        );
-        let faint = base_display_color(C_COPPER, C_CANVAS, BaseLevel::Faint);
-        let strong = base_display_color(C_COPPER, C_CANVAS, BaseLevel::Strong);
+        // Opacity 0 shows the canvas (base off); 1 shows the pure layer colour. The
+        // old faint/strong stops (0.4/0.8) still order the same, and both are opaque
+        // so unchanged copper isn't black.
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, 0.0), C_CANVAS);
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, 1.0), C_COPPER);
+        // Values outside 0..=1 are clamped, never a wrap/overflow.
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, -0.5), C_CANVAS);
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, 1.5), C_COPPER);
+        let faint = base_display_color(C_COPPER, C_CANVAS, BASE_OPACITY_FAINT);
+        let strong = base_display_color(C_COPPER, C_CANVAS, BASE_OPACITY_STRONG);
         assert!(strong.r() > faint.r());
         assert!(faint.r() > C_CANVAS.r()); // even faint is visibly above the black canvas
         assert_eq!(strong.a(), 255); // opaque
@@ -4937,40 +4946,40 @@ mod tests {
 
     #[test]
     fn geom_key_tracks_selection_inputs_only() {
-        let base = build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, true, Some(1));
-        // base Faint vs Strong is a colour, not geometry -> same key (no rebuild)
+        let base = build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1));
+        // base 0.4 vs 0.8 is a colour, not geometry -> same key (no rebuild)
         assert_eq!(
             base,
-            build_geom_key(&[0], Mode::Overlay, BaseLevel::Strong, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_STRONG, true, Some(1))
         );
-        // base Off flips base_on -> different key (the base mesh joins/leaves the draw)
+        // base opacity 0 flips base_on -> different key (the base mesh joins/leaves the draw)
         assert_ne!(
             base,
-            build_geom_key(&[0], Mode::Overlay, BaseLevel::Off, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, 0.0, true, Some(1))
         );
         // visible set / mode changes -> different key
         assert_ne!(
             base,
-            build_geom_key(&[2], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[2], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         assert_ne!(
             base,
-            build_geom_key(&[0], Mode::Old, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0], Mode::Old, BASE_OPACITY_FAINT, true, Some(1))
         );
         // With multiple layers shown, the outline still draws (it's enabled and
         // exists), so a visible-set change is what flips the key.
         assert_ne!(
             base,
-            build_geom_key(&[0, 1], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 1], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
     }
 
     #[test]
     fn geom_cache_dirty_on_none_or_change() {
-        let k = build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, false, None);
+        let k = build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_FAINT, false, None);
         assert!(geom_cache_dirty(None, &k));
         assert!(!geom_cache_dirty(Some(&k), &k));
-        let k2 = build_geom_key(&[2], Mode::Overlay, BaseLevel::Faint, false, None);
+        let k2 = build_geom_key(&[2], Mode::Overlay, BASE_OPACITY_FAINT, false, None);
         assert!(geom_cache_dirty(Some(&k), &k2));
     }
 
@@ -5197,10 +5206,43 @@ mod tests {
     }
 
     #[test]
-    fn cycle_base_rotates_off_faint_strong() {
-        assert_eq!(cycle_base(BaseLevel::Off), BaseLevel::Faint);
-        assert_eq!(cycle_base(BaseLevel::Faint), BaseLevel::Strong);
-        assert_eq!(cycle_base(BaseLevel::Strong), BaseLevel::Off);
+    fn cycle_base_opacity_rotates_off_faint_strong() {
+        // The S key steps the three familiar stops: 0 → faint → strong → 0.
+        assert_eq!(cycle_base_opacity(0.0), BASE_OPACITY_FAINT);
+        assert_eq!(cycle_base_opacity(BASE_OPACITY_FAINT), BASE_OPACITY_STRONG);
+        assert_eq!(cycle_base_opacity(BASE_OPACITY_STRONG), 0.0);
+        // An in-between slider value below strong steps up to strong; at/above strong wraps to off.
+        assert_eq!(cycle_base_opacity(0.2), BASE_OPACITY_STRONG);
+        assert_eq!(cycle_base_opacity(1.0), 0.0);
+    }
+
+    #[test]
+    fn legacy_base_level_migrates_to_opacity() {
+        // Pre-#12 off/faint/strong strings map to the equivalent opacity; unknown
+        // values fall back to faint (the old default).
+        assert_eq!(legacy_base_opacity("off"), 0.0);
+        assert_eq!(legacy_base_opacity("faint"), BASE_OPACITY_FAINT);
+        assert_eq!(legacy_base_opacity("strong"), BASE_OPACITY_STRONG);
+        assert_eq!(legacy_base_opacity("bogus"), BASE_OPACITY_FAINT);
+    }
+
+    #[test]
+    fn old_settings_json_migrates_base_level_to_opacity() {
+        use super::{Settings, ViewApp};
+        // An old persisted blob carries `base_level` as a string and no `base_opacity`.
+        // Deserializing fills base_opacity from Default, and apply_settings migrates
+        // the legacy string over it.
+        let old = r#"{"theme":"dark","base_level":"strong"}"#;
+        let s: Settings = serde_json::from_str(old).expect("deserialize old blob");
+        assert_eq!(s.base_level.as_deref(), Some("strong"));
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.apply_settings(s);
+        assert_eq!(app.base_opacity, BASE_OPACITY_STRONG);
+        // A blob with neither field keeps the faint default.
+        let bare: Settings = serde_json::from_str("{}").expect("deserialize empty");
+        let mut app2 = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app2.apply_settings(bare);
+        assert_eq!(app2.base_opacity, BASE_OPACITY_FAINT);
     }
 
     #[test]
@@ -5442,7 +5484,8 @@ mod tests {
         use egui::Color32;
         let s = Settings {
             theme: Theme::Light,
-            base_level: BaseLevel::Strong,
+            base_opacity: BASE_OPACITY_STRONG,
+            base_level: None, // legacy migration field; never written, always None after a round trip
             base_overrides: vec![(0, [1, 2, 3, 4]), (3, [255, 0, 128, 255])],
             min_area_mm2: 0.0123,
             col_added: [10, 20, 30, 255],
@@ -5548,7 +5591,7 @@ mod tests {
         use egui::Color32;
         let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
         app.theme = Theme::Light;
-        app.base_level = BaseLevel::Strong;
+        app.base_opacity = BASE_OPACITY_STRONG;
         app.min_area_mm2 = 0.05;
         app.col_added = Color32::from_rgb(1, 2, 3);
         app.col_removed = Color32::from_rgb(4, 5, 6);
@@ -5563,7 +5606,7 @@ mod tests {
         let mut fresh = ViewApp::new(empty_diff(), "x".into(), "y".into());
         fresh.apply_settings(settings);
         assert_eq!(fresh.theme, app.theme);
-        assert_eq!(fresh.base_level, app.base_level);
+        assert_eq!(fresh.base_opacity, app.base_opacity);
         assert_eq!(fresh.min_area_mm2, app.min_area_mm2);
         assert_eq!(fresh.col_added, app.col_added);
         assert_eq!(fresh.col_removed, app.col_removed);
@@ -5727,29 +5770,29 @@ mod tests {
 
     #[test]
     fn geom_key_tracks_the_visible_set() {
-        let base = build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Faint, true, Some(1));
+        let base = build_geom_key(&[0, 2], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1));
         // Same visible set + same other inputs -> equal (no rebuild).
         assert_eq!(
             base,
-            build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 2], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         // A different visible set -> different key (the merged mesh changes).
         assert_ne!(
             base,
-            build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         assert_ne!(
             base,
-            build_geom_key(&[0, 2, 3], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 2, 3], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         // base-off and mode still flip the key.
         assert_ne!(
             base,
-            build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Off, true, Some(1))
+            build_geom_key(&[0, 2], Mode::Overlay, 0.0, true, Some(1))
         );
         assert_ne!(
             base,
-            build_geom_key(&[0, 2], Mode::Old, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 2], Mode::Old, BASE_OPACITY_FAINT, true, Some(1))
         );
     }
 
