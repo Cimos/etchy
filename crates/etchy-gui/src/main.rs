@@ -284,9 +284,9 @@ enum PanelTab {
 }
 
 impl PanelTab {
-    /// The rail's panel tabs, top to bottom. Measure/Export are stubs for now
-    /// (Features 3/4 fill their bodies); the seam lives here so later PRs only add
-    /// the panel content, not the shell.
+    /// The rail's panel tabs, top to bottom. Each has a full body: Layers
+    /// (`layers_panel_ui`), Measure (`measure_panel_ui`), Export
+    /// (`export_panel_ui`).
     const ALL: [PanelTab; 3] = [PanelTab::Layers, PanelTab::Measure, PanelTab::Export];
 
     fn label(self) -> &'static str {
@@ -328,6 +328,21 @@ fn measure_rail_click(current: Option<PanelTab>) -> (Option<PanelTab>, bool) {
     let next = toggle_panel(current, PanelTab::Measure);
     let armed = next == Some(PanelTab::Measure);
     (next, armed)
+}
+
+/// The file names an export writes, in order, for the Export tab's preview.
+/// Mirrors [`ViewApp::build_export`]'s naming — an index-prefixed SVG per chosen
+/// layer plus a board-wide `areas.csv` — so the panel can show the set without
+/// generating the (expensive) SVG content. `layer_names` are the display names of
+/// the layers that will be written, in export order. Pure → unit-testable. (#60)
+fn export_file_names(layer_names: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = layer_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{i:02}-{n}.svg"))
+        .collect();
+    names.push("areas.csv".into());
+    names
 }
 
 /// Input scheme matching the user's ECAD tool (#54). MVP: it only controls which
@@ -3102,17 +3117,139 @@ impl ViewApp {
         }
     }
 
-    /// Export tab (stub). Feature 4 fills this with the export preview and format
-    /// list; the seam lives here for PR A.
+    /// Export tab (#60): surfaces the existing export (per-layer SVG + copper-area
+    /// CSV) in the panel. Previews *what* each action writes and *which formats*,
+    /// then runs the same `do_export` the top-bar Export menu calls. The top-bar
+    /// menu stays until PR C shrinks the top bar; both drive one code path.
     fn export_panel_ui(&mut self, ui: &mut egui::Ui) {
+        // Preview data — owned up front so the render below never borrows `self`,
+        // leaving `do_export(&mut self)` free to run afterwards. Derived from the
+        // layer set, not by generating the (expensive) SVG content.
+        let current_names: Vec<String> = self
+            .diff
+            .layers
+            .get(self.selected)
+            .map(|l| l.name())
+            .into_iter()
+            .collect();
+        let changed_names: Vec<String> = self
+            .diff
+            .layers
+            .iter()
+            .filter(|l| l.is_changed())
+            .map(|l| l.name())
+            .collect();
+        let current_files = export_file_names(&current_names);
+        let all_files = export_file_names(&changed_names);
+        let status = self.export_msg.clone();
+
         ui.heading("Export");
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("Export options move here in a later change.").weak());
+        ui.add_space(4.0);
         ui.label(
-            egui::RichText::new("For now, use the Export menu in the top bar.")
+            egui::RichText::new("Write the diff to files you can open outside etchy.")
                 .weak()
                 .small(),
         );
+
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("Formats").color(C_COPPER).strong());
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("SVG — one vector file per layer (viewBox in mm).")
+                .weak()
+                .small(),
+        );
+        ui.label(
+            egui::RichText::new(
+                "CSV — areas.csv: copper area per layer, mm² (old / new / added / removed).",
+            )
+            .weak()
+            .small(),
+        );
+
+        let mut exp_current = false;
+        let mut exp_all = false;
+
+        ui.add_space(12.0);
+        ui.label(
+            egui::RichText::new("Current layer")
+                .color(C_COPPER)
+                .strong(),
+        );
+        ui.add_space(2.0);
+        match current_names.first() {
+            Some(name) => {
+                ui.label(
+                    egui::RichText::new(format!("{name} — {} file(s)", current_files.len()))
+                        .weak()
+                        .small(),
+                );
+                Self::export_file_list(ui, "current", &current_files);
+            }
+            None => {
+                ui.label(egui::RichText::new("No layer selected.").weak().small());
+            }
+        }
+        if ui
+            .add_enabled(
+                !current_names.is_empty(),
+                egui::Button::new("Export current layer"),
+            )
+            .on_hover_text("Write the selected layer's SVG plus areas.csv.")
+            .clicked()
+        {
+            exp_current = true;
+        }
+
+        ui.add_space(12.0);
+        ui.label(
+            egui::RichText::new(format!("All changed layers ({})", changed_names.len()))
+                .color(C_COPPER)
+                .strong(),
+        );
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new(format!("{} file(s)", all_files.len()))
+                .weak()
+                .small(),
+        );
+        Self::export_file_list(ui, "all", &all_files);
+        if ui
+            .button("Export all changed layers")
+            .on_hover_text("Write an SVG for every changed layer plus areas.csv.")
+            .clicked()
+        {
+            exp_all = true;
+        }
+
+        if let Some(msg) = status {
+            ui.add_space(10.0);
+            ui.separator();
+            ui.label(egui::RichText::new(msg).weak().small());
+        }
+
+        // Run after the render above — `do_export` needs `&mut self`.
+        if exp_current {
+            self.do_export(false);
+        }
+        if exp_all {
+            self.do_export(true);
+        }
+    }
+
+    /// Render an export file-name preview list in a bounded, scrollable box.
+    /// `salt` distinguishes the two lists (current vs all) so their scroll state
+    /// doesn't collide.
+    fn export_file_list(ui: &mut egui::Ui, salt: &str, files: &[String]) {
+        egui::ScrollArea::vertical()
+            .id_salt(("export-files", salt))
+            .max_height(120.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for f in files {
+                    ui.label(egui::RichText::new(f).monospace().small().weak());
+                }
+            });
     }
 
     /// A copper section heading for the Settings panes (#121).
@@ -4883,12 +5020,12 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 mod tests {
     use super::{
         base_display_color, build_geom_key, cycle_base_opacity, derive_label, distance_mm,
-        finish_measurement, format_coord_mm, geom_cache_dirty, group_layers, hidden_note,
-        is_version_like, layer_group, legacy_base_opacity, measure_click, measure_rail_click,
-        measurement_remove, pans_on, pick_outline_index, region_screen_px, scroll_to_camera_action,
-        short_layer_name, single_layer_hint, step_in_order, toggle_panel, warning_phase,
-        CameraAction, InputPreset, LayerGroup, Measurement, Mode, PanelTab, RailSide, Theme,
-        WarningPhase, BASE_OPACITY_FAINT, BASE_OPACITY_STRONG,
+        export_file_names, finish_measurement, format_coord_mm, geom_cache_dirty, group_layers,
+        hidden_note, is_version_like, layer_group, legacy_base_opacity, measure_click,
+        measure_rail_click, measurement_remove, pans_on, pick_outline_index, region_screen_px,
+        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, toggle_panel,
+        warning_phase, CameraAction, InputPreset, LayerGroup, Measurement, Mode, PanelTab,
+        RailSide, Theme, WarningPhase, BASE_OPACITY_FAINT, BASE_OPACITY_STRONG,
     };
     use etchy_core::LayerKind;
 
@@ -5653,6 +5790,36 @@ mod tests {
         assert_eq!(
             toggle_panel(Some(PanelTab::Measure), PanelTab::Layers),
             Some(PanelTab::Layers)
+        );
+    }
+
+    #[test]
+    fn export_file_names_mirror_build_export() {
+        // The preview must match `build_export`'s naming exactly: an
+        // index-prefixed SVG per chosen layer (so two layers with the same
+        // display name don't clobber each other) plus a trailing `areas.csv`.
+        let names = vec!["top-copper".to_string(), "inner-copper1".to_string()];
+        assert_eq!(
+            export_file_names(&names),
+            vec![
+                "00-top-copper.svg".to_string(),
+                "01-inner-copper1.svg".to_string(),
+                "areas.csv".to_string(),
+            ]
+        );
+
+        // No layers (e.g. nothing changed, or none selected) still writes the CSV.
+        assert_eq!(export_file_names(&[]), vec!["areas.csv".to_string()]);
+
+        // Same display name twice → distinct index-prefixed files.
+        let dup = vec!["other".to_string(), "other".to_string()];
+        assert_eq!(
+            export_file_names(&dup),
+            vec![
+                "00-other.svg".to_string(),
+                "01-other.svg".to_string(),
+                "areas.csv".to_string(),
+            ]
         );
     }
 
