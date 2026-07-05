@@ -293,10 +293,12 @@ enum InputPreset {
 /// Whether `button` drags should pan the canvas under the given preset (#54). Pure
 /// → unit-testable; the only per-preset difference in the MVP.
 fn pans_on(preset: InputPreset, button: egui::PointerButton) -> bool {
-    use egui::PointerButton::{Middle, Secondary};
+    use egui::PointerButton::{Middle, Primary, Secondary};
+    // Left-drag pans in every preset (#18). The swipe divider guards its own primary
+    // drag (see `draw_canvas`), so primary is free to pan everywhere else.
     match preset {
-        InputPreset::KiCad => button == Middle || button == Secondary,
-        InputPreset::Altium => button == Secondary,
+        InputPreset::KiCad => button == Primary || button == Middle || button == Secondary,
+        InputPreset::Altium => button == Primary || button == Secondary,
     }
 }
 
@@ -607,9 +609,11 @@ fn split_rects(rect: Rect, frac: f32, gutter: f32) -> (Rect, Rect, f32) {
     (left, right, div)
 }
 
-/// Keep the swipe divider within [0.1, 0.9] so neither side ever vanishes (#61).
+/// Keep the swipe divider within the canvas. The divider travels the FULL width
+/// (#14) — right to either edge so you can wipe all the way across; only genuinely
+/// out-of-range values are clamped back to an edge.
 fn clamp_swipe_frac(frac: f32) -> f32 {
-    frac.clamp(0.1, 0.9)
+    frac.clamp(0.0, 1.0)
 }
 
 /// Partition `rect` into left/right clip-rects meeting at a single draggable
@@ -1043,12 +1047,10 @@ impl ViewApp {
         // Selection (highlight) is independent of visibility (#2): clicking a layer
         // name highlights it but does NOT tick it on — the per-row checkbox is the
         // only thing that toggles visibility. Split/Swipe force the selected layer
-        // visible regardless, so a highlight is never blank there. Only a genuine
-        // selection change refits the camera.
-        if idx != self.selected {
-            self.selected = idx;
-            self.cam.fitted = false; // refit on layer change
-        }
+        // visible regardless, so a highlight is never blank there. Selecting a layer
+        // does NOT move the camera (#4) — the view stays where the user left it;
+        // only Fit reframes.
+        self.selected = idx;
     }
 
     /// Move the selection `delta` steps through the displayed (changed-first)
@@ -2468,7 +2470,6 @@ impl eframe::App for ViewApp {
             .default_size(260.0)
             .show_inside(ui, |ui| {
                 ui.heading("Layers");
-                ui.label(egui::RichText::new("changed first").weak().small());
                 // Quick visibility actions (#58): show/hide every layer, or only the
                 // changed ones. They never move the selection or camera.
                 ui.horizontal(|ui| {
@@ -2478,12 +2479,11 @@ impl eframe::App for ViewApp {
                         }
                     }
                     if ui.small_button("Hide all").clicked() {
+                        // Hide-all clears EVERY layer (#2) — including the selected
+                        // one. (Split/Swipe still force the active layer visible in
+                        // those modes so their view is never blank.)
                         for v in self.visible_layers.iter_mut() {
                             *v = false;
-                        }
-                        // Keep the active layer drawn so its highlight isn't blank.
-                        if let Some(v) = self.visible_layers.get_mut(self.selected) {
-                            *v = true;
                         }
                     }
                     // "Show changed" button hidden per feedback #8 — the capability
@@ -2659,8 +2659,12 @@ impl eframe::App for ViewApp {
                                                         egui::Align::Center,
                                                     ),
                                                     |ui| {
+                                                        // Δ% in copper so the change
+                                                        // magnitude reads at a glance (#20).
                                                         ui.label(
-                                                            egui::RichText::new(txt).small().weak(),
+                                                            egui::RichText::new(txt)
+                                                                .small()
+                                                                .color(C_COPPER),
                                                         )
                                                         .on_hover_text(format!(
                                                             "+{added:.4} mm² added · \
@@ -3024,9 +3028,11 @@ impl ViewApp {
         // defaulting to the brand board-dark.
         painter.rect_filled(rect, 0.0, self.canvas_color());
 
-        // Fit on first show / layer change.
+        // Fit on first show / explicit Fit only. Fit frames the WHOLE board (#8),
+        // not the selected layer, so the view is stable no matter which layer is
+        // active — and selecting a layer never moves it (#4).
         if !self.cam.fitted {
-            if let Some(bb) = layer_bbox(layer) {
+            if let Some(bb) = board_bbox(&self.diff.layers) {
                 fit(&mut self.cam, bb, rect);
             }
             self.cam.fitted = true;
@@ -4248,9 +4254,9 @@ fn publish_state(layer: &str, mode: &str, zoom_pct: i32) {
 #[cfg(not(target_arch = "wasm32"))]
 fn publish_state(_layer: &str, _mode: &str, _zoom_pct: i32) {}
 
-/// Union bbox of a layer's old+new geometry (so the view frames the whole board).
-fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
-    match (layer.old.bbox_nm(), layer.new.bbox_nm()) {
+/// Union two optional bboxes `[minx, miny, maxx, maxy]`; `None` is the identity.
+fn union_bbox(a: Option<[i64; 4]>, b: Option<[i64; 4]>) -> Option<[i64; 4]> {
+    match (a, b) {
         (Some(a), Some(b)) => Some([
             a[0].min(b[0]),
             a[1].min(b[1]),
@@ -4261,6 +4267,17 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }
+}
+
+/// Union bbox of a layer's old+new geometry.
+fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
+    union_bbox(layer.old.bbox_nm(), layer.new.bbox_nm())
+}
+
+/// Union bbox of every layer — the WHOLE board's extent, so Fit and the initial
+/// view frame the entire board rather than one layer's geometry (#8).
+fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
+    layers.iter().map(layer_bbox).fold(None, union_bbox)
 }
 
 #[cfg(test)]
@@ -4508,15 +4525,32 @@ mod tests {
         assert_eq!(l.bottom(), 50.0);
         assert_eq!(rr.top(), 0.0);
         assert_eq!(rr.bottom(), 50.0);
-        // frac is clamped to [0.1, 0.9] so neither side ever vanishes.
-        assert_eq!(clamp_swipe_frac(0.0), 0.1);
-        assert_eq!(clamp_swipe_frac(1.0), 0.9);
+        // frac spans the FULL canvas width (#14): the divider reaches either edge
+        // so the user can wipe all the way across; only out-of-range is clamped.
+        assert_eq!(clamp_swipe_frac(0.0), 0.0);
+        assert_eq!(clamp_swipe_frac(1.0), 1.0);
         assert_eq!(clamp_swipe_frac(0.5), 0.5);
-        // A clamped frac drives the divider position too.
+        assert_eq!(clamp_swipe_frac(-0.5), 0.0); // below range → left edge
+        assert_eq!(clamp_swipe_frac(1.5), 1.0); // above range → right edge
+                                                // A clamped frac drives the divider position too — to the very edges.
         let (_, _, div_lo) = swipe_rects(r, -1.0);
-        assert_eq!(div_lo, 10.0);
+        assert_eq!(div_lo, 0.0);
         let (_, _, div_hi) = swipe_rects(r, 2.0);
-        assert_eq!(div_hi, 90.0);
+        assert_eq!(div_hi, 100.0);
+    }
+
+    #[test]
+    fn union_bbox_unions_or_passes_through() {
+        // board_bbox folds this over every layer so Fit frames the WHOLE board (#8),
+        // not just the selected layer's extent.
+        use super::union_bbox;
+        assert_eq!(
+            union_bbox(Some([0, 0, 10, 10]), Some([5, -5, 20, 3])),
+            Some([0, -5, 20, 10])
+        );
+        assert_eq!(union_bbox(Some([1, 2, 3, 4]), None), Some([1, 2, 3, 4]));
+        assert_eq!(union_bbox(None, Some([1, 2, 3, 4])), Some([1, 2, 3, 4]));
+        assert_eq!(union_bbox(None, None), None);
     }
 
     #[test]
@@ -4829,12 +4863,14 @@ mod tests {
     #[test]
     fn pans_on_matches_each_preset() {
         use egui::PointerButton::{Middle, Primary, Secondary};
-        // KiCad: middle OR right, not primary.
-        assert!(!pans_on(InputPreset::KiCad, Primary));
+        // Left-drag pans in every preset now (#18) — the swipe-divider drag guards
+        // itself separately, so primary is free to pan elsewhere on the canvas.
+        // KiCad: primary, middle OR right.
+        assert!(pans_on(InputPreset::KiCad, Primary));
         assert!(pans_on(InputPreset::KiCad, Middle));
         assert!(pans_on(InputPreset::KiCad, Secondary));
-        // Altium: right only.
-        assert!(!pans_on(InputPreset::Altium, Primary));
+        // Altium: primary OR right.
+        assert!(pans_on(InputPreset::Altium, Primary));
         assert!(!pans_on(InputPreset::Altium, Middle));
         assert!(pans_on(InputPreset::Altium, Secondary));
         // Default preset is Altium (alphabetically first of the supported tools, #55).
