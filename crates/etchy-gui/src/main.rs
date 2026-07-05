@@ -3055,20 +3055,17 @@ impl ViewApp {
             let hovering_div = response
                 .hover_pos()
                 .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX);
-            // Start a divider drag when a PRIMARY drag begins on/near the divider.
-            // Use interact_pointer_pos (Some during the press) — hover_pos is None
-            // mid-drag, so keying off it let a grab fall through to panning once
-            // left-drag started panning too, and the board moved with the wipe (#171).
-            if response.drag_started_by(egui::PointerButton::Primary)
-                && response
-                    .interact_pointer_pos()
-                    .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX)
-            {
-                self.swipe_drag = true;
-            }
-            if !response.dragged_by(egui::PointerButton::Primary) {
-                self.swipe_drag = false;
-            }
+            // A divider drag is any primary drag whose PRESS began on/near the
+            // divider. Key off press_origin (the button-DOWN position) — not the
+            // drag-start position, which egui only reports AFTER the pointer crosses
+            // its drag threshold. That threshold movement could push a grab near the
+            // band edge outside GRAB_PX, so the grab was missed and, now that
+            // left-drag pans too, the board moved with the wipe (#171). press_origin
+            // is immune to the threshold, so a grab anywhere in the band always wins.
+            let press_near_div = ui
+                .input(|i| i.pointer.press_origin())
+                .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX);
+            self.swipe_drag = press_near_div && response.dragged_by(egui::PointerButton::Primary);
             if self.swipe_drag {
                 if let Some(p) = response.interact_pointer_pos() {
                     let frac = (p.x - rect.left()) / rect.width().max(1.0);
