@@ -3037,8 +3037,13 @@ impl ViewApp {
         // pan logic below is skipped for this frame. The handle has a few px of
         // grab tolerance and shows a horizontal-resize cursor on hover.
         let mut swipe_dragging = false;
+        // Hover-or-drag on the divider (#61) — drives a heavier, highlighted handle
+        // in the draw pass so it reads as grabbable.
+        let mut swipe_hot = false;
         if self.mode == Mode::Swipe {
-            const GRAB_PX: f32 = 6.0;
+            // Generous grab band (#61): the old 6px was very hard to hit on a
+            // trackpad. A wide band the full height of the divider makes it easy.
+            const GRAB_PX: f32 = 16.0;
             let (_, _, div_x) = swipe_rects(rect, self.swipe_frac);
             let near_div = response
                 .hover_pos()
@@ -3058,7 +3063,8 @@ impl ViewApp {
                 }
                 swipe_dragging = true;
             }
-            if near_div || self.swipe_drag {
+            swipe_hot = near_div || self.swipe_drag;
+            if swipe_hot {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
         } else {
@@ -3267,20 +3273,45 @@ impl ViewApp {
             if !rmesh.is_empty() {
                 painter.with_clip_rect(rr).add(Shape::from(rmesh));
             }
-            // The divider: a copper wipe line. In Swipe it's the draggable handle —
-            // drawn a touch heavier, with grab pips, so it reads as movable.
+            // The divider: a copper wipe line. In Swipe it's the draggable handle,
+            // heavier and brighter when hovered/dragged (#61) so it reads as movable.
+            let line_col = if swipe && swipe_hot {
+                C_CREAM
+            } else {
+                C_COPPER
+            };
             painter.line_segment(
                 [
                     Pos2::new(div_x, rect.top()),
                     Pos2::new(div_x, rect.bottom()),
                 ],
-                Stroke::new(if swipe { 2.5 } else { 1.5 }, C_COPPER),
+                Stroke::new(if swipe { 2.5 } else { 1.5 }, line_col),
             );
             if swipe {
-                // A small grab handle at mid-height so the divider reads as draggable.
+                // A clear grab handle at mid-height: a rounded copper pill with three
+                // grip lines, so the divider is an obvious, easy target (#61). It
+                // brightens with a cream outline when hovered/dragged.
                 let mid_y = rect.center().y;
-                for dy in [-14.0, 0.0, 14.0] {
-                    painter.circle_filled(Pos2::new(div_x, mid_y + dy), 2.5, C_COPPER);
+                let handle =
+                    Rect::from_center_size(Pos2::new(div_x, mid_y), egui::vec2(12.0, 48.0));
+                painter.rect_filled(handle, 6.0, C_COPPER);
+                if swipe_hot {
+                    painter.rect_stroke(
+                        handle,
+                        6.0,
+                        Stroke::new(1.5, C_CREAM),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                // Grip lines.
+                for dy in [-8.0, 0.0, 8.0] {
+                    painter.line_segment(
+                        [
+                            Pos2::new(div_x - 3.0, mid_y + dy),
+                            Pos2::new(div_x + 3.0, mid_y + dy),
+                        ],
+                        Stroke::new(1.2, C_CANVAS),
+                    );
                 }
             }
             // Labels at each half's BOTTOM-left so they don't collide with the
