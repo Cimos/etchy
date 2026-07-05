@@ -3051,12 +3051,19 @@ impl ViewApp {
             // trackpad. A wide band the full height of the divider makes it easy.
             const GRAB_PX: f32 = 16.0;
             let (_, _, div_x) = swipe_rects(rect, self.swipe_frac);
-            let near_div = response
+            // Hover highlight only: hover_pos is Some when the pointer is NOT pressed.
+            let hovering_div = response
                 .hover_pos()
                 .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX);
-            // Track an in-progress drag that started on the divider so leaving the
-            // grab band mid-drag doesn't drop it.
-            if response.drag_started_by(egui::PointerButton::Primary) && near_div {
+            // Start a divider drag when a PRIMARY drag begins on/near the divider.
+            // Use interact_pointer_pos (Some during the press) — hover_pos is None
+            // mid-drag, so keying off it let a grab fall through to panning once
+            // left-drag started panning too, and the board moved with the wipe (#171).
+            if response.drag_started_by(egui::PointerButton::Primary)
+                && response
+                    .interact_pointer_pos()
+                    .is_some_and(|p| (p.x - div_x).abs() <= GRAB_PX)
+            {
                 self.swipe_drag = true;
             }
             if !response.dragged_by(egui::PointerButton::Primary) {
@@ -3069,7 +3076,7 @@ impl ViewApp {
                 }
                 swipe_dragging = true;
             }
-            swipe_hot = near_div || self.swipe_drag;
+            swipe_hot = hovering_div || self.swipe_drag;
             if swipe_hot {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
