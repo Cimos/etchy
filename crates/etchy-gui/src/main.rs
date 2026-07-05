@@ -2802,7 +2802,18 @@ impl ViewApp {
             ui.label(egui::RichText::new("base").weak().small());
             ui.add(
                 egui::Slider::new(&mut self.base_opacity, 0.0..=1.0)
-                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    // Parse the "%"-formatted text back so click-to-type round-trips
+                    // (without a matching parser egui's default numeric parse rejects
+                    // the "%" suffix and the typed value is silently dropped).
+                    .custom_parser(|s| {
+                        s.trim()
+                            .trim_end_matches('%')
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .map(|p| p / 100.0)
+                    }),
             )
             .on_hover_text("Opacity of the unchanged base copper behind the diff (0 hides it).");
         });
