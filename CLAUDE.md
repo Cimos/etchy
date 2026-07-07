@@ -1,7 +1,10 @@
 # CLAUDE.md — etchy
 
-Project context for Claude Code sessions (incl. WSL). Read the three planning
-docs in `docs/` before substantive work — they are authoritative.
+Project context for Claude Code sessions (incl. WSL). Before substantive work
+read **`docs/REQUIREMENTS.md`** (the consolidated numbered requirements with
+status) and, for viewer work, **`docs/design/GUI_SPEC.md`** (the locked UI
+behaviour spec). `docs/PRODUCT_DISCOVERY.md` / `docs/ROADMAP.md` /
+`docs/DEVELOPER_GUIDE.md` carry the why, the sequencing, and the architecture.
 
 ## What etchy is
 
@@ -10,8 +13,9 @@ ground-up in **Rust**. Successor to the Python tool gerber-diff (frozen at
 `Cimos/Gerber-Diff-Tool` v0.11). `etchy old/ new/` → crisp SVG overlay + change
 heatmap + JSON magnitudes, on any Gerber/Excellon fab pack.
 
-**Status: Phase 0 (scaffold).** Crates are std-only so the workspace builds
-without a local toolchain; real dependencies land per-module from Milestone 1.
+**Status (2026-07):** engine/CLI/CI surfaces shipped through M2; PDF engine
+merged (CLI wiring #63 open); the GUI shell redesign is built and in review
+(PR chain #167→#175→#182→#202); v0.1.0 blocked on GitHub Actions billing.
 
 ## Decisions that constrain the work (from `docs/PRODUCT_DISCOVERY.md`)
 
@@ -49,8 +53,7 @@ without a local toolchain; real dependencies land per-module from Milestone 1.
 
 ## Next work
 
-`docs/ROADMAP.md` Phase 0 → M1. Immediate: **Spike 1** — see
-[`docs/SPIKE_1.md`](docs/SPIKE_1.md) for the precise spec with docs.rs-verified
-`i_overlay` 7.0 + `gerber-parser` 0.5 APIs, success criteria, test-board steps,
-and the open decisions to resolve. Then Spike 2 (Gerber/Excellon parse
-validation) and the golden-corpus harness.
+See `docs/ROADMAP.md` "Where we are" and `docs/REQUIREMENTS.md` for statuses.
+Current front: land the GUI shell PR chain (#167→#175→#182→#202), fix native
+WSLg clicks (#203), wire the `.pdf` CLI path (#63), then cut v0.1.0 once
+GitHub Actions billing is restored (+ publish the container to ghcr).
