@@ -103,7 +103,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | VIEW-3 | **Left-drag pans** in every input preset (right/middle per preset still work). | #172/#18 | ✅ |
 | VIEW-4 | **Swipe is a curtain over one board**: the divider bisects a single board (left = old, right = new), travels the full canvas width, and dragging it never pans the board. | #171/#183, owner | ✅ |
 | VIEW-5 | Base copper (unchanged geometry) renders at a user-set **opacity slider** (0–100%, in the Layers panel); the S key cycles the familiar off/faint/strong stops. | #12, owner | ✅ |
-| VIEW-6 | View modes **single / highlight / all** control multi-layer display; hide-all clears **every** layer. | #59, #173 | ✅ |
+| VIEW-6 | View modes **single / highlight / all** control multi-layer display; hide-all clears **every** layer. Show/hide-all and the view segment merge into **one visibility control group** (they overlap today). | #59, #173, #207 | ✅ (merge of controls 🔜 #207) |
 | VIEW-7 | The **board edge is a normal layer** (Mechanical › outline): plain eye toggle, visible by default; no special row, control, or legend entry. | #3/#157, owner clarified | ✅ |
 | VIEW-8 | **Always-on crosshair + grid-snapped cursor** with a live coordinate readout, independent of measure mode (toggles live in the Measure tab; snap defaults on and the readout says "· grid" so precision is honest). | #16/#17/#179, owner | ✅ |
 | VIEW-9 | The **drawn grid adapts to zoom** (1-2-5 pitch selection) so a grid is visible at any zoom; **snapping stays at the configured pitch** — the display never changes what snap does. | #195 | ✅ |
@@ -122,6 +122,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | MEAS-3 | Units **mm / mil / inch** ("keep what we have"), selectable in the Measure tab. | owner | ✅ |
 | MEAS-4 | **Clear-measurements follows the input preset**: Altium → exact **Shift+C**, KiCad → **Esc** (after the in-progress point clears). A custom rebind stands the preset defaults down. Esc aimed at an open popup never clears the list. | #198, owner | ✅ |
 | MEAS-5 | Measure clicks snap to the grid when snap is on; placement follows the visible snapped cursor. | #51 | ✅ |
+| MEAS-6 | A measurement reports **ΔX, ΔY, and its angle** as well as the straight-line distance. | #208 | 🔜 |
 
 ## 9. Hotkeys
 

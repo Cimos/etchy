@@ -147,6 +147,8 @@ done backlog (#105 waiver).
 | (chat) Support other EDA tool formats — X1/X2 etc. | IN-6 | ✅ X1/X2 · 🔜 more schemes |
 | (chat) Report generating as a requirement | CLI-7 | ✅ |
 | (chat) GitHub Action: 5-line adoption; every Gerber-touching PR gets a layer-by-layer diff comment | CLI-8 | 🔜 validate |
+| Show/hide-all and single/highlight/all overlap — merge into one control group (22:32) | #207 → VIEW-6 refinement | 🔜 |
+| Measurements need ΔX/ΔY offsets + angle, not just distance (22:33) | #208 → MEAS-6 | 🔜 |
 
 ## 8 · Decision record (owner quiz answers, dated)
 
