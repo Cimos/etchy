@@ -6,7 +6,8 @@ numbered requirements with their source and current status.
 
 - **Companions:** [`PRODUCT_DISCOVERY.md`](PRODUCT_DISCOVERY.md) (why these
   decisions), [`design/GUI_SPEC.md`](design/GUI_SPEC.md) (the full viewer
-  behaviour spec), [`TRUST.md`](TRUST.md) (trust model), [`ROADMAP.md`](ROADMAP.md)
+  behaviour spec), [`TRUST.md`](TRUST.md) (trust model), [`FEEDBACK_LOG.md`](FEEDBACK_LOG.md)
+  (dated feedback → requirement traceability), [`ROADMAP.md`](ROADMAP.md)
   (sequencing), [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md) (architecture).
 - **Status legend:** ✅ shipped on `main` · 🔶 built, in an open PR · 🔜 accepted,
   not built · 📋 future (post-1.0).
@@ -46,8 +47,9 @@ numbered requirements with their source and current status.
 | IN-1 | Gerber RS-274X and X2 parse on real fab output (Altium + KiCad exports validated; real-board real-board fixes in the corpus). | Spike 2, #145 | ✅ |
 | IN-2 | Excellon drill parse, including headerless files, inline formats, R codes; phantom-hole and tool-line traps covered by tests. | #62, #144 | ✅ |
 | IN-3 | Pick-and-place centroid diff: moved/rotated/added/removed parts as geometry (`LayerKind::Placement`). | #115/#141 | ✅ |
-| IN-4 | Filename classification types every copper layer as **Copper** — including KiCad `.gl<n>` inner copper, mapped **ordinally** (`.gl2`→Inner 1) so cross-scheme pairing (`.gl2` ≡ `In1_Cu` ≡ `.g1`) works. Genuinely unknown files fall to Other. | #176 | 🔶 PR #180 |
+| IN-4 | Filename classification types every copper layer as **Copper** — including KiCad `.gl<n>` inner copper, mapped **ordinally** (`.gl2`→Inner 1) so cross-scheme pairing (`.gl2` ≡ `In1_Cu` ≡ `.g1`) works. Genuinely unknown files fall to Other. | #176 | ✅ |
 | IN-5 | Loaders accept folders, zips, and drag-and-drop (GUI); the same classification path serves CLI and GUI. | #120/#93 | ✅ |
+| IN-6 | Gerber dialect coverage spans **X1 (legacy RS-274X) and X2 (attributes)**, and filename/naming schemes from the major EDA tools. Altium + KiCad shipped; additional EDA-tool schemes (Eagle, OrCAD, …) are accepted — each lands with corpus samples + classification tests. | owner 2026-07-07 | ✅ X1/X2 · 🔜 more EDA schemes |
 
 ## 4. Trust (top-tier requirement — gates everything)
 
@@ -55,7 +57,7 @@ numbered requirements with their source and current status.
 |---|---|---|---|
 | TRUST-1 | **No silent misses.** A change the tool saw must never be invisible without an on-screen accounting. | discovery | standing |
 | TRUST-2 | Real-but-tiny diff regions render as fixed-size **marker dots** when too small to draw to scale — they fade only into markers, never into nothing (covers the mid-zoom dropout band). | #14, #156/#162 | ✅ |
-| TRUST-3 | The noise filter (min-area threshold) always **surfaces its hidden-region count** in the viewer; suppression is visible ("N hidden < X mm²"), never quiet. | G9, #178 review | 🔶 PR #182/#202 |
+| TRUST-3 | The noise filter (min-area threshold) always **surfaces its hidden-region count** in the viewer; suppression is visible ("N hidden < X mm²"), never quiet. | G9, #178 review | ✅ |
 | TRUST-4 | Fail-loud beats wrong-but-quiet: unprocessable layers/files produce clear errors, not partial silent output. | discovery | standing |
 | TRUST-5 | A **golden corpus** (synthetic known-answer boards + real boards) plus property tests (`diff(A,A)=∅`, add/remove symmetry) and fuzzing gate correctness in CI. | Phase 0 | ✅ |
 | TRUST-6 | Green `#46d18a` / red `#ff5d73` are **reserved for added/removed diff geometry** — never used for decoration in any surface. | brand theme | standing |
@@ -71,58 +73,64 @@ numbered requirements with their source and current status.
 | CLI-4 | **Git-refs invocation**: `etchy refA refB [subdir]` diffs committed fab packs without a checkout; ref names are never guessed from typos. | #138, #144 | ✅ |
 | CLI-5 | GitHub Action (composite) posts the Markdown summary on PRs; runs fully offline/self-hosted. | M2 | ✅ |
 | CLI-6 | PDF inputs: `.pdf` old/new → page-by-page pixel diff summary + overlay PNGs, same exit-code contract. | #63 | 🔜 (engine ✅ #150/#151) |
+| CLI-7 | **Report generation** is first-class: one run produces a shareable, self-contained **HTML report** plus SVG overlays, JSON v1, and a Markdown summary — no separate tooling. | owner 2026-07-07, #139 | ✅ |
+| CLI-8 | **Five-line CI adoption:** adding the GitHub Action to a repo takes ≤ 5 workflow lines, and every PR that touches Gerbers gets a **layer-by-layer diff posted in its comments**. | owner 2026-07-07 | 🔜 validate the 5-line bar + comment format against the shipped Action |
 
 ## 6. GUI — shell (the locked 2026-07 redesign)
 
 The full behaviour spec is [`design/GUI_SPEC.md`](design/GUI_SPEC.md). Everything
-below is owner-locked and built in **PR #202** unless noted.
+below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
+#167→#175→#182→#202).
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| GUI-1 | **VS Code-style shell**: a slim activity rail of painter-drawn icons opens docked side panels (tabs); clicking the active tab collapses its panel. | #11/#57, owner | 🔶 #202 |
-| GUI-2 | Rail side is **flippable left/right** in Settings; the choice persists. | owner | 🔶 #202 |
-| GUI-3 | Rail tabs: **Layers, Measure, Export**, with **Settings as a gear pinned at the bottom**. No monogram on the rail. | owner, #190 | 🔶 #202 |
-| GUI-4 | The top bar holds only: brand icon + board label, the **mode segment** (Overlay/Old/New/Split/Swipe), and segmented **Help/Fit/Open**. Everything else lives in the rail. | #6/#200 | 🔶 #202 |
-| GUI-5 | Branding uses the real **etchy pad-built E** (`assets/brand/etchy-icon`) — never a hand-drawn substitute. Rail/panel icons are painter-drawn, never font glyphs. | #191, #16/#30 | 🔶 #202 |
-| GUI-6 | **Settings is a rail panel** (not a floating window) with stacked collapsible sections: Display, Diff, Grid, Input, Colours, Layers, Hotkeys. | #199, owner | 🔶 #202 |
-| GUI-7 | Web and native present the **same old→new labels**, derived consistently from meaningful path parts. | #177 | 🔶 #182 |
+| GUI-1 | **VS Code-style shell**: a slim activity rail of painter-drawn icons opens docked side panels (tabs); clicking the active tab collapses its panel. | #11/#57, owner | ✅ |
+| GUI-2 | Rail side is **flippable left/right** in Settings; the choice persists. | owner | ✅ |
+| GUI-3 | Rail tabs: **Layers, Measure, Export**, with **Settings as a gear pinned at the bottom**. No monogram on the rail. | owner, #190 | ✅ |
+| GUI-4 | The top bar holds only: brand icon + board label, the **mode segment** (Overlay/Old/New/Split/Swipe), and segmented **Help/Fit/Open**. Everything else lives in the rail. | #6/#200 | ✅ |
+| GUI-5 | Branding uses the real **etchy pad-built E** (`assets/brand/etchy-icon`) — never a hand-drawn substitute. Rail/panel icons are painter-drawn, never font glyphs. | #191, #16/#30 | ✅ |
+| GUI-6 | **Settings is a rail panel** (not a floating window) with stacked collapsible sections: Display, Diff, Grid, Input, Colours, Layers, Hotkeys. | #199, owner | ✅ |
+| GUI-7 | Web and native present the **same old→new labels**, derived consistently from meaningful path parts. | #177 | ✅ |
 | GUI-8 | Old/new naming everywhere (never A/B or before/after). | #160, owner | ✅ |
+| GUI-9 | Settings rows make the selectable value chips visually distinct from the setting label. | #205 | 🔜 |
 
 ## 7. GUI — viewer behaviour
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| VIEW-1 | **Selecting a layer never moves the camera.** Only Fit reframes. | #169 | 🔶 #175 |
-| VIEW-2 | **Fit frames the whole board** (union of every layer's extent), not the changed region or one layer. | #170 | 🔶 #175 |
-| VIEW-3 | **Left-drag pans** in every input preset (right/middle per preset still work). | #172/#18 | 🔶 #175 |
-| VIEW-4 | **Swipe is a curtain over one board**: the divider bisects a single board (left = old, right = new), travels the full canvas width, and dragging it never pans the board. | #171/#183, owner | 🔶 #175 |
-| VIEW-5 | Base copper (unchanged geometry) renders at a user-set **opacity slider** (0–100%, in the Layers panel); the S key cycles the familiar off/faint/strong stops. | #12, owner | 🔶 #202 |
-| VIEW-6 | View modes **single / highlight / all** control multi-layer display; hide-all clears **every** layer. | #59, #173 | ✅ / 🔶 #175 |
-| VIEW-7 | The **board edge is a normal layer** (Mechanical › outline): plain eye toggle, visible by default; no special row, control, or legend entry. | #3/#157, owner clarified | 🔶 #202 |
-| VIEW-8 | **Always-on crosshair + grid-snapped cursor** with a live coordinate readout, independent of measure mode (toggles live in the Measure tab; snap defaults on and the readout says "· grid" so precision is honest). | #16/#17/#179, owner | 🔶 #182/#202 |
-| VIEW-9 | The **drawn grid adapts to zoom** (1-2-5 pitch selection) so a grid is visible at any zoom; **snapping stays at the configured pitch** — the display never changes what snap does. | #195 | 🔶 #202 |
-| VIEW-10 | All trust/status chips (coordinate readout, hidden count, "1 / N layers" hint, measure hint) form one **bottom-left stack**, clear of the Split/Swipe identity labels. No status caption clutters the canvas top. | #10/#193/#194, #48 | 🔶 #202 |
-| VIEW-11 | Layer rows: small **square** colour swatches, **copper-coloured Δ%**, no "changed first" caption; mm² detail on hover. | #5/#20/#7, #114 | 🔶 #175/#202 |
-| VIEW-12 | Colour/theme presets selectable in Settings; per-layer colours editable. | #155 | ✅ |
+| VIEW-1 | **Selecting a layer never moves the camera.** Only Fit reframes. | #169 | ✅ |
+| VIEW-2 | **Fit frames the whole board** (union of every layer's extent), not the changed region or one layer. | #170 | ✅ |
+| VIEW-3 | **Left-drag pans** in every input preset (right/middle per preset still work). | #172/#18 | ✅ |
+| VIEW-4 | **Swipe is a curtain over one board**: the divider bisects a single board (left = old, right = new), travels the full canvas width, and dragging it never pans the board. | #171/#183, owner | ✅ |
+| VIEW-5 | Base copper (unchanged geometry) renders at a user-set **opacity slider** (0–100%, in the Layers panel); the S key cycles the familiar off/faint/strong stops. | #12, owner | ✅ |
+| VIEW-6 | View modes **single / highlight / all** control multi-layer display; hide-all clears **every** layer. | #59, #173 | ✅ |
+| VIEW-7 | The **board edge is a normal layer** (Mechanical › outline): plain eye toggle, visible by default; no special row, control, or legend entry. | #3/#157, owner clarified | ✅ |
+| VIEW-8 | **Always-on crosshair + grid-snapped cursor** with a live coordinate readout, independent of measure mode (toggles live in the Measure tab; snap defaults on and the readout says "· grid" so precision is honest). | #16/#17/#179, owner | ✅ |
+| VIEW-9 | The **drawn grid adapts to zoom** (1-2-5 pitch selection) so a grid is visible at any zoom; **snapping stays at the configured pitch** — the display never changes what snap does. | #195 | ✅ |
+| VIEW-10 | All trust/status chips (coordinate readout, hidden count, "1 / N layers" hint, measure hint) form one **bottom-left stack**, clear of the Split/Swipe identity labels. No status caption clutters the canvas top. | #10/#193/#194, #48 | ✅ |
+| VIEW-11 | Layer rows: small **square** colour swatches, **copper-coloured Δ%**, no "changed first" caption; mm² detail on hover. | #5/#20/#7, #114 | ✅ |
+| VIEW-12 | Colour/theme presets selectable in Settings; per-layer colours editable; dark/light themes with readable contrast in both. | #155, 2026-06-21 feedback | ✅ |
+| VIEW-13 | Wheel semantics: plain wheel zooms at the cursor; Ctrl+wheel pans Y; Shift+wheel pans X; a physical notch feels the same on web and native. | 2026-06-20 feedback, #56 | ✅ |
+| VIEW-14 | Warnings are named, concise, auto-fade to an icon, and never shift the layout on hover. | 2026-06-21 feedback | ✅ |
 
 ## 8. Measure system
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| MEAS-1 | The rail's Measure icon **arms the tool and opens the tab in one click** (works with the panel collapsed); re-click disarms. **Ctrl+M** toggles it too. No "Armed" widget — a hint names the shortcut. | #197, owner | 🔶 #202 |
-| MEAS-2 | Two clicks make a measurement; completed measurements **accumulate in a list** (per-row delete, clear-all) and persist drawn on the board. | owner spitball | 🔶 #202 |
-| MEAS-3 | Units **mm / mil / inch** ("keep what we have"), selectable in the Measure tab. | owner | 🔶 #202 |
-| MEAS-4 | **Clear-measurements follows the input preset**: Altium → exact **Shift+C**, KiCad → **Esc** (after the in-progress point clears). A custom rebind stands the preset defaults down. Esc aimed at an open popup never clears the list. | #198, owner | 🔶 #202 |
+| MEAS-1 | The rail's Measure icon **arms the tool and opens the tab in one click** (works with the panel collapsed); re-click disarms. **Ctrl+M** toggles it too. No "Armed" widget — a hint names the shortcut. | #197, owner | ✅ |
+| MEAS-2 | Two clicks make a measurement; completed measurements **accumulate in a list** (per-row delete, clear-all) and persist drawn on the board. | owner spitball | ✅ |
+| MEAS-3 | Units **mm / mil / inch** ("keep what we have"), selectable in the Measure tab. | owner | ✅ |
+| MEAS-4 | **Clear-measurements follows the input preset**: Altium → exact **Shift+C**, KiCad → **Esc** (after the in-progress point clears). A custom rebind stands the preset defaults down. Esc aimed at an open popup never clears the list. | #198, owner | ✅ |
 | MEAS-5 | Measure clicks snap to the grid when snap is on; placement follows the visible snapped cursor. | #51 | ✅ |
 
 ## 9. Hotkeys
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| KEY-1 | A **Settings › Hotkeys editor** lists every rebindable action with its binding; rebinding is press-to-capture, Esc cancels, with **reset to defaults**. Bindings persist. | #201, owner | 🔶 #202 |
-| KEY-2 | A capture **refuses a key another action owns** (including fixed aliases and the preset clear key) — one press must never dispatch two actions. Bindings match their **exact modifier set**. | #201 review | 🔶 #202 |
-| KEY-3 | A capture armed while its editor is hidden cancels; a focused text field keeps its keystrokes. | #201 review | 🔶 #202 |
-| KEY-4 | Defaults: Ctrl+M measure · F fit · S base cycle · U units · G grid · 1–5 modes (O/B/A legacy aliases) · J/K/arrows step layers · preset clear per MEAS-4. | as built | 🔶 #202 |
+| KEY-1 | A **Settings › Hotkeys editor** lists every rebindable action with its binding; rebinding is press-to-capture, Esc cancels, with **reset to defaults**. Bindings persist. | #201, owner | ✅ |
+| KEY-2 | A capture **refuses a key another action owns** (including fixed aliases and the preset clear key) — one press must never dispatch two actions. Bindings match their **exact modifier set**. | #201 review | ✅ |
+| KEY-3 | A capture armed while its editor is hidden cancels; a focused text field keeps its keystrokes. | #201 review | ✅ |
+| KEY-4 | Defaults: Ctrl+M measure · F fit · S base cycle · U units · G grid · 1–5 modes (O/B/A legacy aliases) · J/K/arrows step layers · preset clear per MEAS-4. | as built | ✅ |
 
 ## 10. Rendering & performance
 
@@ -148,7 +156,7 @@ below is owner-locked and built in **PR #202** unless noted.
 | PROC-1 | Every piece of incoming feedback is categorised and gets a tracking issue; fixing PRs use **Refs #N, never Closes** — the owner reviews and closes issues himself. | working agreement | standing |
 | PROC-2 | While CI is billing-blocked, every PR is locally verified: `cargo test`, `clippy --all-targets` warning-clean, `fmt --check`, and the wasm build for GUI changes. | working agreement | standing |
 | PROC-3 | Feedback screenshots may show confidential boards: reference local paths in issues; never commit `deploy/feedback/`. | working agreement | standing |
-| PROC-4 | Every feedback widget ships **Ctrl+Enter to send** and **Ctrl+V screenshot paste** with removable thumbnails. | working agreement | ✅ (dev template parity 🔜 #168) |
+| PROC-4 | Every feedback widget ships **Ctrl+Enter to send** and **Ctrl+V screenshot paste** with removable thumbnails. | working agreement | ✅ |
 
 ---
 
