@@ -48,18 +48,23 @@ a different tool.
 Time estimates are deliberately omitted (solo, open-source cadence); milestones
 are ordered by dependency and each is independently shippable.
 
-### Where we are — 2026-07-01
+### Where we are — 2026-07-07
 
-Phase 0 and Milestone 1 are done; the CI surface (M2) is roughly half done; and
-1.0 distribution (M4) is starting now.
+Phase 0, M1, and the M2 CI surface are done; M3 is done except the PDF CLI
+wiring; M4 blocks only on restoring GitHub Actions billing to cut the release.
+The big open workstream is the **GUI shell redesign** (requirements in
+[`REQUIREMENTS.md`](REQUIREMENTS.md) §6–§9, spec in
+[`design/GUI_SPEC.md`](design/GUI_SPEC.md)), fully built and awaiting review as
+the PR chain #167 → #175 → #182 → #202.
 
 | Milestone | Status | Notes |
 |---|---|---|
-| Phase 0 — foundations | ✅ done | Cargo workspace + fmt/clippy/test/build matrix (fmt+clippy now gate); engine + Gerber/Excellon parse spikes; golden-corpus + property + fuzz tests wired into CI |
-| M1 — MVP (engine / CLI / GUI) | ✅ done | Gerber **and** Excellon parse → per-layer boolean diff → area/region magnitudes → SVG/JSON/Markdown; native **and** web egui viewer (layer list, overlay/before/after/split/swipe, loader, settings panel, splash). Open M1 item: a self-contained **HTML** report. |
-| M2 — CI surface | ⏳ ~half | Shipped: composite **GitHub Action**, Markdown PR summary, versioned **JSON v1**, exit codes (0/1/2), per-file input caps. To do: **per-layer thresholds** and **git-refs invocation** (`etchy refA refB`). |
-| M3 — PDF + dense-board hardening | ⏳ perf mostly done | Shipped: rayon per-layer diff, all-layers GPU pan path, per-layer DoS ceilings, tessellation-robust region counts. To do: schematic-**PDF** pixel diff (still a stub). |
-| M4 — 1.0 (distribution / docs) | 🔜 starting | Prebuilt per-OS binaries + distroless container landing now; landing/docs site already deployed. To do: trust/limitations doc, CLI reference, sample boards. |
+| Phase 0 — foundations | ✅ done | Cargo workspace + fmt/clippy/test/build matrix (fmt+clippy gate); engine + Gerber/Excellon parse spikes; golden-corpus + property + fuzz tests wired into CI |
+| M1 — MVP (engine / CLI / GUI) | ✅ done | Gerber, Excellon **and pick-and-place** parse → per-layer boolean diff → magnitudes → SVG/JSON/Markdown **and self-contained HTML** (`--html`); native + web egui viewer |
+| M2 — CI surface | ✅ done | Composite GitHub Action, Markdown PR summary, versioned JSON v1, exit codes 0/1/2, input caps, **threshold gates** (`--fail-on-area/-regions`, `--gate-layers`) and **git-refs invocation** (`etchy refA refB [subdir]`) |
+| M3 — PDF + dense-board hardening | ⏳ nearly | Shipped: rayon per-layer diff, per-layer DoS ceilings, robust region counts, **pure-Rust PDF page-diff engine** (`etchy_core::imagediff` + `etchy-pdf`/hayro). To do: the `.pdf` **CLI wiring** (#63) |
+| GUI shell redesign | 🔶 in review | VS Code-style shell (activity rail, Layers/Measure/Export/Settings tabs, hotkey editor, measure list, trust chips) — built + adversarially reviewed, awaiting merge as #167→#175→#182→#202 |
+| M4 — 1.0 (distribution / docs) | ⏸ blocked | Release pipeline proven end-to-end (v0.1.0-rc1, 4 platforms); Dockerfile done; landing/docs site + TRUST.md live. Blocked on **GitHub Actions billing**; then cut v0.1.0 + publish the container to ghcr |
 
 ### Phase 0 — Foundations & de-risking ✅
 The big-bang rewrite's main risk is time-to-first-value; Phase 0 buys down the
