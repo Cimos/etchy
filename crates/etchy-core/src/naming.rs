@@ -32,6 +32,20 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
             return LayerKind::InnerCopper(n);
         }
     }
+    // KiCad inner-copper extensions: `.gl2` .. `.gl99` ("Copper,L<n>,Inr").
+    // KiCad names these by PHYSICAL stack position (top is L1), so on a 4-layer
+    // board `.gl2`/`.gl3` are the two inners. But `InnerCopper` is indexed
+    // ORDINALLY everywhere else (1st inner = 1, matching `In1_Cu` and Altium
+    // `.g1`), so convert physical → ordinal by dropping the top layer: `.gl2` →
+    // InnerCopper(1), `.gl3` → InnerCopper(2). Without this a `.gl2` rev wouldn't
+    // pair against an `In1_Cu`/`.g1` rev of the same board (#176). `.gl1` (physical
+    // top) isn't inner and falls through — top copper is `.gtl`. Does not clash with
+    // top/bottom copper (`.gtl`/`.gbl`) which start with `gt`/`gb`, not `gl`.
+    if let Some(n) = e.strip_prefix("gl").and_then(|d| d.parse::<u8>().ok()) {
+        if (2..=99).contains(&n) {
+            return LayerKind::InnerCopper(n - 1);
+        }
+    }
     // Altium fabrication-documentation gerbers: drill drawing (`.gd*`), drill
     // guide (`.gg*`), pad master (`.gpt`/`.gpb`). These are drawings/masters, not
     // board copper and not the real Excellon drill file — classify by extension
@@ -131,6 +145,40 @@ mod tests {
         assert_eq!(classify("board", "gm"), LayerKind::Outline);
         assert_eq!(classify("board", "gtp"), LayerKind::TopPaste);
         assert_eq!(classify("board", "gbp"), LayerKind::BottomPaste);
+    }
+
+    #[test]
+    fn classify_kicad_gl_inner_copper() {
+        // KiCad emits inner copper as `.gl<n>` (e.g. Mad_RP2040.gl2 =
+        // "Copper,L2,Inr"). These must be Copper, not Other (#176).
+        //
+        // `.gl<n>` uses the PHYSICAL stack number (top is L1), but the rest of the
+        // engine indexes inner copper ORDINALLY — 1st inner layer = 1 — matching
+        // KiCad `In1_Cu` and Altium `.g1` (MidLayer 1). So a 4-layer board's first
+        // inner (`.gl2`, physical L2) is InnerCopper(1), and the second (`.gl3`) is
+        // InnerCopper(2). Using the physical number here would mislabel the layer
+        // ("inner 2" for the first inner) and — worse — fail to pair a `.gl2` rev
+        // against an `In1_Cu`/`.g1` rev of the same board (#176).
+        assert_eq!(classify("Mad_RP2040", "gl2"), LayerKind::InnerCopper(1));
+        assert_eq!(classify("Mad_RP2040", "gl3"), LayerKind::InnerCopper(2));
+        assert!(classify("Mad_RP2040", "gl2").is_copper());
+        // Cross-scheme consistency: the same physical inner layer gets the same
+        // ordinal index whether it arrives as KiCad protel `.gl2`, KiCad
+        // `In1_Cu`, or Altium `.g1` — so pairing old-vs-new never spuriously
+        // reports a removed+added inner layer just because the export changed.
+        assert_eq!(
+            classify("board", "gl2"),
+            classify("board-In1_Cu", "gbr"),
+            ".gl2 (physical L2) must match In1_Cu (1st inner)"
+        );
+        assert_eq!(
+            classify("board", "gl2"),
+            classify("board", "g1"),
+            ".gl2 (physical L2) must match Altium .g1 (MidLayer 1)"
+        );
+        // Top/bottom copper (`.gtl`/`.gbl`) are unaffected by the `gl` branch.
+        assert_eq!(classify("board", "gtl"), LayerKind::TopCopper);
+        assert_eq!(classify("board", "gbl"), LayerKind::BottomCopper);
     }
 
     #[test]
