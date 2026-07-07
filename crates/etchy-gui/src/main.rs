@@ -265,20 +265,94 @@ enum Mode {
     Swipe,
 }
 
-/// How strongly to draw the unchanged base (the new layer) behind the diff (G3).
-/// An always-available faint base keeps unchanged copper visible so green/red
-/// changes read against it instead of floating in black (#8).
+/// Base-opacity stops matching the retired off/faint/strong control (#12/#6), kept
+/// as named constants so the slider's default and the `S`-key cycle reproduce the
+/// previous look exactly. The base is the unchanged copper drawn behind the diff
+/// (G3) — an always-available faint base keeps it visible so green/red changes read
+/// against it instead of floating in black (#8).
+const BASE_OPACITY_FAINT: f32 = 0.4;
+const BASE_OPACITY_STRONG: f32 = 0.8;
+
+/// Which side panel the activity rail (Feature 1) has expanded. The rail drives
+/// one docked panel at a time; `None` collapses it (rail-only, canvas full width).
+/// Runtime-only — not persisted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BaseLevel {
-    Off,
-    Faint,
-    Strong,
+enum PanelTab {
+    Layers,
+    Measure,
+    Export,
+    Settings,
+}
+
+impl PanelTab {
+    /// The rail's top-down panel tabs. Settings is NOT here — its gear is pinned
+    /// to the rail's bottom (#199) but drives the same `toggle_panel` flow. Each
+    /// tab has a full body: Layers (`layers_panel_ui`), Measure
+    /// (`measure_panel_ui`), Export (`export_panel_ui`), Settings
+    /// (`settings_panel_ui`).
+    const ALL: [PanelTab; 3] = [PanelTab::Layers, PanelTab::Measure, PanelTab::Export];
+
+    fn label(self) -> &'static str {
+        match self {
+            PanelTab::Layers => "Layers",
+            PanelTab::Measure => "Measure",
+            PanelTab::Export => "Export",
+            PanelTab::Settings => "Settings",
+        }
+    }
+}
+
+/// Which edge the activity rail (and the panel it drives) live on (Feature 8).
+/// Flippable from Settings; persisted with a stable serde string repr (like
+/// `Theme`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum RailSide {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Rail click semantics: clicking the active tab collapses the panel; clicking any
+/// other tab switches to (and opens) it. Pure → unit-testable off-screen.
+fn toggle_panel(current: Option<PanelTab>, clicked: PanelTab) -> Option<PanelTab> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked)
+    }
+}
+
+/// Rail-click semantics for the Measure tab — the one icon with a side effect
+/// beyond show/hide (#50). Clicking it opens the Measure panel *and* arms measure
+/// mode; clicking it again while active collapses the panel *and* disarms. Returns
+/// `(next_panel, armed)` where `armed` is the measure-mode flag: it follows the
+/// panel, so arming always tracks whether Measure ends up open. Pure →
+/// unit-testable off-screen.
+fn measure_rail_click(current: Option<PanelTab>) -> (Option<PanelTab>, bool) {
+    let next = toggle_panel(current, PanelTab::Measure);
+    let armed = next == Some(PanelTab::Measure);
+    (next, armed)
+}
+
+/// The file names an export writes, in order, for the Export tab's preview.
+/// Mirrors [`ViewApp::build_export`]'s naming — an index-prefixed SVG per chosen
+/// layer plus a board-wide `areas.csv` — so the panel can show the set without
+/// generating the (expensive) SVG content. `layer_names` are the display names of
+/// the layers that will be written, in export order. Pure → unit-testable. (#60)
+fn export_file_names(layer_names: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = layer_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{i:02}-{n}.svg"))
+        .collect();
+    names.push("areas.csv".into());
+    names
 }
 
 /// Input scheme matching the user's ECAD tool (#54). MVP: it only controls which
 /// mouse button pans the canvas (the real differentiator between tools) — scroll
 /// stays zoom-to-cursor for all three. A full per-key remapper is a follow-up.
-/// Persisted via #52 with a stable serde string repr (like `Theme`/`BaseLevel`).
+/// Persisted via #52 with a stable serde string repr (like `Theme`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum InputPreset {
     /// KiCad: middle OR right drag pans.
@@ -348,14 +422,12 @@ fn wheel_points(unit: egui::MouseWheelUnit, delta: egui::Vec2, viewport_h: f32) 
 }
 
 /// Opaque display colour for the unchanged base: the layer colour blended toward
-/// the canvas by level (Faint = dim, Strong = near-full). Opaque (not low-alpha)
-/// so unchanged copper reads as dim copper, not near-black over the dark canvas.
-fn base_display_color(layer: Color32, canvas: Color32, level: BaseLevel) -> Color32 {
-    let t = match level {
-        BaseLevel::Off => 0.0,
-        BaseLevel::Faint => 0.4,
-        BaseLevel::Strong => 0.8,
-    };
+/// the canvas by `t` (0 = pure canvas / base off, 1 = the full layer colour).
+/// Opaque (not low-alpha) so unchanged copper reads as dim copper, not near-black
+/// over the dark canvas. `t` is the continuous base opacity (#12/#6); the old
+/// off/faint/strong stops map to 0.0 / 0.4 / 0.8.
+fn base_display_color(layer: Color32, canvas: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
     let mix = |a: u8, b: u8| (b as f32 + (a as f32 - b as f32) * t).round() as u8;
     Color32::from_rgb(
         mix(layer.r(), canvas.r()),
@@ -364,23 +436,342 @@ fn base_display_color(layer: Color32, canvas: Color32, level: BaseLevel) -> Colo
     )
 }
 
-/// Resolve an Esc press for the measure tool (#50). Esc cascades: while a measurement
-/// is in progress it clears the points but keeps measure mode on; a second Esc (nothing
-/// left to clear) exits measure mode. Returns `(next_measure_mode, clear_points)`.
-fn measure_escape(measure_mode: bool, has_points: bool) -> (bool, bool) {
-    if has_points {
-        (measure_mode, true) // clear the in-progress measurement, stay in the tool
-    } else {
-        (false, false) // nothing to clear -> leave measure mode (no-op if already off)
+/// A key press that can clear measure state (#50, #198).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MeasureKey {
+    Escape,
+    ShiftC,
+}
+
+/// What a measure-clearing key press does (#198). Pure → unit-testable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MeasureAction {
+    /// Nothing to do.
+    None,
+    /// Clear the in-progress point; stay in the tool.
+    ClearPoints,
+    /// Clear the completed measurements list.
+    ClearList,
+    /// Leave measure mode.
+    ExitTool,
+}
+
+/// Resolve a measure-clearing key press (#50, #198). Esc cascades: while a
+/// measurement is in progress it clears the point but keeps measure mode on;
+/// under the KiCad preset the next Esc clears the completed list (matching
+/// KiCad's own binding, even when the tool is disarmed); an Esc with nothing
+/// left to clear exits measure mode. Shift+C clears the completed list under
+/// the Altium preset (its native binding) and is unbound under KiCad.
+/// `custom_clear` = the user rebound Clear-measurements in the Hotkeys editor
+/// (#201): the preset list-clears stand down so only the explicit binding
+/// clears the list (Esc keeps its point-clear and exit steps).
+fn measure_key_action(
+    preset: InputPreset,
+    key: MeasureKey,
+    measure_mode: bool,
+    has_points: bool,
+    has_list: bool,
+    custom_clear: bool,
+) -> MeasureAction {
+    match key {
+        MeasureKey::ShiftC => {
+            if !custom_clear && preset == InputPreset::Altium && has_list {
+                MeasureAction::ClearList
+            } else {
+                MeasureAction::None
+            }
+        }
+        MeasureKey::Escape => {
+            if has_points {
+                MeasureAction::ClearPoints
+            } else if !custom_clear && preset == InputPreset::KiCad && has_list {
+                MeasureAction::ClearList
+            } else if measure_mode {
+                MeasureAction::ExitTool
+            } else {
+                MeasureAction::None
+            }
+        }
     }
 }
 
-/// Cycle Off → Faint → Strong → Off (the `S` key / base selector).
-fn cycle_base(level: BaseLevel) -> BaseLevel {
-    match level {
-        BaseLevel::Off => BaseLevel::Faint,
-        BaseLevel::Faint => BaseLevel::Strong,
-        BaseLevel::Strong => BaseLevel::Off,
+/// One rebindable hotkey (#201): a key plus its exact modifier set. `ctrl` maps
+/// to egui's `command` modifier (Ctrl on Windows/Linux, Cmd on mac), matching
+/// the shipped Ctrl+M wiring (#197). Persists as its display string ("Ctrl+M")
+/// via [`format_binding`] / [`parse_binding`], so the config stays hand-readable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct KeyBinding {
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    key: egui::Key,
+}
+
+impl KeyBinding {
+    /// A bare key with no modifiers.
+    const fn plain(key: egui::Key) -> Self {
+        Self {
+            ctrl: false,
+            shift: false,
+            alt: false,
+            key,
+        }
+    }
+}
+
+/// Render a binding the way menus show shortcuts: "Ctrl+Shift+Alt+Key".
+fn format_binding(b: KeyBinding) -> String {
+    let mut s = String::new();
+    if b.ctrl {
+        s.push_str("Ctrl+");
+    }
+    if b.shift {
+        s.push_str("Shift+");
+    }
+    if b.alt {
+        s.push_str("Alt+");
+    }
+    s.push_str(b.key.name());
+    s
+}
+
+/// Parse [`format_binding`]'s output back into a binding. `None` on anything
+/// unknown (fail-loud: a bad persisted string falls back to the defaults rather
+/// than guessing a key).
+fn parse_binding(s: &str) -> Option<KeyBinding> {
+    let (mut ctrl, mut shift, mut alt) = (false, false, false);
+    let mut parts = s.split('+').peekable();
+    let mut key = None;
+    while let Some(part) = parts.next() {
+        if parts.peek().is_some() {
+            match part {
+                "Ctrl" => ctrl = true,
+                "Shift" => shift = true,
+                "Alt" => alt = true,
+                _ => return None,
+            }
+        } else {
+            key = egui::Key::from_name(part);
+        }
+    }
+    Some(KeyBinding {
+        ctrl,
+        shift,
+        alt,
+        key: key?,
+    })
+}
+
+/// A binding persists as its display string (see [`format_binding`]); unknown
+/// strings error, which drops the whole `Settings` blob back to defaults —
+/// fail-loud over a silently wrong key.
+impl serde::Serialize for KeyBinding {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&format_binding(*self))
+    }
+}
+impl<'de> serde::Deserialize<'de> for KeyBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        parse_binding(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown key binding {s:?}")))
+    }
+}
+
+/// The rebindable actions (#201), addressed by the Hotkeys editor and resolved
+/// against the [`Keymap`] by the dispatch in `fn ui`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HotkeyAction {
+    ToggleMeasure,
+    ClearMeasurements,
+    FitView,
+    CycleBase,
+    CycleUnit,
+    ToggleGrid,
+    ModeOverlay,
+    ModeOld,
+    ModeNew,
+    ModeSplit,
+    ModeSwipe,
+}
+
+impl HotkeyAction {
+    /// (action, editor label), in the order the Hotkeys section lists them.
+    const ALL: [(HotkeyAction, &'static str); 11] = [
+        (HotkeyAction::ToggleMeasure, "Toggle measure"),
+        (HotkeyAction::ClearMeasurements, "Clear measurements"),
+        (HotkeyAction::FitView, "Fit view"),
+        (HotkeyAction::CycleBase, "Cycle base opacity"),
+        (HotkeyAction::CycleUnit, "Cycle measure units"),
+        (HotkeyAction::ToggleGrid, "Toggle grid"),
+        (HotkeyAction::ModeOverlay, "Mode: Overlay"),
+        (HotkeyAction::ModeOld, "Mode: Old"),
+        (HotkeyAction::ModeNew, "Mode: New"),
+        (HotkeyAction::ModeSplit, "Mode: Split"),
+        (HotkeyAction::ModeSwipe, "Mode: Swipe"),
+    ];
+}
+
+/// The user's hotkey map (#201), persisted inside [`Settings`]. Missing fields
+/// deserialize to the defaults (container-level `serde(default)`), so pre-#201
+/// configs and partial blobs both come up sane.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(default)]
+struct Keymap {
+    toggle_measure: KeyBinding,
+    /// `None` = the #198 preset defaults stand (Altium Shift+C / KiCad Esc).
+    /// An explicit rebind overrides them and stands the presets down (see
+    /// `measure_key_action`'s `custom_clear`).
+    clear_measure: Option<KeyBinding>,
+    fit_view: KeyBinding,
+    cycle_base: KeyBinding,
+    cycle_unit: KeyBinding,
+    toggle_grid: KeyBinding,
+    mode_overlay: KeyBinding,
+    mode_old: KeyBinding,
+    mode_new: KeyBinding,
+    mode_split: KeyBinding,
+    mode_swipe: KeyBinding,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        use egui::Key;
+        Self {
+            // Ctrl+M arms/disarms the measure tool (#197).
+            toggle_measure: KeyBinding {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::M,
+            },
+            clear_measure: None,
+            fit_view: KeyBinding::plain(Key::F),
+            cycle_base: KeyBinding::plain(Key::S),
+            cycle_unit: KeyBinding::plain(Key::U),
+            toggle_grid: KeyBinding::plain(Key::G),
+            mode_overlay: KeyBinding::plain(Key::Num1),
+            mode_old: KeyBinding::plain(Key::Num2),
+            mode_new: KeyBinding::plain(Key::Num3),
+            mode_split: KeyBinding::plain(Key::Num4),
+            mode_swipe: KeyBinding::plain(Key::Num5),
+        }
+    }
+}
+
+impl Keymap {
+    /// The current binding for an action; `None` only for Clear-measurements
+    /// while it still rides the #198 preset defaults.
+    fn get(&self, a: HotkeyAction) -> Option<KeyBinding> {
+        match a {
+            HotkeyAction::ToggleMeasure => Some(self.toggle_measure),
+            HotkeyAction::ClearMeasurements => self.clear_measure,
+            HotkeyAction::FitView => Some(self.fit_view),
+            HotkeyAction::CycleBase => Some(self.cycle_base),
+            HotkeyAction::CycleUnit => Some(self.cycle_unit),
+            HotkeyAction::ToggleGrid => Some(self.toggle_grid),
+            HotkeyAction::ModeOverlay => Some(self.mode_overlay),
+            HotkeyAction::ModeOld => Some(self.mode_old),
+            HotkeyAction::ModeNew => Some(self.mode_new),
+            HotkeyAction::ModeSplit => Some(self.mode_split),
+            HotkeyAction::ModeSwipe => Some(self.mode_swipe),
+        }
+    }
+
+    /// Rebind an action (a successful capture).
+    fn set(&mut self, a: HotkeyAction, b: KeyBinding) {
+        match a {
+            HotkeyAction::ToggleMeasure => self.toggle_measure = b,
+            HotkeyAction::ClearMeasurements => self.clear_measure = Some(b),
+            HotkeyAction::FitView => self.fit_view = b,
+            HotkeyAction::CycleBase => self.cycle_base = b,
+            HotkeyAction::CycleUnit => self.cycle_unit = b,
+            HotkeyAction::ToggleGrid => self.toggle_grid = b,
+            HotkeyAction::ModeOverlay => self.mode_overlay = b,
+            HotkeyAction::ModeOld => self.mode_old = b,
+            HotkeyAction::ModeNew => self.mode_new = b,
+            HotkeyAction::ModeSplit => self.mode_split = b,
+            HotkeyAction::ModeSwipe => self.mode_swipe = b,
+        }
+    }
+}
+
+/// Why a candidate binding can't be used: the label of whatever already owns
+/// it — another rebindable action, a fixed plain-key alias (O/B/A modes,
+/// J/K/arrow layer-step, Esc), or the Altium preset's Shift+C clear while no
+/// custom clear binding stands it down. Checked at capture time so a rebind
+/// can never make one key press dispatch two actions (#201 review).
+fn binding_conflict(
+    km: &Keymap,
+    action: HotkeyAction,
+    b: KeyBinding,
+    preset: InputPreset,
+) -> Option<&'static str> {
+    use egui::Key;
+    for (other, label) in HotkeyAction::ALL {
+        if other != action && km.get(other) == Some(b) {
+            return Some(label);
+        }
+    }
+    if !b.ctrl && !b.shift && !b.alt {
+        match b.key {
+            Key::O => return Some("Mode: Overlay (fixed alias)"),
+            Key::B => return Some("Mode: Old (fixed alias)"),
+            Key::A => return Some("Mode: New (fixed alias)"),
+            Key::J | Key::K | Key::ArrowDown | Key::ArrowUp => {
+                return Some("layer step (fixed)");
+            }
+            Key::Escape => return Some("measure escape (fixed)"),
+            _ => {}
+        }
+    }
+    if preset == InputPreset::Altium
+        && action != HotkeyAction::ClearMeasurements
+        && km.clear_measure.is_none()
+        && b.key == Key::C
+        && b.shift
+        && !b.ctrl
+        && !b.alt
+    {
+        return Some("Clear measurements (preset Shift+C)");
+    }
+    None
+}
+
+/// Outcome of a key press while a rebind capture is armed (#201).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CaptureResult {
+    Bind(KeyBinding),
+    Cancel,
+}
+
+/// Rebind capture (#201): the next key press (with its modifiers) becomes the
+/// binding; Esc cancels — even with modifiers held, so Esc itself is never
+/// bindable (it stays the universal way out). Pure → unit-testable.
+fn capture_key(key: egui::Key, ctrl: bool, shift: bool, alt: bool) -> CaptureResult {
+    if key == egui::Key::Escape {
+        CaptureResult::Cancel
+    } else {
+        CaptureResult::Bind(KeyBinding {
+            ctrl,
+            shift,
+            alt,
+            key,
+        })
+    }
+}
+
+/// Step the base opacity through the off/faint/strong stops (the `S` key), so the
+/// keyboard keeps the three familiar levels even though the panel slider is now
+/// continuous (#12/#6): 0 → faint → strong → 0. Any in-between slider value below
+/// strong steps up to strong; strong or above wraps back to off.
+fn cycle_base_opacity(t: f32) -> f32 {
+    if t <= 0.0 {
+        BASE_OPACITY_FAINT
+    } else if t < BASE_OPACITY_STRONG {
+        BASE_OPACITY_STRONG
+    } else {
+        0.0
     }
 }
 
@@ -405,17 +796,18 @@ struct GeomKey {
 fn build_geom_key(
     visible: &[usize],
     mode: Mode,
-    base_level: BaseLevel,
-    show_outline: bool,
+    base_opacity: f32,
+    outline_visible: bool,
     outline: Option<usize>,
 ) -> GeomKey {
     GeomKey {
         visible: visible.to_vec(),
         mode,
-        base_on: base_level != BaseLevel::Off,
-        // The outline reference draws whenever it's enabled and exists; with several
-        // layers shown there's no single "selected" layer to suppress it for.
-        outline_effective: show_outline && outline.is_some(),
+        base_on: base_opacity > 0.0,
+        // The faint outline reference draws whenever the outline layer is visible and
+        // exists (#157: its normal `visible_layers` eye now gates it). It's drawn on
+        // every layer, so there's no single "selected" layer to suppress it for.
+        outline_effective: outline_visible && outline.is_some(),
     }
 }
 
@@ -444,14 +836,19 @@ fn visible_from_changed(changed: &[bool]) -> Vec<bool> {
     changed.to_vec()
 }
 
-/// On-load visibility (#9/#10 perf): only the selected layer is shown; multiple
-/// layers are opt-in via the per-row/per-group checkboxes. Rendering one layer by
-/// default keeps the common case fast on dense boards (the old default showed every
-/// changed layer at once). An out-of-range `selected` just yields nothing forced on.
-fn default_visible(n: usize, selected: usize) -> Vec<bool> {
+/// On-load visibility (#9/#10 perf): the selected layer plus the board outline are
+/// shown; every other layer is opt-in via the per-row/per-group checkboxes.
+/// Rendering one layer by default keeps the common case fast on dense boards (the old
+/// default showed every changed layer at once). The outline is on by default so the
+/// board edge reads as orientation context from the start (#157); it's a normal layer
+/// row now, toggled like any other. Out-of-range `selected`/`outline` are ignored.
+fn default_visible(n: usize, selected: usize, outline: Option<usize>) -> Vec<bool> {
     let mut v = vec![false; n];
     if let Some(s) = v.get_mut(selected) {
         *s = true;
+    }
+    if let Some(o) = outline.and_then(|oi| v.get_mut(oi)) {
+        *o = true;
     }
     v
 }
@@ -670,31 +1067,6 @@ struct FilePick {
     result: anyhow::Result<LoadedBoard>,
 }
 
-/// The Settings window's left-rail sections (#121). The window shows one at a
-/// time, so the long per-layer colour list no longer buries the other controls.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum SettingsTab {
-    #[default]
-    Display,
-    Diff,
-    Grid,
-    Input,
-    Colours,
-    Layers,
-}
-
-impl SettingsTab {
-    /// (tab, label) in rail order.
-    const ALL: [(SettingsTab, &'static str); 6] = [
-        (SettingsTab::Display, "Display"),
-        (SettingsTab::Diff, "Diff"),
-        (SettingsTab::Grid, "Grid"),
-        (SettingsTab::Input, "Input"),
-        (SettingsTab::Colours, "Colours"),
-        (SettingsTab::Layers, "Layers"),
-    ];
-}
-
 /// How many layers the canvas shows at once (#59). A quick preset over the
 /// per-layer visibility checkboxes: Single = only the active layer (the fast
 /// default on dense boards); Highlight = every layer, active at full strength and
@@ -730,12 +1102,18 @@ impl ViewMode {
     }
 }
 
-/// The per-layer visibility a view mode selects (#59): Single shows only the active
-/// layer; Highlight and All show every layer (they differ only in dimming, handled
-/// by [`ViewMode::dims_others`]). Pure, so the preset is unit-testable.
-fn visibility_for_mode(mode: ViewMode, n: usize, selected: usize) -> Vec<bool> {
+/// The per-layer visibility a view mode selects (#59): Single shows the active layer
+/// (plus the board outline for orientation, #157); Highlight and All show every layer
+/// (they differ only in dimming, handled by [`ViewMode::dims_others`]). Pure, so the
+/// preset is unit-testable.
+fn visibility_for_mode(
+    mode: ViewMode,
+    n: usize,
+    selected: usize,
+    outline: Option<usize>,
+) -> Vec<bool> {
     match mode {
-        ViewMode::Single => default_visible(n, selected),
+        ViewMode::Single => default_visible(n, selected, outline),
         ViewMode::Highlight | ViewMode::All => vec![true; n],
     }
 }
@@ -754,8 +1132,10 @@ struct ViewApp {
     /// (#114) doesn't reshoelace every frame. Denominator for "how much changed".
     new_area_mm2: Vec<f64>,
     mode: Mode,
-    /// Always-available faint base behind the diff (G3): Off / Faint / Strong.
-    base_level: BaseLevel,
+    /// Opacity of the always-available base copper behind the diff (G3), 0..=1
+    /// (#12/#6). 0 hides the base; the old off/faint/strong stops are 0.0/0.4/0.8.
+    /// Driven by the slider at the top of the Layers panel.
+    base_opacity: f32,
     /// User-configurable diff colors (G3, Altium-compare style). Default to the
     /// brand green/red; a "Settings" popover edits them.
     col_added: Color32,
@@ -771,12 +1151,19 @@ struct ViewApp {
     /// Per-layer base/context colour overrides, keyed by the layer's index in
     /// `diff.layers` (default = layer_type_color for that kind) (#21).
     base_overrides: Vec<(usize, Color32)>,
-    /// The Settings editor window is open. A real window (not a menu) so the nested
-    /// colour-picker popup works — a menu_button closed on the first inner click.
-    show_settings: bool,
-    /// Which Settings section the left rail has selected (runtime-only; not
-    /// persisted — the window always opens on Display).
-    settings_tab: SettingsTab,
+    /// The user's hotkey map (#201), edited in Settings > Hotkeys and persisted
+    /// via #52. The dispatch in `fn ui` resolves its bindings every frame.
+    keymap: Keymap,
+    /// A Hotkeys rebind capture is armed for this action (#201): the next key
+    /// press becomes its binding, Esc cancels. Runtime-only — never persisted.
+    capture_action: Option<HotkeyAction>,
+    /// Why the last capture was rejected (the binding is already taken) —
+    /// shown under the Hotkeys grid; the capture stays armed for another try.
+    capture_conflict: Option<String>,
+    /// Set each frame the Hotkeys editor draws. A capture armed while the
+    /// editor is off-screen (rail tab switched, panel collapsed) cancels
+    /// instead of silently eating — and rebinding on — the next key press.
+    hotkeys_drawn: bool,
     /// How many layers the canvas shows at once (#59; runtime-only). Changing it
     /// resets the per-layer visibility to the mode's preset.
     view_mode: ViewMode,
@@ -800,18 +1187,23 @@ struct ViewApp {
     /// the splash has finished/been dismissed. `None` until the first frame.
     splash_start: Option<f64>,
     splash_done: bool,
-    /// Index of the board-outline layer (Edge.Cuts/GKO), drawn faintly on every
-    /// layer for orientation (G10); None if the board has no outline layer.
+    /// Index of the board-outline layer (Edge.Cuts/GKO), drawn faintly on every layer
+    /// for orientation (G10); None if the board has no outline layer. It's a normal
+    /// layer row now (#157) — its `visible_layers` bit drives the faint reference, so
+    /// there's no separate `show_outline` control.
     outline: Option<usize>,
-    show_outline: bool,
     /// World-space tessellation cache (G6): rebuilt only when the GeomKey changes,
     /// so pan/zoom/colour edits skip re-triangulation.
     cache: Option<TessCache>,
     /// Measure tool active (#22): canvas clicks drop ruler points instead of
     /// panning; Esc clears and exits.
     measure_mode: bool,
-    /// The last (up to) two world-space points of the ruler.
+    /// The in-progress ruler buffer (#50): 0 or 1 world-space points. A second
+    /// click completes the pair into `measurements` and empties this.
     measure_pts: Vec<[f64; 2]>,
+    /// Completed measurements (#50): the running list the Measure tab shows and the
+    /// canvas draws. Runtime-only and per-board — cleared on load.
+    measurements: Vec<Measurement>,
     /// Unit the measure label is shown in (#50): mm / inch / mil.
     measure_unit: Unit,
     /// Grid overlay on (#51): faint world-spaced lines over the canvas.
@@ -866,6 +1258,14 @@ struct ViewApp {
     /// Transient status line from the last export (#60), shown by the Export
     /// control. Not persisted.
     export_msg: Option<String>,
+    /// Which side panel the activity rail has expanded (Feature 1); `None` =
+    /// rail-only (canvas full width). Runtime-only — not persisted.
+    active_panel: Option<PanelTab>,
+    /// The top-bar brand mark (#191): the real etchy icon, decoded from the
+    /// embedded PNG and uploaded to a texture once — cached here, never per frame.
+    brand_tex: Option<egui::TextureHandle>,
+    /// Which edge the activity rail lives on (Feature 8); persisted via #52.
+    rail_side: RailSide,
 }
 
 impl ViewApp {
@@ -876,10 +1276,11 @@ impl ViewApp {
         order.sort_by_key(|&i| !diff.layers[i].is_changed()); // changed first, stable
         let selected = order.first().copied().unwrap_or(0);
         let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
-        // Default visibility (#9/#10 perf): show only the selected layer on load;
-        // multi-layer is opt-in via the checkboxes. Keeps the common case fast on
-        // dense boards. `selected` is the most-changed layer (changed-first order).
-        let visible_layers = default_visible(diff.layers.len(), selected);
+        // Default visibility (#9/#10 perf): show the selected layer plus the board
+        // outline on load; every other layer is opt-in via the checkboxes. Keeps the
+        // common case fast on dense boards. `selected` is the most-changed layer
+        // (changed-first order); the outline is on for orientation (#157).
+        let visible_layers = default_visible(diff.layers.len(), selected, outline);
         let new_area_mm2 = layer_new_areas(&diff);
         Self {
             diff,
@@ -890,7 +1291,7 @@ impl ViewApp {
             visible_layers,
             new_area_mm2,
             mode: Mode::Overlay,
-            base_level: BaseLevel::Faint,
+            base_opacity: BASE_OPACITY_FAINT,
             col_added: C_ADDED,
             col_removed: C_REMOVED,
             canvas_dark: C_CANVAS,
@@ -898,8 +1299,10 @@ impl ViewApp {
             grid_dark: C_GRID_DEFAULT,
             grid_light: C_GRID_DEFAULT_LIGHT,
             base_overrides: Vec::new(),
-            show_settings: false,
-            settings_tab: SettingsTab::default(),
+            keymap: Keymap::default(),
+            capture_action: None,
+            capture_conflict: None,
+            hotkeys_drawn: false,
             view_mode: ViewMode::default(),
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
@@ -911,10 +1314,10 @@ impl ViewApp {
             splash_start: None,
             splash_done: false,
             outline,
-            show_outline: true,
             cache: None,
             measure_mode: false,
             measure_pts: Vec::new(),
+            measurements: Vec::new(),
             measure_unit: Unit::Mm,
             // Grid + snap + crosshair default ON (#179): the snapped-cursor crosshair
             // and coordinate readout are available all the time, not only in measure
@@ -945,6 +1348,11 @@ impl ViewApp {
             #[cfg(feature = "gpu-transform")]
             gpu_hash: None,
             export_msg: None,
+            // The Layers panel is open by default, matching the old always-visible
+            // left panel; the rail can collapse it.
+            active_panel: Some(PanelTab::Layers),
+            brand_tex: None,
+            rail_side: RailSide::default(),
         }
     }
 
@@ -1224,12 +1632,6 @@ fn pick_outline_index(n: usize, kind_of: impl Fn(usize) -> etchy_core::LayerKind
     (0..n).find(|&i| kind_of(i) == etchy_core::LayerKind::Outline)
 }
 
-/// Whether to show the "board edge" legend row: only when the outline is enabled,
-/// exists, and isn't the layer currently being viewed (G10).
-fn outline_legend_visible(show_outline: bool, outline: Option<usize>, selected: usize) -> bool {
-    show_outline && outline.is_some_and(|i| i != selected)
-}
-
 // Brand palette (assets/brand/README.md): diff accents + board-dark canvas.
 const C_ADDED: Color32 = Color32::from_rgb(0x46, 0xd1, 0x8a); // #46d18a
 const C_REMOVED: Color32 = Color32::from_rgb(0xff, 0x5d, 0x73); // #ff5d73
@@ -1283,6 +1685,14 @@ const URL_REPO: &str = "https://github.com/Cimos/etchy";
 const URL_ISSUES: &str = "https://github.com/Cimos/etchy/issues";
 const URL_SITE: &str = "https://cimos.github.io";
 const URL_SPONSOR: &str = "https://github.com/sponsors/Cimos";
+
+/// The etchy brand icon (#191), embedded at compile time. 256 px source drawn at
+/// ~20 pt in the top bar, so it stays crisp on any DPI. Decoded once into a
+/// texture via [`ViewApp::brand_texture`].
+const BRAND_ICON_PNG: &[u8] = include_bytes!("../../../assets/brand/png/etchy-icon-256.png");
+
+/// On-screen size (pt) of the top-bar brand icon (#191).
+const BRAND_ICON_PT: f32 = 21.0;
 
 /// Brand "surface" charcoal — panels/chrome, one step up from the board so the
 /// UI doesn't read as one flat near-black mass.
@@ -1391,8 +1801,8 @@ const MARKER_PX: f32 = 3.0;
 const BASE_SIMPLIFY_TOL_NM: f64 = 2000.0;
 /// Default min-area threshold (mm²). Diff regions smaller than this are treated
 /// as noise (e.g. the sub-µm rims from a units/precision mismatch) and dropped —
-/// but the count is always surfaced on the canvas (the top-left hidden-count chip,
-/// `hidden_note`), never silently.
+/// but the count is always surfaced on the canvas (the bottom-left hidden-count
+/// chip, `hidden_note`), never silently.
 const MIN_AREA_MM2: f64 = 0.0004;
 
 // ===========================================================================
@@ -1420,23 +1830,14 @@ impl<'de> serde::Deserialize<'de> for Theme {
     }
 }
 
-/// Base level persists as a stable string (same rationale as `Theme`).
-impl serde::Serialize for BaseLevel {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(match self {
-            BaseLevel::Off => "off",
-            BaseLevel::Faint => "faint",
-            BaseLevel::Strong => "strong",
-        })
-    }
-}
-impl<'de> serde::Deserialize<'de> for BaseLevel {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        Ok(match String::deserialize(d)?.as_str() {
-            "off" => BaseLevel::Off,
-            "strong" => BaseLevel::Strong,
-            _ => BaseLevel::Faint,
-        })
+/// Map a legacy persisted base level (pre-#12 off/faint/strong string) to the
+/// equivalent continuous opacity, so old configs keep their look after the slider
+/// migration. Unknown values fall back to faint (the old default).
+fn legacy_base_opacity(level: &str) -> f32 {
+    match level {
+        "off" => 0.0,
+        "strong" => BASE_OPACITY_STRONG,
+        _ => BASE_OPACITY_FAINT,
     }
 }
 
@@ -1459,6 +1860,25 @@ impl<'de> serde::Deserialize<'de> for InputPreset {
     }
 }
 
+/// Rail side persists as a stable string (same rationale as `Theme`).
+impl serde::Serialize for RailSide {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(match self {
+            RailSide::Left => "left",
+            RailSide::Right => "right",
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for RailSide {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        // Unknown / legacy values fall back to the default (left), never error.
+        Ok(match String::deserialize(d)?.as_str() {
+            "right" => RailSide::Right,
+            _ => RailSide::Left,
+        })
+    }
+}
+
 /// `Color32` -> unmultiplied sRGBA bytes, for storage (Color32 isn't Serialize).
 fn color_to_rgba(c: Color32) -> [u8; 4] {
     c.to_srgba_unmultiplied()
@@ -1475,7 +1895,14 @@ fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color32 {
 #[serde(default)]
 struct Settings {
     theme: Theme,
-    base_level: BaseLevel,
+    /// Base opacity 0..=1 (#12/#6). Replaces the old off/faint/strong `base_level`
+    /// segment. An old persisted `base_level` string is migrated in `apply_settings`.
+    base_opacity: f32,
+    /// Legacy off/faint/strong base level, read only for migration from pre-#12
+    /// configs. Never written (new configs persist `base_opacity`), so a fresh
+    /// round-trip always sees `None` here.
+    #[serde(default, skip_serializing)]
+    base_level: Option<String>,
     /// Per-layer base-colour overrides, keyed by layer index (#21).
     base_overrides: Vec<(usize, [u8; 4])>,
     min_area_mm2: f64,
@@ -1493,13 +1920,18 @@ struct Settings {
     visible_layers: Vec<usize>,
     /// Swipe/curtain divider position, normalized 0..1 (#61).
     swipe_frac: f32,
+    /// Which edge the activity rail lives on (Feature 8).
+    rail_side: RailSide,
+    /// The user's hotkey map (#201). Missing in pre-#201 configs → defaults.
+    keymap: Keymap,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
-            base_level: BaseLevel::Faint,
+            base_opacity: BASE_OPACITY_FAINT,
+            base_level: None,
             base_overrides: Vec::new(),
             min_area_mm2: MIN_AREA_MM2,
             col_added: color_to_rgba(C_ADDED),
@@ -1511,6 +1943,8 @@ impl Default for Settings {
             input_preset: InputPreset::default(),
             visible_layers: Vec::new(),
             swipe_frac: 0.5,
+            rail_side: RailSide::default(),
+            keymap: Keymap::default(),
         }
     }
 }
@@ -1570,7 +2004,7 @@ impl ViewApp {
                             self.theme,
                         )
                     };
-                    base_display_color(base, canvas, self.base_level)
+                    base_display_color(base, canvas, self.base_opacity)
                 }
                 Role::Outline => C_OUTLINE_FAINT,
                 Role::Added => self.col_added,
@@ -1595,7 +2029,7 @@ impl ViewApp {
     }
 
     /// Hash of everything that affects the uploaded GPU mesh — geometry/visibility
-    /// (the cache key), selection, base level, theme, and colours — so we re-upload
+    /// (the cache key), selection, base opacity, theme, and colours — so we re-upload
     /// only on a real change, never per pan frame.
     #[cfg(feature = "gpu-transform")]
     fn gpu_input_hash(&self, cache: &TessCache) -> u64 {
@@ -1606,7 +2040,7 @@ impl ViewApp {
         cache.key.base_on.hash(&mut h);
         cache.key.outline_effective.hash(&mut h);
         self.selected.hash(&mut h);
-        (self.base_level as u8).hash(&mut h);
+        self.base_opacity.to_bits().hash(&mut h);
         (self.theme as u8).hash(&mut h);
         self.canvas_color().to_array().hash(&mut h);
         self.col_added.to_array().hash(&mut h);
@@ -1622,7 +2056,8 @@ impl ViewApp {
     fn to_settings(&self) -> Settings {
         Settings {
             theme: self.theme,
-            base_level: self.base_level,
+            base_opacity: self.base_opacity,
+            base_level: None, // legacy field is read-only; new configs store base_opacity
             base_overrides: self
                 .base_overrides
                 .iter()
@@ -1638,6 +2073,8 @@ impl ViewApp {
             input_preset: self.input_preset,
             visible_layers: visible_indices(&self.visible_layers),
             swipe_frac: self.swipe_frac,
+            rail_side: self.rail_side,
+            keymap: self.keymap,
         }
     }
 
@@ -1646,7 +2083,12 @@ impl ViewApp {
     fn apply_settings(&mut self, s: Settings) {
         self.theme = s.theme;
         self.applied_theme = None; // force re-applying the egui visuals next frame
-        self.base_level = s.base_level;
+                                   // Migrate a pre-#12 off/faint/strong string if present; otherwise use the
+                                   // stored continuous opacity (new configs never write the legacy field).
+        self.base_opacity = match s.base_level.as_deref() {
+            Some(level) => legacy_base_opacity(level),
+            None => s.base_opacity.clamp(0.0, 1.0),
+        };
         self.base_overrides = s
             .base_overrides
             .into_iter()
@@ -1671,6 +2113,8 @@ impl ViewApp {
             }
         }
         self.swipe_frac = clamp_swipe_frac(s.swipe_frac);
+        self.rail_side = s.rail_side;
+        self.keymap = s.keymap;
     }
 }
 
@@ -1684,7 +2128,7 @@ impl ViewApp {
         order.sort_by_key(|&i| !diff.layers[i].is_changed());
         let selected = order.first().copied().unwrap_or(0);
         let outline = pick_outline_index(diff.layers.len(), |i| diff.layers[i].kind);
-        let visible_layers = default_visible(diff.layers.len(), selected);
+        let visible_layers = default_visible(diff.layers.len(), selected, outline);
         self.diff = diff;
         self.old_label = old_label;
         self.new_label = new_label;
@@ -1697,6 +2141,7 @@ impl ViewApp {
         self.cache = None;
         self.cam = Camera::default(); // fitted=false → auto-fit next frame
         self.measure_pts.clear();
+        self.measurements.clear(); // world coords are per-board
         self.warning_shown_at = None;
         self.warning_expanded = false;
         self.load_error = None;
@@ -2119,6 +2564,21 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedBoar
 }
 
 impl ViewApp {
+    /// The top-bar brand mark's texture (#191): decode the embedded brand-icon
+    /// PNG and upload it once, on first use; every later frame returns the cached
+    /// handle. The expect is safe — the PNG is compiled in, so a decode failure
+    /// is a build defect, not a runtime condition.
+    fn brand_texture(&mut self, ctx: &egui::Context) -> &egui::TextureHandle {
+        self.brand_tex.get_or_insert_with(|| {
+            let img = image::load_from_memory(BRAND_ICON_PNG)
+                .expect("embedded brand icon PNG decodes")
+                .to_rgba8();
+            let size = [img.width() as usize, img.height() as usize];
+            let pixels = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+            ctx.load_texture("etchy-brand-icon", pixels, egui::TextureOptions::LINEAR)
+        })
+    }
+
     /// Startup splash — the etchy wordmark over the board-dark, held briefly then
     /// faded out to reveal the app. Painted on the foreground layer so it covers
     /// every panel; any pointer press or key skips it, and it's time-based so it
@@ -2180,8 +2640,69 @@ impl eframe::App for ViewApp {
 
         // Keyboard shortcuts. Suppressed while a text field has focus (the numeric
         // noise-filter / grid-spacing DragValue) so typing digits doesn't switch mode
-        // or fire a shortcut. Ctrl+M is modifier-aware (#52, fix #4).
+        // or fire a shortcut (#52, fix #4).
         let typing = ui.ctx().egui_wants_keyboard_input();
+        // Rebind capture (#201): while armed, the next key press (with its
+        // modifiers) becomes the action's binding and Esc cancels. `capturing`
+        // is sampled BEFORE the capture resolves so the captured press never
+        // also fires as a shortcut on the same frame.
+        let capturing = self.capture_action.is_some();
+        // A capture only lives while its editor row is on screen: switching rail
+        // tabs or collapsing the panel/section cancels it, so a stale capture can
+        // never silently eat — and rebind on — the next key press. The flag is set
+        // by last frame's Hotkeys draw (one frame of lag, harmless).
+        let editor_visible = std::mem::take(&mut self.hotkeys_drawn)
+            && self.active_panel == Some(PanelTab::Settings);
+        if capturing && !editor_visible {
+            self.capture_action = None;
+            self.capture_conflict = None;
+        } else if let Some(action) = self.capture_action {
+            // While a text field has focus a keystroke is text, not a binding —
+            // leave the capture armed and let the field keep the input.
+            let captured = if typing {
+                None
+            } else {
+                ui.input(|i| {
+                    i.events.iter().find_map(|e| match e {
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } => Some(capture_key(
+                            *key,
+                            modifiers.command,
+                            modifiers.shift,
+                            modifiers.alt,
+                        )),
+                        _ => None,
+                    })
+                })
+            };
+            match captured {
+                Some(CaptureResult::Bind(b)) => {
+                    // Refuse a binding something else already owns — one key
+                    // press must never dispatch two actions.
+                    if let Some(owner) =
+                        binding_conflict(&self.keymap, action, b, self.input_preset)
+                    {
+                        self.capture_conflict =
+                            Some(format!("{} is taken by {owner}", format_binding(b)));
+                    } else {
+                        self.keymap.set(action, b);
+                        self.capture_action = None;
+                        self.capture_conflict = None;
+                    }
+                }
+                Some(CaptureResult::Cancel) => {
+                    self.capture_action = None;
+                    self.capture_conflict = None;
+                }
+                None => {}
+            }
+        }
+        let suppressed = typing || capturing;
+        let km = self.keymap;
         let (
             toggle_base,
             fit,
@@ -2192,62 +2713,107 @@ impl eframe::App for ViewApp {
             mode_swipe,
             next,
             prev,
-            toggle_outline,
             escape,
             cycle_unit,
             toggle_grid,
             toggle_measure,
+            shift_c,
+            custom_clear,
         ) = ui.input(|i| {
             use egui::Key;
-            if typing {
+            if suppressed {
                 return (
                     false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false,
+                    false, false, false, false,
                 );
             }
+            // A rebindable action fires on its keymap binding (#201) — the key
+            // plus its exact modifier set, `ctrl` matching egui's `command`
+            // (Ctrl, or Cmd on mac).
+            let b = |kb: KeyBinding| {
+                i.key_pressed(kb.key)
+                    && i.modifiers.command == kb.ctrl
+                    && i.modifiers.shift == kb.shift
+                    && i.modifiers.alt == kb.alt
+            };
             (
-                i.key_pressed(Key::S),
-                i.key_pressed(Key::F),
-                // Mode hotkeys (#55, #61): 1=Overlay 2=Old 3=New 4=Split 5=Swipe,
-                // + aliases O/B/A (B/A kept as legacy Old/New mnemonics).
-                i.key_pressed(Key::Num1) || i.key_pressed(Key::O),
-                i.key_pressed(Key::Num2) || i.key_pressed(Key::B),
-                i.key_pressed(Key::Num3) || i.key_pressed(Key::A),
-                i.key_pressed(Key::Num4),
-                i.key_pressed(Key::Num5),
-                i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J),
-                i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K),
-                i.key_pressed(Key::E),
+                b(km.cycle_base),
+                b(km.fit_view),
+                // Mode hotkeys (#55, #61): 1=Overlay 2=Old 3=New 4=Split 5=Swipe
+                // via the keymap, + fixed aliases O/B/A (B/A kept as legacy
+                // Old/New mnemonics). Aliases require a BARE key press — like
+                // the keymap's exact-modifier match — so a rebound combo that
+                // happens to contain one of these letters can't double-fire.
+                b(km.mode_overlay) || (i.key_pressed(Key::O) && i.modifiers.is_none()),
+                b(km.mode_old) || (i.key_pressed(Key::B) && i.modifiers.is_none()),
+                b(km.mode_new) || (i.key_pressed(Key::A) && i.modifiers.is_none()),
+                b(km.mode_split),
+                b(km.mode_swipe),
+                (i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J)) && i.modifiers.is_none(),
+                (i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K)) && i.modifiers.is_none(),
                 i.key_pressed(Key::Escape),
-                i.key_pressed(Key::U),
-                i.key_pressed(Key::G),
-                i.modifiers.ctrl && i.key_pressed(Key::M),
+                b(km.cycle_unit),
+                b(km.toggle_grid),
+                // Default Ctrl+M (Cmd on mac) arms/disarms the measure tool
+                // (#197); rebindable via Settings > Hotkeys (#201).
+                b(km.toggle_measure),
+                // Shift+C: clear-measurements under the Altium preset (#198);
+                // stands down once a custom clear binding exists (#201). Exact
+                // Shift-only match — Ctrl/Alt+Shift+C must NOT clear the list.
+                i.key_pressed(Key::C)
+                    && i.modifiers.shift
+                    && !i.modifiers.command
+                    && !i.modifiers.alt,
+                // An explicit Clear-measurements rebind (#201).
+                km.clear_measure.is_some_and(b),
             )
         });
         if toggle_measure {
-            // Ctrl+M toggles measure mode (#52, fix #4), mirroring the button.
+            // Ctrl+M arms/disarms measure mode (#50/#197), mirroring the rail
+            // Measure icon. Suppressed while typing via the `typing` guard.
             self.measure_mode = !self.measure_mode;
             if !self.measure_mode {
                 self.measure_pts.clear();
             }
         }
-        if escape {
-            if self.show_settings {
-                // Esc backs out of the Settings window (#4). An open colour-picker
-                // popup consumes the first Esc itself (egui closes it; while its RGB
-                // field has focus our `typing` guard suppresses this handler), so the
-                // next Esc lands here and closes the window.
-                self.show_settings = false;
-            } else {
-                // Esc cascades (#50): first clear the in-progress measurement, then a
-                // second Esc (nothing to clear) turns the measure tool off.
-                let (next_mode, clear) =
-                    measure_escape(self.measure_mode, !self.measure_pts.is_empty());
-                if clear {
-                    self.measure_pts.clear();
-                }
-                self.measure_mode = next_mode;
+        // An Esc aimed at an open menu/popup (egui doesn't consume it) must not
+        // also fall through to the measure cascade — under the KiCad preset it
+        // would silently wipe the completed measurements list.
+        if escape && !ui.ctx().any_popup_open() {
+            // Esc cascades (#50/#198): clear the in-progress point first; under
+            // the KiCad preset the next Esc clears the completed list (unless a
+            // custom clear binding stands it down, #201); an Esc with nothing
+            // left to clear turns the measure tool off.
+            match measure_key_action(
+                self.input_preset,
+                MeasureKey::Escape,
+                self.measure_mode,
+                !self.measure_pts.is_empty(),
+                !self.measurements.is_empty(),
+                km.clear_measure.is_some(),
+            ) {
+                MeasureAction::ClearPoints => self.measure_pts.clear(),
+                MeasureAction::ClearList => self.measurements.clear(),
+                MeasureAction::ExitTool => self.measure_mode = false,
+                MeasureAction::None => {}
             }
+        }
+        if shift_c
+            && measure_key_action(
+                self.input_preset,
+                MeasureKey::ShiftC,
+                self.measure_mode,
+                !self.measure_pts.is_empty(),
+                !self.measurements.is_empty(),
+                km.clear_measure.is_some(),
+            ) == MeasureAction::ClearList
+        {
+            self.measurements.clear();
+        }
+        if custom_clear {
+            // The user's own Clear-measurements binding (#201) — it replaces the
+            // preset defaults entirely.
+            self.measurements.clear();
         }
         if cycle_unit {
             self.measure_unit = self.measure_unit.next();
@@ -2256,10 +2822,9 @@ impl eframe::App for ViewApp {
             self.show_grid = !self.show_grid;
         }
         if toggle_base {
-            self.base_level = cycle_base(self.base_level);
-        }
-        if toggle_outline {
-            self.show_outline = !self.show_outline;
+            // S still steps the three familiar off/faint/strong stops (#12/#6); the
+            // Layers-panel slider handles fine-grained values.
+            self.base_opacity = cycle_base_opacity(self.base_opacity);
         }
         if fit {
             self.cam.fitted = false;
@@ -2292,16 +2857,16 @@ impl eframe::App for ViewApp {
             self.applied_theme = Some(self.theme);
         }
         egui::Panel::top("top").show_inside(ui, |ui| {
-            // Title row: a single "etchy" wordmark (one lockup, matching the web),
-            // the revisions, and the headline totals.
+            // Title row: the etchy brand icon (#191, the real mark from
+            // assets/brand — replaces the painter-drawn box-E monogram), the
+            // revisions, and the headline totals.
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("etchy")
-                        .size(24.0)
-                        .strong()
-                        .color(C_COPPER),
-                );
+                let brand_id = self.brand_texture(ui.ctx()).id();
+                ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                    brand_id,
+                    egui::vec2(BRAND_ICON_PT, BRAND_ICON_PT),
+                )));
                 ui.add_space(8.0);
                 ui.label(
                     // ASCII "->" — egui's default font has no arrow glyph (→ renders
@@ -2333,27 +2898,24 @@ impl eframe::App for ViewApp {
                 });
             });
             ui.add_space(4.0);
-            // Controls row (#57): ONE non-wrapping row. Left = segmented mode + base
-            // pickers (never collapse); right = the action cluster, which folds into a
-            // "More" menu when the window is narrow; the flexible middle carries the
-            // warnings chip + transient export status. The bar never wraps — it
+            // Controls row (#57): ONE non-wrapping row. Left = the segmented mode
+            // picker (never collapses); right = the reduced action cluster — Open ·
+            // Fit · Help — which folds into a "More" menu when the window is narrow;
+            // the flexible middle carries the warnings chip. The bar never wraps — it
             // collapses by width tier instead (replaces the old wrapped row, #5/#57).
-            // Moved OUT of the bar: noise filter → Settings > Diff (#154), board edge →
-            // Layers panel (#157), Open A/B → the Open menu (#160), GPU checkbox
-            // (already in Settings > Display).
-            // The top bar spans the full window width (laid out above the left panel),
-            // so the window width is the reliable tier measure — available_width inside
-            // the nested layout doesn't reflect the true bar width.
+            // Moved OUT of the bar: base opacity → Layers panel slider (#12/#6), noise
+            // filter → Settings > Diff (#154), board edge → Layers panel (#157), Open
+            // A/B → the Open menu (#160), GPU checkbox (Settings > Display), and — this
+            // slice (#57) — Measure → rail Measure tab, Export → rail Export tab,
+            // Settings → the rail cog. The top bar spans the full window width (laid
+            // out above the left panel), so the window width is the reliable tier
+            // measure — available_width inside the nested layout doesn't reflect the
+            // true bar width.
             let avail = ui.ctx().content_rect().width();
-            let show_base_label = avail >= TIER_LABELS_PX;
             let collapse_actions = avail < TIER_MORE_PX;
             let now = ui.ctx().input(|i| i.time);
             // Action intents, set in the (self-borrowing) closures and acted on after.
             let mut fit = false;
-            let mut exp_current = false;
-            let mut exp_all = false;
-            let mut toggle_measure = false;
-            let mut toggle_settings = false;
             let mut open_side: Option<RevSide> = None;
             ui.horizontal(|ui| {
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 8.0);
@@ -2370,137 +2932,68 @@ impl eframe::App for ViewApp {
                         (Mode::Swipe, "Swipe"),
                     ],
                 );
-                if show_base_label {
-                    ui.label(egui::RichText::new("base").weak());
-                }
-                segmented(
-                    ui,
-                    &mut self.base_level,
-                    &[
-                        (BaseLevel::Off, "off"),
-                        (BaseLevel::Faint, "faint"),
-                        (BaseLevel::Strong, "strong"),
-                    ],
-                );
                 // Right-aligned action cluster. RTL adds in reverse, so the visual
-                // order is Open · Fit · Measure · Export · Settings · Help.
+                // order is Open · Fit · Help. Measure/Export/Settings moved to the rail
+                // (Measure tab, Export tab, Settings cog — #57).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The cluster shares the mode picker's segmented chrome (#200):
+                    // one outlined group, flat segments inside. `segmented_frame`
+                    // lays out left-to-right, so the order is written visually.
                     if collapse_actions {
-                        ui.menu_button("More", |ui| {
-                            if ui.button("Open old revision…").clicked() {
-                                open_side = Some(RevSide::Old);
-                                ui.close();
-                            }
-                            if ui.button("Open new revision…").clicked() {
-                                open_side = Some(RevSide::New);
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Fit view").clicked() {
+                        segmented_frame(ui, |ui| {
+                            ui.menu_button("More", |ui| {
+                                if ui.button("Open old revision…").clicked() {
+                                    open_side = Some(RevSide::Old);
+                                    ui.close();
+                                }
+                                if ui.button("Open new revision…").clicked() {
+                                    open_side = Some(RevSide::New);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button("Fit view").clicked() {
+                                    fit = true;
+                                    ui.close();
+                                }
+                                ui.menu_button("Help", help_links);
+                            });
+                        });
+                    } else {
+                        segmented_frame(ui, |ui| {
+                            ui.menu_button("Open", |ui| {
+                                if ui.button("Old revision…").clicked() {
+                                    open_side = Some(RevSide::Old);
+                                    ui.close();
+                                }
+                                if ui.button("New revision…").clicked() {
+                                    open_side = Some(RevSide::New);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new(
+                                        "…or drag a folder / .zip onto the window\n\
+                                         (if the file dialog doesn't open)",
+                                    )
+                                    .weak()
+                                    .small(),
+                                );
+                            });
+                            if ui.button("Fit").clicked() {
                                 fit = true;
-                                ui.close();
-                            }
-                            if ui.selectable_label(self.measure_mode, "Measure").clicked() {
-                                toggle_measure = true;
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Export current layer").clicked() {
-                                exp_current = true;
-                                ui.close();
-                            }
-                            if ui.button("Export all changed layers").clicked() {
-                                exp_all = true;
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Settings").clicked() {
-                                toggle_settings = true;
-                                ui.close();
                             }
                             ui.menu_button("Help", help_links);
                         });
-                    } else {
-                        ui.menu_button("Help", help_links);
-                        if ui
-                            .selectable_label(self.show_settings, "Settings")
-                            .clicked()
-                        {
-                            toggle_settings = true;
-                        }
-                        ui.menu_button("Export", |ui| {
-                            if ui.button("Current layer").clicked() {
-                                exp_current = true;
-                                ui.close();
-                            }
-                            if ui.button("All changed layers").clicked() {
-                                exp_all = true;
-                                ui.close();
-                            }
-                            ui.separator();
-                            ui.label("SVG per layer + areas.csv (copper mm²).");
-                        });
-                        if ui
-                            .selectable_label(self.measure_mode, "Measure")
-                            .on_hover_text(
-                                "Click two points on the canvas to measure the distance. \
-                                 The result stays drawn (Esc clears it but keeps measuring). \
-                                 Toggle off to exit + clear.",
-                            )
-                            .clicked()
-                        {
-                            toggle_measure = true;
-                        }
-                        if ui.button("Fit").clicked() {
-                            fit = true;
-                        }
-                        ui.menu_button("Open", |ui| {
-                            if ui.button("Old revision…").clicked() {
-                                open_side = Some(RevSide::Old);
-                                ui.close();
-                            }
-                            if ui.button("New revision…").clicked() {
-                                open_side = Some(RevSide::New);
-                                ui.close();
-                            }
-                            ui.separator();
-                            ui.label(
-                                egui::RichText::new(
-                                    "…or drag a folder / .zip onto the window\n\
-                                     (if the file dialog doesn't open)",
-                                )
-                                .weak()
-                                .small(),
-                            );
-                        });
                     }
-                    // Flexible middle (left of the actions in RTL): transient export
-                    // status + the warnings chip (stays in-row, never reflows the
-                    // canvas — #49).
-                    if let Some(msg) = &self.export_msg {
-                        ui.label(egui::RichText::new(msg).weak().small());
-                    }
+                    // Flexible middle (left of the actions in RTL): the warnings chip
+                    // (stays in-row, never reflows the canvas — #49). Export status now
+                    // shows in the rail Export panel.
                     self.warnings_ui(ui, now);
                 });
             });
             // Act on the collected intents (outside the closures that borrow self).
             if fit {
                 self.cam.fitted = false;
-            }
-            if exp_current {
-                self.do_export(false);
-            }
-            if exp_all {
-                self.do_export(true);
-            }
-            if toggle_measure {
-                self.measure_mode = !self.measure_mode;
-                if !self.measure_mode {
-                    self.measure_pts.clear();
-                }
-            }
-            if toggle_settings {
-                self.show_settings = !self.show_settings;
             }
             if let Some(side) = open_side {
                 self.open_primary(side, ui.ctx());
@@ -2522,309 +3015,99 @@ impl eframe::App for ViewApp {
             });
         }
 
-        egui::Panel::left("layers")
-            .resizable(true)
-            .default_size(260.0)
+        // Activity rail (Feature 1): a slim VS Code-style strip on `rail_side`
+        // (Feature 8) — one icon per side panel top-down, the Settings cog pinned
+        // at the bottom. The brand mark lives in the top bar only (#190/#191).
+        // Replaces the always-open left Layers panel; the Layers body moved
+        // verbatim into `layers_panel_ui`, so this slice is layout-only.
+        let rail = match self.rail_side {
+            RailSide::Left => egui::Panel::left("rail"),
+            RailSide::Right => egui::Panel::right("rail"),
+        };
+        rail.exact_size(48.0)
+            .resizable(false)
             .show_inside(ui, |ui| {
-                ui.heading("Layers");
-                // Quick visibility actions (#58): show/hide every layer, or only the
-                // changed ones. They never move the selection or camera.
-                ui.horizontal(|ui| {
-                    if ui.small_button("Show all").clicked() {
-                        for v in self.visible_layers.iter_mut() {
-                            *v = true;
-                        }
-                    }
-                    if ui.small_button("Hide all").clicked() {
-                        // Hide-all clears EVERY layer (#2) — including the selected
-                        // one. (Split/Swipe still force the active layer visible in
-                        // those modes so their view is never blank.)
-                        for v in self.visible_layers.iter_mut() {
-                            *v = false;
-                        }
-                    }
-                    // "Show changed" button hidden per feedback #8 — the capability
-                    // stays in `visible_from_changed` (still unit-tested) so it can be
-                    // re-surfaced later, but the button is removed from the row.
-                });
-                // View mode (#59): a quick preset over the per-layer checkboxes —
-                // single active layer / highlight active over dimmed rest / all equal.
-                // Selecting one resets visibility to the preset; per-row checkboxes
-                // still fine-tune afterwards.
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("view").weak().small());
-                    ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
-                    ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
-                    for (mode, label) in ViewMode::ALL {
-                        if ui.selectable_label(self.view_mode == mode, label).clicked() {
-                            self.view_mode = mode;
-                            self.visible_layers =
-                                visibility_for_mode(mode, self.diff.layers.len(), self.selected);
-                        }
-                    }
-                });
-                ui.separator();
-                // Actions deferred so the per-frame group iteration doesn't borrow
-                // self mutably while it's borrowed for the group list.
-                let mut select: Option<usize> = None;
-                let mut toggle: Option<(usize, bool)> = None; // (layer, show)
-                let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
-                let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
-                let mut toggle_outline = false; // board-edge visibility (#157)
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Board edge is its own reference "layer" (#157): a row in the list
-                    // with the others (an eye toggle like every layer row), not a
-                    // separate control. It's a faint outline drawn on every layer.
-                    if self.outline.is_some() {
+                // Settings cog pinned to the bottom of the rail. It drives the
+                // same docked panel as the tabs above (#199): click opens the
+                // Settings panel, click again collapses it.
+                egui::Panel::bottom("rail_settings")
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| {
                         ui.add_space(4.0);
-                        ui.label(egui::RichText::new("Reference").small().color(C_COPPER));
-                        ui.horizontal(|ui| {
-                            if eye_toggle(ui, self.show_outline)
-                                .on_hover_text("Show / hide the board outline reference")
+                        ui.vertical_centered(|ui| {
+                            if rail_button(
+                                ui,
+                                self.active_panel == Some(PanelTab::Settings),
+                                draw_cog_icon,
+                            )
+                            .on_hover_text("Settings")
+                            .clicked()
+                            {
+                                self.active_panel =
+                                    toggle_panel(self.active_panel, PanelTab::Settings);
+                            }
+                        });
+                        ui.add_space(4.0);
+                    });
+                // Panel tabs fill the rest, top-down (no monogram — #190).
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+                        for tab in PanelTab::ALL {
+                            let active = self.active_panel == Some(tab);
+                            let hover = if tab == PanelTab::Measure {
+                                format!(
+                                    "Measure — arms the tool and opens the panel ({})",
+                                    format_binding(self.keymap.toggle_measure)
+                                )
+                            } else {
+                                tab.label().to_string()
+                            };
+                            if rail_button(ui, active, |p, r, c| draw_panel_icon(tab, p, r, c))
+                                .on_hover_text(hover)
                                 .clicked()
                             {
-                                toggle_outline = true;
-                            }
-                            let (sw, _) = ui
-                                .allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-                            ui.painter().rect_stroke(
-                                sw,
-                                2.0,
-                                Stroke::new(1.5, C_COPPER),
-                                egui::StrokeKind::Inside,
-                            );
-                            ui.label("board edge").on_hover_text(
-                                "The board outline (Edge.Cuts/GKO), drawn faint on every layer.",
-                            );
-                        });
-                    }
-                    // Group into sections (copper / mask / silk / …) in fixed order,
-                    // changed-first within each (G5).
-                    let groups =
-                        group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
-                    for (group, idxs) in groups {
-                        ui.add_space(4.0);
-                        // Group header (#36 collapse + #58 show/hide-all): a
-                        // CollapsingState lets the header carry BOTH the disclosure
-                        // triangle (rotates down=open / right=collapsed) AND a group
-                        // show/hide-all checkbox; the body holds the layer rows. egui
-                        // (with eframe persistence) remembers each group's open state.
-                        let gid = ui.make_persistent_id(("layer-group", group.title()));
-                        let state =
-                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                ui.ctx(),
-                                gid,
-                                true,
-                            );
-                        state
-                            .show_header(ui, |ui| {
-                                // Show/hide every layer in the group (#58), same eye
-                                // toggle as the rows (#4). Separate from collapsing,
-                                // which only hides the list rows.
-                                let all = group_all_visible(&self.visible_layers, &idxs);
-                                if eye_toggle(ui, all)
-                                    .on_hover_text("Show / hide every layer in this group")
-                                    .clicked()
-                                {
-                                    group_set = Some((idxs.clone(), !all));
-                                }
-                                ui.label(
-                                    egui::RichText::new(group.title())
-                                        .small()
-                                        .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
-                                );
-                            })
-                            // Indent the rows under the header (#1) so the group name
-                            // reads as the parent, left of its layers.
-                            .body(|ui| {
-                                for idx in &idxs {
-                                    let idx = *idx;
-                                    let l = &self.diff.layers[idx];
-                                    // Row: a per-layer visibility checkbox, a small
-                                    // colour swatch (painted rect, not a font glyph —
-                                    // the default font lacks ● and renders tofu,
-                                    // #16), the layer name, then a compact change
-                                    // micro-label (#25).
-                                    let kind = l.kind;
-                                    let changed = l.is_changed();
-                                    let added = l.change.added_area_mm2();
-                                    let removed = l.change.removed_area_mm2();
-                                    let name = short_layer_name(kind);
-                                    let visible =
-                                        self.visible_layers.get(idx).copied().unwrap_or(false);
-                                    let swatch = resolve_base_color(
-                                        idx,
-                                        kind,
-                                        &self.base_overrides,
-                                        self.theme,
-                                    );
-                                    let resp = ui
-                                        .horizontal(|ui| {
-                                            // Per-layer visibility: an Altium-style
-                                            // eye toggle, separate from the
-                                            // click-to-select label (#4/#58).
-                                            if eye_toggle(ui, visible)
-                                                .on_hover_text("Show / hide this layer")
-                                                .clicked()
-                                            {
-                                                toggle = Some((idx, !visible));
-                                            }
-                                            // Clickable colour swatch (#3): opens this
-                                            // layer's colour picker; a change records a
-                                            // per-layer base override (applied below).
-                                            let mut sw = swatch;
-                                            if ui
-                                                .color_edit_button_srgba(&mut sw)
-                                                .on_hover_text("Layer colour — click to change")
-                                                .changed()
-                                            {
-                                                set_color = Some((idx, sw));
-                                            }
-                                            // Visible layers read brighter; hidden grey.
-                                            let label = match (visible, changed) {
-                                                (true, true) => egui::RichText::new(&name).strong(),
-                                                (true, false) => egui::RichText::new(&name),
-                                                (false, _) => egui::RichText::new(&name)
-                                                    .weak()
-                                                    .color(Color32::GRAY),
-                                            };
-                                            let r =
-                                                ui.selectable_label(idx == self.selected, label);
-                                            // Compact %-change micro-label on changed
-                                            // layers (#114): the changed area as a
-                                            // share of the layer's new-revision area.
-                                            // The mm² deltas move into the hover text so
-                                            // the row stays scannable. If the layer is
-                                            // gone in the new rev (area 0), fall back to
-                                            // the raw deltas.
-                                            if changed {
-                                                let area = self
-                                                    .new_area_mm2
-                                                    .get(idx)
-                                                    .copied()
-                                                    .unwrap_or(0.0);
-                                                let txt = if area > 0.0 {
-                                                    format!(
-                                                        "Δ {:.1}%",
-                                                        (added + removed) / area * 100.0
-                                                    )
-                                                } else {
-                                                    format!("+{added:.3} −{removed:.3}")
-                                                };
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(
-                                                        egui::Align::Center,
-                                                    ),
-                                                    |ui| {
-                                                        // Δ% in copper so the change
-                                                        // magnitude reads at a glance (#20).
-                                                        ui.label(
-                                                            egui::RichText::new(txt)
-                                                                .small()
-                                                                .color(C_COPPER),
-                                                        )
-                                                        .on_hover_text(format!(
-                                                            "+{added:.4} mm² added · \
-                                                             −{removed:.4} mm² removed · \
-                                                             layer area {area:.3} mm²"
-                                                        ));
-                                                    },
-                                                );
-                                            }
-                                            r
-                                        })
-                                        .inner;
-                                    if resp.clicked() {
-                                        select = Some(idx);
+                                if tab == PanelTab::Measure {
+                                    // The Measure icon both arms the tool and opens
+                                    // the panel; re-clicking disarms + collapses. It
+                                    // arms even while the panel is collapsed (#50).
+                                    let (next, armed) = measure_rail_click(self.active_panel);
+                                    self.active_panel = next;
+                                    self.measure_mode = armed;
+                                    if !armed {
+                                        self.measure_pts.clear();
                                     }
+                                } else {
+                                    self.active_panel = toggle_panel(self.active_panel, tab);
                                 }
-                            });
-                    }
+                            }
+                            ui.add_space(2.0);
+                        }
+                    });
                 });
-                // Apply deferred actions.
-                if let Some((idxs, show)) = group_set {
-                    set_group_visibility(&mut self.visible_layers, &idxs, show);
-                }
-                if let Some((idx, show)) = toggle {
-                    if let Some(v) = self.visible_layers.get_mut(idx) {
-                        *v = show;
-                    }
-                }
-                if let Some(idx) = select {
-                    self.select(idx);
-                }
-                // Per-layer colour override from the inline swatch picker (#3).
-                if let Some((idx, c)) = set_color {
-                    if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx) {
-                        e.1 = c;
-                    } else {
-                        self.base_overrides.push((idx, c));
-                    }
-                }
-                if toggle_outline {
-                    self.show_outline = !self.show_outline;
-                }
             });
+
+        // The docked panel the rail drives; shown only when a tab is active
+        // (`None` = collapsed, canvas full width), on the same edge as the rail.
+        if let Some(tab) = self.active_panel {
+            let panel = match self.rail_side {
+                RailSide::Left => egui::Panel::left("panel"),
+                RailSide::Right => egui::Panel::right("panel"),
+            };
+            panel
+                .resizable(true)
+                .default_size(260.0)
+                .show_inside(ui, |ui| match tab {
+                    PanelTab::Layers => self.layers_panel_ui(ui),
+                    PanelTab::Measure => self.measure_panel_ui(ui),
+                    PanelTab::Export => self.export_panel_ui(ui),
+                    PanelTab::Settings => self.settings_panel_ui(ui),
+                });
+        }
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.draw_canvas(ui);
         });
-
-        // Settings editor — a real Window (not a menu) so the nested colour-picker
-        // popup works; a menu_button closed on the first click inside it.
-        if self.show_settings {
-            let mut open = true;
-            // Open centered on the screen (#56): pin the first-frame position to the
-            // viewport centre via a CENTER_CENTER pivot. egui remembers the dragged
-            // position afterwards, so it stays movable.
-            let center = ui.ctx().content_rect().center();
-            egui::Window::new("Settings")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .default_pos(center)
-                .pivot(egui::Align2::CENTER_CENTER)
-                .show(ui.ctx(), |ui| {
-                    // Copper selection accent for this window (#121): selected rail
-                    // entry, theme/units/preset toggles read brand-copper, not the
-                    // default blue.
-                    ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
-                    ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, C_COPPER);
-                    ui.set_min_width(432.0);
-                    ui.horizontal_top(|ui| {
-                        // Left rail: one section at a time, so the long per-layer list
-                        // no longer buries Display/Grid/Input/Colours.
-                        ui.vertical(|ui| {
-                            ui.set_width(96.0);
-                            for (tab, label) in SettingsTab::ALL {
-                                let on = self.settings_tab == tab;
-                                let text = if on {
-                                    egui::RichText::new(label).color(C_COPPER).strong()
-                                } else {
-                                    egui::RichText::new(label)
-                                };
-                                if ui.selectable_label(on, text).clicked() {
-                                    self.settings_tab = tab;
-                                }
-                            }
-                        });
-                        ui.separator();
-                        // Content pane.
-                        ui.vertical(|ui| {
-                            ui.set_min_width(312.0);
-                            match self.settings_tab {
-                                SettingsTab::Display => self.settings_display(ui),
-                                SettingsTab::Diff => self.settings_diff(ui),
-                                SettingsTab::Grid => self.settings_grid(ui),
-                                SettingsTab::Input => self.settings_input(ui),
-                                SettingsTab::Colours => self.settings_colours(ui),
-                                SettingsTab::Layers => self.settings_layers(ui),
-                            }
-                        });
-                    });
-                });
-            self.show_settings = open;
-        }
 
         // Publish "what they're looking at" for the web feedback widget.
         let layer_name = self.diff.layers[self.selected].name().to_string();
@@ -2858,6 +3141,446 @@ impl eframe::App for ViewApp {
 }
 
 impl ViewApp {
+    /// The Layers panel body (Feature 1): moved out of `fn ui` so the rail slice stays
+    /// layout-only. Holds all layer behaviour — eye toggles, groups, view modes, Δ%,
+    /// per-layer colour. The board outline is a normal layer row here now (#157).
+    fn layers_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Layers");
+        // Quick visibility actions (#58): show/hide every layer, or only the
+        // changed ones. They never move the selection or camera.
+        ui.horizontal(|ui| {
+            if ui.small_button("Show all").clicked() {
+                for v in self.visible_layers.iter_mut() {
+                    *v = true;
+                }
+            }
+            if ui.small_button("Hide all").clicked() {
+                // Hide-all clears EVERY layer (#2) — including the selected
+                // one. (Split/Swipe still force the active layer visible in
+                // those modes so their view is never blank.)
+                for v in self.visible_layers.iter_mut() {
+                    *v = false;
+                }
+            }
+            // "Show changed" button hidden per feedback #8 — the capability
+            // stays in `visible_from_changed` (still unit-tested) so it can be
+            // re-surfaced later, but the button is removed from the row.
+        });
+        // View mode (#59): a quick preset over the per-layer checkboxes —
+        // single active layer / highlight active over dimmed rest / all equal.
+        // Selecting one resets visibility to the preset; per-row checkboxes
+        // still fine-tune afterwards.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("view").weak().small());
+            ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
+            ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
+            for (mode, label) in ViewMode::ALL {
+                if ui.selectable_label(self.view_mode == mode, label).clicked() {
+                    self.view_mode = mode;
+                    self.visible_layers = visibility_for_mode(
+                        mode,
+                        self.diff.layers.len(),
+                        self.selected,
+                        self.outline,
+                    );
+                }
+            }
+        });
+        // Base opacity (#12/#6): the unchanged base copper's strength, moved here
+        // from the top bar and made continuous. 0 hides the base; the old off/faint/
+        // strong stops are 0%/40%/80%. `S` still steps those three stops.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("base").weak().small());
+            ui.add(
+                egui::Slider::new(&mut self.base_opacity, 0.0..=1.0)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    // Parse the "%"-formatted text back so click-to-type round-trips
+                    // (without a matching parser egui's default numeric parse rejects
+                    // the "%" suffix and the typed value is silently dropped).
+                    .custom_parser(|s| {
+                        s.trim()
+                            .trim_end_matches('%')
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .map(|p| p / 100.0)
+                    }),
+            )
+            .on_hover_text("Opacity of the unchanged base copper behind the diff (0 hides it).");
+        });
+        ui.separator();
+        // Actions deferred so the per-frame group iteration doesn't borrow
+        // self mutably while it's borrowed for the group list.
+        let mut select: Option<usize> = None;
+        let mut toggle: Option<(usize, bool)> = None; // (layer, show)
+        let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
+        let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // The board outline is a normal layer row now (#157) — it lives under
+            // Mechanical > outline with an ordinary eye toggle, no separate "board
+            // edge" reference control. Its visibility drives the faint orientation
+            // outline drawn on every layer (see draw_canvas / build_cache).
+            // Group into sections (copper / mask / silk / …) in fixed order,
+            // changed-first within each (G5).
+            let groups = group_layers(&self.order, |i| layer_group(self.diff.layers[i].kind));
+            for (group, idxs) in groups {
+                ui.add_space(4.0);
+                // Group header (#36 collapse + #58 show/hide-all): a
+                // CollapsingState lets the header carry BOTH the disclosure
+                // triangle (rotates down=open / right=collapsed) AND a group
+                // show/hide-all checkbox; the body holds the layer rows. egui
+                // (with eframe persistence) remembers each group's open state.
+                let gid = ui.make_persistent_id(("layer-group", group.title()));
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    gid,
+                    true,
+                );
+                state
+                    .show_header(ui, |ui| {
+                        // Show/hide every layer in the group (#58), same eye
+                        // toggle as the rows (#4). Separate from collapsing,
+                        // which only hides the list rows.
+                        let all = group_all_visible(&self.visible_layers, &idxs);
+                        if eye_toggle(ui, all)
+                            .on_hover_text("Show / hide every layer in this group")
+                            .clicked()
+                        {
+                            group_set = Some((idxs.clone(), !all));
+                        }
+                        ui.label(
+                            egui::RichText::new(group.title())
+                                .small()
+                                .color(Color32::from_rgb(0xe8, 0xa3, 0x3d)),
+                        );
+                    })
+                    // Indent the rows under the header (#1) so the group name
+                    // reads as the parent, left of its layers.
+                    .body(|ui| {
+                        for idx in &idxs {
+                            let idx = *idx;
+                            let l = &self.diff.layers[idx];
+                            // Row: a per-layer visibility checkbox, a small
+                            // colour swatch (painted rect, not a font glyph —
+                            // the default font lacks ● and renders tofu,
+                            // #16), the layer name, then a compact change
+                            // micro-label (#25).
+                            let kind = l.kind;
+                            let changed = l.is_changed();
+                            let added = l.change.added_area_mm2();
+                            let removed = l.change.removed_area_mm2();
+                            let name = short_layer_name(kind);
+                            let visible = self.visible_layers.get(idx).copied().unwrap_or(false);
+                            let swatch =
+                                resolve_base_color(idx, kind, &self.base_overrides, self.theme);
+                            let resp = ui
+                                .horizontal(|ui| {
+                                    // Per-layer visibility: an Altium-style
+                                    // eye toggle, separate from the
+                                    // click-to-select label (#4/#58).
+                                    if eye_toggle(ui, visible)
+                                        .on_hover_text("Show / hide this layer")
+                                        .clicked()
+                                    {
+                                        toggle = Some((idx, !visible));
+                                    }
+                                    // Clickable colour swatch (#3): opens this
+                                    // layer's colour picker; a change records a
+                                    // per-layer base override (applied below).
+                                    let mut sw = swatch;
+                                    if square_color_swatch(ui, &mut sw)
+                                        .on_hover_text("Layer colour — click to change")
+                                        .changed()
+                                    {
+                                        set_color = Some((idx, sw));
+                                    }
+                                    // Visible layers read brighter; hidden grey.
+                                    let label = match (visible, changed) {
+                                        (true, true) => egui::RichText::new(&name).strong(),
+                                        (true, false) => egui::RichText::new(&name),
+                                        (false, _) => {
+                                            egui::RichText::new(&name).weak().color(Color32::GRAY)
+                                        }
+                                    };
+                                    let r = ui.selectable_label(idx == self.selected, label);
+                                    // Compact %-change micro-label on changed
+                                    // layers (#114): the changed area as a
+                                    // share of the layer's new-revision area.
+                                    // The mm² deltas move into the hover text so
+                                    // the row stays scannable. If the layer is
+                                    // gone in the new rev (area 0), fall back to
+                                    // the raw deltas.
+                                    if changed {
+                                        let area =
+                                            self.new_area_mm2.get(idx).copied().unwrap_or(0.0);
+                                        let txt = if area > 0.0 {
+                                            format!("Δ {:.1}%", (added + removed) / area * 100.0)
+                                        } else {
+                                            format!("+{added:.3} −{removed:.3}")
+                                        };
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                // Δ% in copper so the change
+                                                // magnitude reads at a glance (#20).
+                                                ui.label(
+                                                    egui::RichText::new(txt)
+                                                        .small()
+                                                        .color(C_COPPER),
+                                                )
+                                                .on_hover_text(format!(
+                                                    "+{added:.4} mm² added · \
+                                                             −{removed:.4} mm² removed · \
+                                                             layer area {area:.3} mm²"
+                                                ));
+                                            },
+                                        );
+                                    }
+                                    r
+                                })
+                                .inner;
+                            if resp.clicked() {
+                                select = Some(idx);
+                            }
+                        }
+                    });
+            }
+        });
+        // Apply deferred actions.
+        if let Some((idxs, show)) = group_set {
+            set_group_visibility(&mut self.visible_layers, &idxs, show);
+        }
+        if let Some((idx, show)) = toggle {
+            if let Some(v) = self.visible_layers.get_mut(idx) {
+                *v = show;
+            }
+        }
+        if let Some(idx) = select {
+            self.select(idx);
+        }
+        // Per-layer colour override from the inline swatch picker (#3).
+        if let Some((idx, c)) = set_color {
+            if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx) {
+                e.1 = c;
+            } else {
+                self.base_overrides.push((idx, c));
+            }
+        }
+    }
+
+    /// Measure tab (stub). Feature 3 fills this with the measurement list, snap
+    /// and crosshair toggles, and unit selector; the seam lives here for PR A.
+    fn measure_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Measure");
+        ui.add_space(6.0);
+
+        // Hint line replacing the old Armed checkbox (#197): the rail Measure
+        // icon or the toggle-measure hotkey (default Ctrl+M, rebindable #201)
+        // arms the tool; canvas clicks then drop ruler points.
+        let measure_key = format_binding(self.keymap.toggle_measure);
+        ui.label(
+            egui::RichText::new(format!("{measure_key} to measure"))
+                .weak()
+                .small(),
+        )
+        .on_hover_text(
+            "Arm the measure tool (also the rail Measure icon), then click \
+             two points on the canvas to add a measurement.",
+        );
+
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.snap_grid, "Snap clicks to grid")
+            .on_hover_text("Snap each placed point to the nearest grid intersection (#51).");
+        ui.checkbox(&mut self.show_crosshair, "Cursor crosshair + readout")
+            .on_hover_text(
+                "Show a crosshair at the cursor plus live coordinates in the \
+                 bottom-left chip, always (not only while measuring).",
+            );
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("Units");
+            ui.selectable_value(&mut self.measure_unit, Unit::Mm, "mm");
+            ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
+            ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
+        });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Measurements ({})", self.measurements.len())).strong(),
+            );
+            if !self.measurements.is_empty() {
+                // Push "Clear all" to the trailing edge, with the hotkey hint
+                // beside it: a custom clear binding (#201) if set, else the
+                // preset default (#198) — Altium Shift+C, KiCad Esc (once
+                // nothing is in progress).
+                let clear_hint = match self.keymap.clear_measure {
+                    Some(b) => format!("{} clears", format_binding(b)),
+                    None => match self.input_preset {
+                        InputPreset::Altium => "Shift+C clears".to_string(),
+                        InputPreset::KiCad => "Esc clears".to_string(),
+                    },
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Clear all").clicked() {
+                        self.measurements.clear();
+                    }
+                    ui.label(egui::RichText::new(clear_hint).weak().small());
+                });
+            }
+        });
+        ui.add_space(4.0);
+
+        if self.measurements.is_empty() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "No measurements yet. Arm the tool ({measure_key}) and click two points.",
+                ))
+                .weak()
+                .small(),
+            );
+        } else {
+            let unit = self.measure_unit;
+            let mut remove: Option<usize> = None;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (i, m) in self.measurements.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Remove this measurement")
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                            ui.label(format_distance(distance_mm(m.a, m.b), unit));
+                        });
+                    }
+                });
+            if let Some(i) = remove {
+                measurement_remove(&mut self.measurements, i);
+            }
+        }
+    }
+
+    /// Export tab (#60): surfaces the existing export (per-layer SVG + copper-area
+    /// CSV) in the panel. Previews *what* each action writes, then runs the same
+    /// `do_export` the top-bar Export menu calls — both drive one code path.
+    fn export_panel_ui(&mut self, ui: &mut egui::Ui) {
+        // Preview data — owned up front so the render below never borrows `self`,
+        // leaving `do_export(&mut self)` free to run afterwards. Derived from the
+        // layer set, not by generating the (expensive) SVG content.
+        let current_names: Vec<String> = self
+            .diff
+            .layers
+            .get(self.selected)
+            .map(|l| l.name())
+            .into_iter()
+            .collect();
+        let changed_names: Vec<String> = self
+            .diff
+            .layers
+            .iter()
+            .filter(|l| l.is_changed())
+            .map(|l| l.name())
+            .collect();
+        let current_files = export_file_names(&current_names);
+        let all_files = export_file_names(&changed_names);
+        let status = self.export_msg.clone();
+
+        let mut exp_current = false;
+        let mut exp_all = false;
+
+        // One panel-level scroll (#196): the file lists render at full height and
+        // the whole tab overflows here, instead of nested per-list scroll boxes.
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Export");
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Write the diff to files you can open outside etchy.")
+                    .weak()
+                    .small(),
+            );
+
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new("Current layer")
+                    .color(C_COPPER)
+                    .strong(),
+            );
+            ui.add_space(2.0);
+            match current_names.first() {
+                Some(name) => {
+                    ui.label(
+                        egui::RichText::new(format!("{name} — {} file(s)", current_files.len()))
+                            .weak()
+                            .small(),
+                    );
+                    Self::export_file_list(ui, &current_files);
+                }
+                None => {
+                    ui.label(egui::RichText::new("No layer selected.").weak().small());
+                }
+            }
+            if ui
+                .add_enabled(
+                    !current_names.is_empty(),
+                    egui::Button::new("Export current layer"),
+                )
+                .on_hover_text("Write the selected layer's SVG plus areas.csv.")
+                .clicked()
+            {
+                exp_current = true;
+            }
+
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(format!("All changed layers ({})", changed_names.len()))
+                    .color(C_COPPER)
+                    .strong(),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!("{} file(s)", all_files.len()))
+                    .weak()
+                    .small(),
+            );
+            Self::export_file_list(ui, &all_files);
+            if ui
+                .button("Export all changed layers")
+                .on_hover_text("Write an SVG for every changed layer plus areas.csv.")
+                .clicked()
+            {
+                exp_all = true;
+            }
+
+            if let Some(msg) = status {
+                ui.add_space(10.0);
+                ui.separator();
+                ui.label(egui::RichText::new(msg).weak().small());
+            }
+        });
+
+        // Run after the render above — `do_export` needs `&mut self`.
+        if exp_current {
+            self.do_export(false);
+        }
+        if exp_all {
+            self.do_export(true);
+        }
+    }
+
+    /// Render an export file-name preview list at full height; the tab's
+    /// panel-level ScrollArea handles overflow (#196).
+    fn export_file_list(ui: &mut egui::Ui, files: &[String]) {
+        for f in files {
+            ui.label(egui::RichText::new(f).monospace().small().weak());
+        }
+    }
+
     /// A copper section heading for the Settings panes (#121).
     fn settings_header(ui: &mut egui::Ui, text: &str) {
         ui.add_space(1.0);
@@ -2865,9 +3588,99 @@ impl ViewApp {
         ui.add_space(3.0);
     }
 
+    /// The Settings panel body (#199): the rail's bottom gear docks this like any
+    /// other tab (the old floating Settings window is gone). The six sections plus
+    /// Hotkeys (#201) stack as collapsible headers — Display open by default — in
+    /// one panel-level scroll.
+    fn settings_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.add_space(4.0);
+        // Copper selection accent (#121): theme/units/preset toggles read
+        // brand-copper, not the default blue. Child uis inherit it.
+        ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
+        ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, C_COPPER);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::CollapsingHeader::new("Display")
+                .default_open(true)
+                .show(ui, |ui| self.settings_display(ui));
+            egui::CollapsingHeader::new("Diff").show(ui, |ui| self.settings_diff(ui));
+            egui::CollapsingHeader::new("Grid").show(ui, |ui| self.settings_grid(ui));
+            egui::CollapsingHeader::new("Input").show(ui, |ui| self.settings_input(ui));
+            egui::CollapsingHeader::new("Colours").show(ui, |ui| self.settings_colours(ui));
+            egui::CollapsingHeader::new("Layers").show(ui, |ui| self.settings_layers(ui));
+            egui::CollapsingHeader::new("Hotkeys").show(ui, |ui| self.settings_hotkeys(ui));
+        });
+    }
+
+    /// Settings → Hotkeys (#201): one row per rebindable action — name, current
+    /// binding, Rebind. Clicking Rebind arms a capture; the next key press (with
+    /// modifiers) becomes the binding and Esc cancels.
+    fn settings_hotkeys(&mut self, ui: &mut egui::Ui) {
+        // Tell the dispatch the editor is on screen this frame — a rebind
+        // capture cancels the moment this stops being drawn.
+        self.hotkeys_drawn = true;
+        ui.label(
+            egui::RichText::new("Click Rebind, then press the new key. Esc cancels.")
+                .weak()
+                .small(),
+        );
+        ui.add_space(4.0);
+        egui::Grid::new("hotkeys_grid")
+            .num_columns(3)
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                for (action, label) in HotkeyAction::ALL {
+                    ui.label(label);
+                    if self.capture_action == Some(action) {
+                        ui.label(
+                            egui::RichText::new("press a key…")
+                                .color(C_COPPER)
+                                .monospace(),
+                        );
+                        if ui.small_button("Cancel").clicked() {
+                            self.capture_action = None;
+                            self.capture_conflict = None;
+                        }
+                    } else {
+                        let binding = match self.keymap.get(action) {
+                            Some(b) => format_binding(b),
+                            // Clear-measurements still rides the #198 preset
+                            // defaults until it's explicitly rebound.
+                            None => match self.input_preset {
+                                InputPreset::Altium => "Shift+C (preset)".to_string(),
+                                InputPreset::KiCad => "Esc (preset)".to_string(),
+                            },
+                        };
+                        ui.label(egui::RichText::new(binding).monospace());
+                        if ui.small_button("Rebind").clicked() {
+                            self.capture_action = Some(action);
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+        // A rejected rebind (the key is already taken) — the capture stays
+        // armed so the user can try another key.
+        if let Some(msg) = &self.capture_conflict {
+            ui.colored_label(C_REMOVED, msg.as_str());
+        }
+        ui.add_space(4.0);
+        if ui
+            .button("Reset to defaults")
+            .on_hover_text(
+                "Restore every binding, including the preset-driven \
+                 clear-measurements key (#198).",
+            )
+            .clicked()
+        {
+            self.keymap = Keymap::default();
+            self.capture_action = None;
+            self.capture_conflict = None;
+        }
+    }
+
     /// Settings → Display: theme, measure units, and (feature build) the GPU path.
     fn settings_display(&mut self, ui: &mut egui::Ui) {
-        Self::settings_header(ui, "Display");
         ui.horizontal(|ui| {
             ui.label("Theme");
             ui.selectable_value(&mut self.theme, Theme::Dark, "dark");
@@ -2879,6 +3692,13 @@ impl ViewApp {
             ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
             ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
         });
+        ui.horizontal(|ui| {
+            ui.label("Activity rail");
+            ui.selectable_value(&mut self.rail_side, RailSide::Left, "left");
+            ui.selectable_value(&mut self.rail_side, RailSide::Right, "right");
+        })
+        .response
+        .on_hover_text("Which edge the activity rail and its panel dock to (Feature 8).");
         #[cfg(feature = "gpu-transform")]
         if self.gpu.is_some() {
             ui.checkbox(&mut self.use_gpu, "GPU base transform (experimental)")
@@ -2891,7 +3711,6 @@ impl ViewApp {
 
     /// Settings → Diff: the noise-filter threshold (moved off the top bar, #154).
     fn settings_diff(&mut self, ui: &mut egui::Ui) {
-        Self::settings_header(ui, "Diff");
         ui.label(
             egui::RichText::new("Noise filter")
                 .small()
@@ -2918,8 +3737,13 @@ impl ViewApp {
 
     /// Settings → Grid: reference grid overlay + snap.
     fn settings_grid(&mut self, ui: &mut egui::Ui) {
-        Self::settings_header(ui, "Grid");
-        ui.checkbox(&mut self.show_grid, "Show reference grid (G)");
+        ui.checkbox(
+            &mut self.show_grid,
+            format!(
+                "Show reference grid ({})",
+                format_binding(self.keymap.toggle_grid)
+            ),
+        );
         ui.horizontal(|ui| {
             ui.label("Spacing");
             ui.add(
@@ -2938,14 +3762,14 @@ impl ViewApp {
             "Cursor crosshair + coordinate readout",
         )
         .on_hover_text(
-            "Show a crosshair and live coordinates at the cursor, always \
-                 (not only in measure mode). Snaps to the grid when snap is on.",
+            "Show a crosshair at the cursor plus live coordinates in the \
+                 bottom-left chip, always (not only in measure mode). Snaps to \
+                 the grid when snap is on.",
         );
     }
 
     /// Settings → Input: pan/zoom scheme matching the user's ECAD tool (#54).
     fn settings_input(&mut self, ui: &mut egui::Ui) {
-        Self::settings_header(ui, "Input");
         ui.horizontal(|ui| {
             ui.label("ECAD preset");
             ui.selectable_value(&mut self.input_preset, InputPreset::Altium, "Altium");
@@ -3003,36 +3827,31 @@ impl ViewApp {
         }
     }
 
-    /// Settings → Layers: one base-colour row per layer (#21), scrollable.
+    /// Settings → Layers: one base-colour row per layer (#21). Rendered at full
+    /// height — the Settings panel's own scroll handles overflow (#199), the same
+    /// pattern as the Export tab's file lists (#196).
     fn settings_layers(&mut self, ui: &mut egui::Ui) {
         Self::settings_header(ui, "Layer base colours");
-        egui::ScrollArea::vertical()
-            .max_height(360.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                for idx in 0..self.diff.layers.len() {
-                    let kind = self.diff.layers[idx].kind;
-                    let label = self.diff.layers[idx].name();
-                    ui.horizontal(|ui| {
-                        let mut base =
-                            resolve_base_color(idx, kind, &self.base_overrides, self.theme);
-                        if ui.color_edit_button_srgba(&mut base).changed() {
-                            if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx)
-                            {
-                                e.1 = base;
-                            } else {
-                                self.base_overrides.push((idx, base));
-                            }
-                        }
-                        ui.label(label);
-                        if self.base_overrides.iter().any(|(i, _)| *i == idx)
-                            && ui.small_button("reset").clicked()
-                        {
-                            self.base_overrides.retain(|(i, _)| *i != idx);
-                        }
-                    });
+        for idx in 0..self.diff.layers.len() {
+            let kind = self.diff.layers[idx].kind;
+            let label = self.diff.layers[idx].name();
+            ui.horizontal(|ui| {
+                let mut base = resolve_base_color(idx, kind, &self.base_overrides, self.theme);
+                if square_color_swatch(ui, &mut base).changed() {
+                    if let Some(e) = self.base_overrides.iter_mut().find(|(i, _)| *i == idx) {
+                        e.1 = base;
+                    } else {
+                        self.base_overrides.push((idx, base));
+                    }
+                }
+                ui.label(label);
+                if self.base_overrides.iter().any(|(i, _)| *i == idx)
+                    && ui.small_button("reset").clicked()
+                {
+                    self.base_overrides.retain(|(i, _)| *i != idx);
                 }
             });
+        }
     }
 
     /// Active-theme canvas colour (#31). The board paints with this, so light mode
@@ -3080,10 +3899,6 @@ impl ViewApp {
     fn draw_canvas(&mut self, ui: &mut egui::Ui) {
         let size = ui.available_size();
         let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
-        // Clicking the board dismisses the Settings window (#19).
-        if self.show_settings && response.clicked() {
-            self.show_settings = false;
-        }
         let rect = response.rect;
         // The board background uses the user-configurable canvas colour (#53),
         // defaulting to the brand board-dark.
@@ -3167,11 +3982,11 @@ impl ViewApp {
                     if self.snap_grid {
                         w = snap_world_to_grid(w, self.grid_mm);
                     }
-                    // A completed pair persists; the next click starts a fresh one (#50).
-                    if self.measure_pts.len() >= 2 {
-                        self.measure_pts.clear();
+                    // The second click completes the pair onto the running list; the
+                    // next click starts a fresh one (#50).
+                    if let Some(m) = measure_click(&mut self.measure_pts, w) {
+                        self.measurements.push(m);
                     }
-                    self.measure_pts.push(w);
                 }
             }
             // Pan with secondary/middle drag while measuring (#52, fix #2):
@@ -3234,7 +4049,7 @@ impl ViewApp {
         }
 
         // Grid overlay (#51): faint world-spaced lines, drawn UNDER the geometry.
-        // Skip if the on-screen spacing is too dense (< 6 px) so it never fills solid.
+        // The drawn pitch adapts to zoom (#195) so it never fills solid or vanishes.
         if self.show_grid {
             draw_grid(&painter, &self.cam, rect, self.grid_mm, self.grid_color());
         }
@@ -3244,14 +4059,34 @@ impl ViewApp {
         // cheap world→screen transform + colour/alpha/min-area cull run per frame,
         // so pan/zoom and colour edits never re-triangulate. The cache rebuilds only
         // when the GeomKey (selection inputs) changes.
-        // The visible set: every layer the user has shown (#58/#59). Split renders
-        // the active layer only (a stacked old|new of many layers reads as mud), so
-        // it keys off just the selected layer and falls back to it when nothing is on.
+        // The board outline is drawn as the faint orientation reference (Side::Full,
+        // on every layer / into both split halves), NOT as a stacked base layer — so
+        // its `visible_layers` bit gates that reference (`outline_effective`) and is
+        // kept OUT of the stacked `visible` set below (#157: board edge is a normal
+        // layer row, but it still renders faint, not as bright copper).
+        let outline_visible = self
+            .outline
+            .is_some_and(|oi| self.visible_layers.get(oi).copied().unwrap_or(false));
+        // The visible set: every layer the user has shown (#58/#59), minus the
+        // outline (handled above). Split renders the active layer only (a stacked
+        // old|new of many layers reads as mud), so it keys off just the selected layer
+        // and falls back to it when nothing is on.
         let visible = if self.mode == Mode::Split || self.mode == Mode::Swipe {
             vec![self.selected]
         } else {
-            let v = visible_indices(&self.visible_layers);
-            if v.is_empty() {
+            let v: Vec<usize> = visible_indices(&self.visible_layers)
+                .into_iter()
+                .filter(|&i| Some(i) != self.outline)
+                .collect();
+            // Anti-blank fallback: if nothing is on, show the selected layer so the
+            // canvas isn't empty. But the outline is a normal layer now (PR B) — if
+            // the user hid everything and toggled ONLY the outline on, that IS
+            // content, so don't force the (hidden) selected layer back on.
+            let outline_visible = self
+                .outline
+                .and_then(|o| self.visible_layers.get(o).copied())
+                .unwrap_or(false);
+            if v.is_empty() && !outline_visible {
                 vec![self.selected]
             } else {
                 v
@@ -3260,8 +4095,8 @@ impl ViewApp {
         let key = build_geom_key(
             &visible,
             self.mode,
-            self.base_level,
-            self.show_outline,
+            self.base_opacity,
+            outline_visible,
             self.outline,
         );
         if geom_cache_dirty(self.cache.as_ref().map(|c| &c.key), &key) {
@@ -3343,7 +4178,7 @@ impl ViewApp {
                 let base_col = base_display_color(
                     base_of(item.layer_index),
                     self.canvas_color(),
-                    self.base_level,
+                    self.base_opacity,
                 );
                 match item.side {
                     Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, ltarget, base_col),
@@ -3449,7 +4284,7 @@ impl ViewApp {
                     cache,
                     &self.cam,
                     rect,
-                    self.base_level,
+                    self.base_opacity,
                     self.selected,
                     base_of,
                     self.canvas_color(),
@@ -3505,54 +4340,21 @@ impl ViewApp {
 
         // The busy per-layer status caption (layer name, status, region counts) was
         // removed from the board surface (#178) to keep it clean — but the colour
-        // legend and the two trust/context signals below stay on-canvas, because
-        // those must remain visible. The underlying counts (`self.last_hidden`,
-        // `layer.change`) are untouched.
+        // legend and the trust/context signals (now in the bottom-left chip stack
+        // below) stay on-canvas, because those must remain visible. The underlying
+        // counts (`self.last_hidden`, `layer.change`) are untouched.
         if self.mode == Mode::Overlay {
-            let outline_row =
-                outline_legend_visible(self.show_outline, self.outline, self.selected);
-            legend(
-                &painter,
-                rect,
-                self.col_added,
-                self.col_removed,
-                outline_row,
-            );
-            // TRUST — no silent misses (#178): the noise filter's hidden-region
-            // count is the one signal that must never disappear (see MIN_AREA_MM2).
-            // Surface it as a small top-left chip, and ONLY when something is
-            // actually hidden — nothing hidden, nothing drawn. Overlay-only: Split /
-            // Swipe / Old / New show raw boards and clear `last_hidden`.
-            if let Some(note) = hidden_note(self.last_hidden, self.min_area_mm2) {
-                corner_chip(
-                    &painter,
-                    rect.left_top() + egui::vec2(8.0, 8.0),
-                    egui::Align2::LEFT_TOP,
-                    &note,
-                );
-            }
-        }
-
-        // #112 context hint: when exactly one layer of several is visible, a lone
-        // trace reads as "my traces vanished" rather than "one layer of many". A
-        // minimal bottom-right chip restores that context without the old busy
-        // caption; it shows only in that single-of-many case.
-        let shown = self.visible_layers.iter().filter(|&&v| v).count();
-        if let Some(hint) = single_layer_hint(shown, self.visible_layers.len()) {
-            corner_chip(
-                &painter,
-                rect.right_bottom() + egui::vec2(-8.0, -8.0),
-                egui::Align2::RIGHT_BOTTOM,
-                &hint,
-            );
+            legend(&painter, rect, self.col_added, self.col_removed);
         }
 
         // Always-on crosshair + coordinate readout (#179): a snapped-cursor
-        // crosshair and a live world-coordinate readout, drawn regardless of measure
-        // mode (default on). Snaps to the grid when snap-to-grid is on, so what the
-        // readout shows is exactly where a measure click would land. In measure mode
-        // the crosshair is always drawn so the ruler stays aligned even if the
-        // standalone crosshair is toggled off.
+        // crosshair drawn regardless of measure mode (default on). Snaps to the
+        // grid when snap-to-grid is on, so what the readout shows is exactly where
+        // a measure click would land. In measure mode the crosshair is always
+        // drawn so the ruler stays aligned even if the standalone crosshair is
+        // toggled off. The coordinate readout itself no longer chases the cursor —
+        // it lives in the fixed bottom-left chip stack below (#193).
+        let mut coord_txt = None;
         if self.show_crosshair || self.measure_mode {
             if let Some(ptr) = response.hover_pos() {
                 let w_raw = screen_to_world(&self.cam, ptr, rect);
@@ -3580,54 +4382,97 @@ impl ViewApp {
                     ],
                     cross,
                 );
-                // Coordinate readout on a copper chip, offset from the crosshair
-                // centre so it doesn't sit under the lines. When snap is on the
-                // value is grid-quantised, so the readout says "· grid" (#178) — the
-                // three decimals aren't false precision, they're an on-grid point.
+                // When snap is on the value is grid-quantised, so the readout says
+                // "· grid" (#178) — the three decimals aren't false precision,
+                // they're an on-grid point.
                 let mm = etchy_core::NM_PER_MM as f64;
-                let txt = format_coord_mm(w[0] / mm, w[1] / mm, self.snap_grid);
-                measure_label(&painter, cross_at + egui::vec2(46.0, -14.0), &txt);
+                coord_txt = Some(format_coord_mm(w[0] / mm, w[1] / mm, self.snap_grid));
             }
         }
 
-        // Measure tool overlay (#22/#50): the ruler points, the segment, and a
-        // sticky distance label offset off the line. The cursor crosshair is drawn
-        // above (always-on, #179).
+        // Bottom-left chip stack (#193/#194): every trust/context chip has ONE
+        // fixed home, stacked up from the corner, so nothing chases the cursor and
+        // nothing is scattered across four corners. Bottom-most is the live cursor
+        // readout (absent when the cursor is off-canvas — the rest slide down):
+        // - coordinate readout (#179/#193), grid-snapped when snapping is on;
+        // - TRUST — no silent misses (#178): the noise filter's hidden-region
+        //   count, the one signal that must never disappear (see MIN_AREA_MM2).
+        //   Only when something IS hidden, and Overlay-only — Split / Swipe /
+        //   Old / New show raw boards and clear `last_hidden`;
+        // - #112 context hint: when exactly one layer of several is visible, a
+        //   lone trace reads as "my traces vanished" rather than "one layer of
+        //   many". Shows only in that single-of-many case. The board outline is
+        //   orientation context, not a compared layer, so it's left out of the
+        //   "shown" tally (#157) — one real layer + the outline still reads as
+        //   "1 / N";
+        // - the measure tool's how-to hint while the tool is armed (#22).
+        let mut chips: Vec<String> = Vec::new();
+        if let Some(txt) = coord_txt {
+            chips.push(txt);
+        }
+        if self.mode == Mode::Overlay {
+            if let Some(note) = hidden_note(self.last_hidden, self.min_area_mm2) {
+                chips.push(note);
+            }
+        }
+        let shown = self
+            .visible_layers
+            .iter()
+            .enumerate()
+            .filter(|&(i, &v)| v && Some(i) != self.outline)
+            .count();
+        if let Some(hint) = single_layer_hint(shown, self.visible_layers.len()) {
+            chips.push(hint);
+        }
         if self.measure_mode {
-            // World [f64;2] → screen, matching world_to_screen's float transform.
-            let w2s = |w: [f64; 2]| -> Pos2 {
-                let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
-                let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
-                Pos2::new(x as f32, y as f32)
-            };
+            // The units key is rebindable (#201) — read it from the keymap
+            // instead of hardcoding "U".
+            chips.push(format!(
+                "measure: click two points · {} units · Esc clears · toggle off to exit",
+                format_binding(self.keymap.cycle_unit)
+            ));
+        }
+        // Split/Swipe draw their old/new identity labels at this same corner
+        // (#48) — start the chip stack above them so neither is covered.
+        let label_clear = if matches!(self.mode, Mode::Split | Mode::Swipe) {
+            24.0
+        } else {
+            0.0
+        };
+        let mut anchor = rect.left_bottom() + egui::vec2(8.0, -8.0 - label_clear);
+        for text in &chips {
+            let painted = corner_chip(&painter, anchor, egui::Align2::LEFT_BOTTOM, text);
+            anchor.y = painted.top() - 4.0;
+        }
+
+        // Measure tool overlay (#22/#50): completed rulers from the running list,
+        // plus the in-progress point while the tool is armed. Each ruler is a
+        // segment with a distance label offset off the line. The cursor crosshair
+        // is drawn above (always-on, #179).
+        // World [f64;2] → screen, matching world_to_screen's float transform.
+        let w2s = |w: [f64; 2]| -> Pos2 {
+            let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
+            let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
+            Pos2::new(x as f32, y as f32)
+        };
+        // Completed measurements persist on-canvas so they stay visible for
+        // reference even when the tool is disarmed; the Measure tab list mirrors
+        // them (delete/clear there update the canvas too).
+        for m in &self.measurements {
+            draw_ruler(
+                &painter,
+                w2s(m.a),
+                w2s(m.b),
+                &format_distance(distance_mm(m.a, m.b), self.measure_unit),
+            );
+        }
+        if self.measure_mode {
+            // In-progress: the first point of the pair (the second click completes
+            // it into the list above). The how-to hint lives in the bottom-left
+            // chip stack (#194).
             for w in &self.measure_pts {
                 painter.circle_filled(w2s(*w), 3.0, C_COPPER);
             }
-            if self.measure_pts.len() == 2 {
-                let (a, b) = (self.measure_pts[0], self.measure_pts[1]);
-                let (sa, sb) = (w2s(a), w2s(b));
-                painter.line_segment([sa, sb], Stroke::new(1.5, C_COPPER));
-                // Label OFF the line (#50): offset ~14 px perpendicular to the
-                // segment, on a filled copper chip with dark text for legibility.
-                let mid = Pos2::new((sa.x + sb.x) / 2.0, (sa.y + sb.y) / 2.0);
-                let (dx, dy) = (sb.x - sa.x, sb.y - sa.y);
-                let len = (dx * dx + dy * dy).sqrt().max(1.0);
-                let off = egui::vec2(-dy / len, dx / len) * 14.0;
-                let dist_mm = distance_mm(a, b);
-                measure_label(
-                    &painter,
-                    mid + off,
-                    &format_distance(dist_mm, self.measure_unit),
-                );
-            }
-            // Hint at the bottom-left.
-            painter.text(
-                rect.left_bottom() + egui::vec2(8.0, -8.0),
-                egui::Align2::LEFT_BOTTOM,
-                "measure: click two points · U units · Esc clears · toggle off to exit",
-                egui::FontId::proportional(12.0),
-                C_COPPER,
-            );
         }
 
         // Keep a border.
@@ -3821,10 +4666,13 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
 /// default). The selected (active) layer stays full opacity so it reads on top.
 const DIM_ALPHA: f32 = 0.4;
 
-/// A rounded **segmented control** (#57): a pill-group of options, zero gap
-/// between them, the selected one filled copper with board-dark text. Used for the
-/// top-bar mode and base pickers. egui 0.34 has no built-in segmented widget.
-fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
+/// The shared segmented-group chrome (#57/#200): the outlined rounded frame with
+/// zero gap between the widgets inside, and the widgets restyled flat — no
+/// per-button fill or stroke at rest, the usual soft fill on hover, and copper
+/// with board-dark text while a menu inside is open (matching the selected
+/// segment). Both the mode picker and the top-bar action cluster build on this,
+/// so they read as one visual family.
+fn segmented_frame<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::default()
         .stroke(Stroke::new(1.0, ui.visuals().widgets.inactive.bg_fill))
         .corner_radius(8.0)
@@ -3832,30 +4680,52 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                // Selected segment reads brand copper with board-dark text.
-                ui.visuals_mut().selection.bg_fill = C_COPPER;
-                ui.visuals_mut().selection.stroke = Stroke::NONE;
-                for (opt, label) in options {
-                    let on = *value == *opt;
-                    let text = if on {
-                        egui::RichText::new(*label).color(C_CANVAS).strong()
-                    } else {
-                        egui::RichText::new(*label)
-                    };
-                    if ui.selectable_label(on, text).clicked() {
-                        *value = *opt;
-                    }
-                }
-            });
-        });
+                let v = ui.visuals_mut();
+                // Buttons in the group draw like unselected segments at rest
+                // (selectable_label-flat), not like framed stand-alone buttons.
+                v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                v.widgets.inactive.bg_stroke = Stroke::NONE;
+                v.widgets.hovered.bg_stroke = Stroke::NONE;
+                v.widgets.active.bg_stroke = Stroke::NONE;
+                v.widgets.open.bg_stroke = Stroke::NONE;
+                // An open menu button reads like the selected segment.
+                v.widgets.open.weak_bg_fill = C_COPPER;
+                v.widgets.open.fg_stroke = Stroke::new(1.0, C_CANVAS);
+                // Selected segment (the mode picker's) reads brand copper.
+                v.selection.bg_fill = C_COPPER;
+                v.selection.stroke = Stroke::NONE;
+                add(ui)
+            })
+            .inner
+        })
+        .inner
 }
 
-// Width tiers in egui POINTS (screen_rect width; ~half the CSS px at ppp 2). The
-// full inline bar's content needs ~900 pt, so below that the actions collapse.
-/// Below this window width (pt) the top bar drops the muted "base" prefix label.
-const TIER_LABELS_PX: f32 = 940.0;
+/// A rounded **segmented control** (#57): a pill-group of options, zero gap
+/// between them, the selected one filled copper with board-dark text. Used for the
+/// top-bar mode and base pickers. egui 0.34 has no built-in segmented widget.
+fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, &str)]) {
+    segmented_frame(ui, |ui| {
+        for (opt, label) in options {
+            let on = *value == *opt;
+            let text = if on {
+                egui::RichText::new(*label).color(C_CANVAS).strong()
+            } else {
+                egui::RichText::new(*label)
+            };
+            if ui.selectable_label(on, text).clicked() {
+                *value = *opt;
+            }
+        }
+    });
+}
+
+// Width tiers in egui POINTS (screen_rect width; ~half the CSS px at ppp 2). With
+// the reduced Open/Fit/Help cluster (#57) the inline bar needs ~660 pt (down from
+// ~900 when Measure/Export/Settings still lived here), so below that the actions
+// fold into "More" and Open/Fit/Help never clip.
 /// Below this window width (pt) the right action cluster collapses into "More".
-const TIER_MORE_PX: f32 = 900.0;
+const TIER_MORE_PX: f32 = 660.0;
 
 /// Running under WSL? WSL sets `WSL_DISTRO_NAME`, and the kernel release contains
 /// "microsoft". On real Windows/macOS/Linux this is always false (the /proc read
@@ -3956,6 +4826,157 @@ fn eye_toggle(ui: &mut egui::Ui, visible: bool) -> egui::Response {
     resp
 }
 
+/// A small SQUARE colour swatch (Feature 7) that opens egui's colour picker on
+/// click. `color_edit_button_srgba` is normally a rounded, interact-sized button;
+/// scoping the interact size down and zeroing the widget corner radius makes it a
+/// compact square while keeping the picker popup intact.
+fn square_color_swatch(ui: &mut egui::Ui, color: &mut Color32) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size = egui::vec2(14.0, 14.0);
+        let v = ui.visuals_mut();
+        v.widgets.inactive.corner_radius = egui::CornerRadius::ZERO;
+        v.widgets.hovered.corner_radius = egui::CornerRadius::ZERO;
+        v.widgets.active.corner_radius = egui::CornerRadius::ZERO;
+        v.widgets.open.corner_radius = egui::CornerRadius::ZERO;
+        ui.color_edit_button_srgba(color)
+    })
+    .inner
+}
+
+/// One activity-rail cell (Feature 1): a fixed-size button that paints a
+/// hover/active background (copper accent when active, matching the app's selection
+/// accent) then draws its glyph via the painter — never a font symbol (the bundled
+/// font renders many symbols as tofu, #16/#30). Returns the click response.
+fn rail_button(
+    ui: &mut egui::Ui,
+    active: bool,
+    draw: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(40.0, 34.0), Sense::click());
+    let hovered = resp.hovered();
+    if active {
+        ui.painter()
+            .rect_filled(rect, 5.0, C_COPPER.gamma_multiply(0.30));
+    } else if hovered {
+        ui.painter()
+            .rect_filled(rect, 5.0, C_COPPER.gamma_multiply(0.12));
+    }
+    let col = if active {
+        C_COPPER
+    } else if hovered {
+        C_CREAM
+    } else {
+        Color32::from_rgb(0xcd, 0xd6, 0xe4)
+    };
+    let icon = Rect::from_center_size(rect.center(), egui::vec2(18.0, 18.0));
+    draw(ui.painter(), icon, col);
+    resp
+}
+
+/// Draw the glyph for a panel tab's rail icon (painter marks, glyph-free).
+fn draw_panel_icon(tab: PanelTab, p: &egui::Painter, r: Rect, col: Color32) {
+    match tab {
+        PanelTab::Layers => draw_layers_icon(p, r, col),
+        PanelTab::Measure => draw_measure_icon(p, r, col),
+        PanelTab::Export => draw_export_icon(p, r, col),
+        PanelTab::Settings => draw_cog_icon(p, r, col),
+    }
+}
+
+/// Layers icon: three stacked bars reading as a layer list.
+fn draw_layers_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let bar_h = (r.height() * 0.16).max(2.0);
+    for i in 0..3 {
+        let y = r.min.y + r.height() * (0.10 + i as f32 * 0.33);
+        let bar = Rect::from_min_size(egui::pos2(r.min.x, y), egui::vec2(r.width(), bar_h));
+        p.rect_filled(bar, 1.0, col);
+    }
+}
+
+/// Measure icon: a ruler — an outlined bar with tick marks along its top edge.
+fn draw_measure_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let bar = Rect::from_min_max(
+        egui::pos2(r.min.x, r.center().y - r.height() * 0.20),
+        egui::pos2(r.max.x, r.center().y + r.height() * 0.20),
+    );
+    p.rect_stroke(bar, 1.0, Stroke::new(1.4, col), StrokeKind::Inside);
+    for i in 1..4 {
+        let x = r.min.x + r.width() * (i as f32 / 4.0);
+        p.line_segment(
+            [
+                egui::pos2(x, bar.min.y),
+                egui::pos2(x, bar.min.y + r.height() * 0.16),
+            ],
+            Stroke::new(1.2, col),
+        );
+    }
+}
+
+/// Export icon: a down arrow above a tray line ("write to disk").
+fn draw_export_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let cx = r.center().x;
+    let tip_y = r.center().y + r.height() * 0.10;
+    p.line_segment(
+        [egui::pos2(cx, r.min.y), egui::pos2(cx, tip_y)],
+        Stroke::new(1.6, col),
+    );
+    let aw = r.width() * 0.20;
+    let ah = r.height() * 0.16;
+    p.line_segment(
+        [egui::pos2(cx - aw, tip_y - ah), egui::pos2(cx, tip_y)],
+        Stroke::new(1.6, col),
+    );
+    p.line_segment(
+        [egui::pos2(cx + aw, tip_y - ah), egui::pos2(cx, tip_y)],
+        Stroke::new(1.6, col),
+    );
+    p.line_segment(
+        [egui::pos2(r.min.x, r.max.y), egui::pos2(r.max.x, r.max.y)],
+        Stroke::new(1.6, col),
+    );
+}
+
+/// The four corners of one rectangular gear tooth (#192): a radial quad spanning
+/// radius `r0`..`r1` with half-width `half_w`, rotated to `angle` around `c`.
+/// Pure geometry so it's unit-testable; `draw_cog_icon` maps it to screen points.
+fn gear_tooth_quad(c: [f32; 2], angle: f32, r0: f32, r1: f32, half_w: f32) -> [[f32; 2]; 4] {
+    let (s, cs) = angle.sin_cos();
+    let corner = |radius: f32, side: f32| {
+        [
+            c[0] + cs * radius - s * side * half_w,
+            c[1] + s * radius + cs * side * half_w,
+        ]
+    };
+    [
+        corner(r0, -1.0),
+        corner(r1, -1.0),
+        corner(r1, 1.0),
+        corner(r0, 1.0),
+    ]
+}
+
+/// Settings gear icon (#192): a solid annulus (a circle stroked thick enough to
+/// leave the hub hole open) with eight rectangular teeth around the rim — a
+/// proper gear silhouette, painter-drawn like every rail icon (font symbol
+/// glyphs are tofu, #16/#30).
+fn draw_cog_icon(p: &egui::Painter, r: Rect, col: Color32) {
+    let c = r.center();
+    let half = r.width().min(r.height()) * 0.5;
+    // Ring: stroke centred at 0.52 of the radius, 0.42 thick → body 0.31..0.73
+    // with an open hub hole inside.
+    p.circle_stroke(c, half * 0.52, Stroke::new(half * 0.42, col));
+    // Teeth: rectangular, rooted inside the ring body so they merge with it.
+    for i in 0..8 {
+        let a = i as f32 / 8.0 * std::f32::consts::TAU;
+        let quad = gear_tooth_quad([c.x, c.y], a, half * 0.60, half, half * 0.17);
+        p.add(Shape::convex_polygon(
+            quad.iter().map(|&[x, y]| egui::pos2(x, y)).collect(),
+            col,
+            Stroke::NONE,
+        ));
+    }
+}
+
 /// Per-frame: transform cached world items to screen meshes, applying colour, the
 /// highlight/dim (#59), the LOD fade (diff only), and the min-area cull (returns the
 /// hidden count). No triangulation here — this is the cheap part that runs every
@@ -3966,7 +4987,7 @@ fn transform_cache(
     cache: &TessCache,
     cam: &Camera,
     rect: Rect,
-    base_level: BaseLevel,
+    base_opacity: f32,
     selected: usize,
     base_of: impl Fn(usize) -> Color32,
     canvas: Color32,
@@ -4026,7 +5047,7 @@ fn transform_cache(
         let dim = dim_factor(item.layer_index, selected, dim_others);
         let (mut color, is_diff) = match item.role {
             Role::Base => (
-                base_display_color(base_of(item.layer_index), canvas, base_level),
+                base_display_color(base_of(item.layer_index), canvas, base_opacity),
                 false,
             ),
             Role::Outline => (C_OUTLINE_FAINT, false),
@@ -4155,18 +5176,9 @@ fn push_screen_quad(mesh: &mut egui::epaint::Mesh, at: Pos2, px: f32, color: Col
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-fn legend(
-    painter: &egui::Painter,
-    rect: Rect,
-    added: Color32,
-    removed: Color32,
-    outline_row: bool,
-) {
+fn legend(painter: &egui::Painter, rect: Rect, added: Color32, removed: Color32) {
     let mut y = rect.right_top() + egui::vec2(-150.0, 8.0);
-    let mut rows = vec![(added, "added"), (removed, "removed")];
-    if outline_row {
-        rows.push((C_OUTLINE_FAINT, "board edge"));
-    }
+    let rows = [(added, "added"), (removed, "removed")];
     for (c, txt) in rows {
         painter.rect_filled(Rect::from_min_size(y, egui::vec2(12.0, 12.0)), 2.0, c);
         painter.text(
@@ -4195,6 +5207,48 @@ fn distance_mm(a: [f64; 2], b: [f64; 2]) -> f64 {
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
     (dx * dx + dy * dy).sqrt() / etchy_core::NM_PER_MM as f64
+}
+
+/// A completed measurement: the two world-space endpoints of a ruler (#50). The
+/// Measure tab keeps a running list of these; `distance_mm(a, b)` gives the length
+/// in the chosen unit.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Measurement {
+    a: [f64; 2],
+    b: [f64; 2],
+}
+
+/// Build a completed `Measurement` from two world points (#50) — the pure kernel
+/// behind finishing a ruler.
+fn finish_measurement(a: [f64; 2], b: [f64; 2]) -> Measurement {
+    Measurement { a, b }
+}
+
+/// Apply a measure click at world point `p` to the in-progress buffer `pts` (#50).
+/// The buffer holds 0 or 1 points: a click on an empty buffer stores the first
+/// point and returns `None`; a click when a point is already placed completes the
+/// pair — it empties the buffer and returns the finished `Measurement` (the caller
+/// pushes it onto the running list). The next click then starts a fresh pair. Pure
+/// so the click→state transition is unit-testable off-screen.
+fn measure_click(pts: &mut Vec<[f64; 2]>, p: [f64; 2]) -> Option<Measurement> {
+    match pts.first().copied() {
+        Some(a) => {
+            pts.clear();
+            Some(finish_measurement(a, p))
+        }
+        None => {
+            pts.push(p);
+            None
+        }
+    }
+}
+
+/// Remove the measurement at `idx` from the running list if in range (#50).
+/// Bounds-checked so a stale index carried across a frame can never panic.
+fn measurement_remove(list: &mut Vec<Measurement>, idx: usize) {
+    if idx < list.len() {
+        list.remove(idx);
+    }
 }
 
 /// Unit the measure tool reports distances in (#50). Cycles mm → inch → mil.
@@ -4289,18 +5343,76 @@ fn screen_to_world(cam: &Camera, s: Pos2, rect: Rect) -> [f64; 2] {
     [wx, wy]
 }
 
-/// Draw the reference grid (#51) at `grid_mm` world spacing across the canvas.
-/// Skips drawing if the on-screen spacing would be < 6 px (too dense → solid fill).
+/// Minimum on-screen spacing (px) between drawn grid lines (#195). Below this
+/// the drawn pitch steps up the 1-2-5 sequence so the grid stays readable
+/// instead of vanishing or fusing into a solid fill.
+const MIN_GRID_PX: f64 = 24.0;
+
+/// Pick the drawn grid pitch for the current zoom (#195), Altium/KiCad style.
+/// Starting from the snap pitch `grid_mm`, walk up a 1-2-5 (x10) sequence until
+/// adjacent lines land at least `MIN_GRID_PX` apart on screen. Zoomed in the
+/// base pitch already clears the bar and draws unchanged; snapping always stays
+/// at `grid_mm` — only the DRAWN grid adapts. Returns `(major, minor)`: the
+/// pitch to draw plus the previous 1-2-5 step as the fainter minor grid —
+/// `None` when the major IS the base pitch (nothing below the snap grid is
+/// honest to draw). Degenerate inputs return `(grid_mm, None)` (the caller
+/// guards those).
+fn display_grid_pitch(grid_mm: f64, px_per_mm: f64) -> (f64, Option<f64>) {
+    if !grid_mm.is_finite() || grid_mm <= 0.0 || !px_per_mm.is_finite() || px_per_mm <= 0.0 {
+        return (grid_mm, None);
+    }
+    let mut prev = None;
+    let mut pow10 = 1.0f64;
+    loop {
+        for mult in [1.0, 2.0, 5.0] {
+            let pitch = grid_mm * mult * pow10;
+            if !pitch.is_finite() {
+                // Overflow guard: never spin forever on absurd zoom — settle for
+                // the last finite candidate.
+                return (grid_mm * pow10, prev);
+            }
+            if pitch * px_per_mm >= MIN_GRID_PX {
+                return (pitch, prev);
+            }
+            prev = Some(pitch);
+        }
+        pow10 *= 10.0;
+    }
+}
+
+/// Draw the reference grid (#51) across the canvas. The drawn pitch adapts to
+/// zoom (#195): zoomed in it is the snap grid `grid_mm` itself; zoomed out it
+/// steps up a 1-2-5 sequence (see `display_grid_pitch`) so the grid never
+/// vanishes, with the previous step as a fainter minor grid. Snapping is
+/// untouched — it stays on `grid_mm`.
 fn draw_grid(painter: &egui::Painter, cam: &Camera, rect: Rect, grid_mm: f64, grid_color: Color32) {
-    if !grid_mm.is_finite() || grid_mm <= 0.0 {
+    if !grid_mm.is_finite() || grid_mm <= 0.0 || !cam.scale.is_finite() || cam.scale <= 0.0 {
         return;
     }
-    let step_nm = grid_mm * etchy_core::NM_PER_MM as f64;
+    let px_per_mm = etchy_core::NM_PER_MM as f64 * cam.scale;
+    let (major_mm, minor_mm) = display_grid_pitch(grid_mm, px_per_mm);
+    if let Some(minor) = minor_mm {
+        // The minor sits one 1-2-5 step below the major (>= MIN_GRID_PX / 2.5 px
+        // apart, so it always fits) — fainter, painted first so majors read on top.
+        draw_grid_lines(painter, cam, rect, minor, grid_color.gamma_multiply(0.4));
+    }
+    draw_grid_lines(painter, cam, rect, major_mm, grid_color);
+}
+
+/// Paint one family of grid lines at `pitch_mm` world spacing across the canvas.
+fn draw_grid_lines(
+    painter: &egui::Painter,
+    cam: &Camera,
+    rect: Rect,
+    pitch_mm: f64,
+    color: Color32,
+) {
+    let step_nm = pitch_mm * etchy_core::NM_PER_MM as f64;
     let px_per_line = step_nm * cam.scale; // screen px between adjacent grid lines
     if !px_per_line.is_finite() || px_per_line < 6.0 {
-        return;
+        return; // safety net only — the adaptive pitch already cleared MIN_GRID_PX
     }
-    let stroke = Stroke::new(1.0, grid_color);
+    let stroke = Stroke::new(1.0, color);
     // World coords visible at the rect edges (y is flipped on screen).
     let left = screen_to_world(cam, Pos2::new(rect.left(), rect.center().y), rect)[0];
     let right = screen_to_world(cam, Pos2::new(rect.right(), rect.center().y), rect)[0];
@@ -4339,17 +5451,34 @@ fn measure_label(painter: &egui::Painter, at: Pos2, text: &str) {
     painter.galley(rect.min + pad, galley, C_CANVAS);
 }
 
+/// Draw one complete measure ruler in screen space (#50): both endpoints, the
+/// segment, and the distance `label` offset ~14 px perpendicular to the line so it
+/// never sits on top of it. Shared by the completed-measurement loop so every
+/// ruler looks identical.
+fn draw_ruler(painter: &egui::Painter, a: Pos2, b: Pos2, label: &str) {
+    painter.circle_filled(a, 3.0, C_COPPER);
+    painter.circle_filled(b, 3.0, C_COPPER);
+    painter.line_segment([a, b], Stroke::new(1.5, C_COPPER));
+    let mid = Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    let off = egui::vec2(-dy / len, dx / len) * 14.0;
+    measure_label(painter, mid + off, label);
+}
+
 /// A small, unobtrusive status chip anchored into a canvas corner — copper text
 /// on a translucent dark surface so it stays legible over any board colour while
 /// reading as chrome, not diff content. `anchor`/`align` place it against a corner
-/// (e.g. `LEFT_TOP` for top-left, `RIGHT_BOTTOM` for bottom-right).
-fn corner_chip(painter: &egui::Painter, anchor: Pos2, align: egui::Align2, text: &str) {
+/// (e.g. `LEFT_TOP` for top-left, `RIGHT_BOTTOM` for bottom-right). Returns the
+/// painted rect so callers can stack further chips above it (#194).
+fn corner_chip(painter: &egui::Painter, anchor: Pos2, align: egui::Align2, text: &str) -> Rect {
     let font = egui::FontId::proportional(12.0);
     let galley = painter.layout_no_wrap(text.to_owned(), font, C_COPPER);
     let pad = egui::vec2(6.0, 3.0);
     let rect = align.anchor_size(anchor, galley.size() + pad * 2.0);
     painter.rect_filled(rect, 3.0, C_SURFACE.gamma_multiply(0.85));
     painter.galley(rect.min + pad, galley, C_COPPER);
+    rect
 }
 
 fn fit(cam: &mut Camera, bb: [i64; 4], rect: Rect) {
@@ -4425,13 +5554,37 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base_display_color, build_geom_key, cycle_base, derive_label, distance_mm, format_coord_mm,
-        geom_cache_dirty, group_layers, hidden_note, is_version_like, layer_group,
-        outline_legend_visible, pans_on, pick_outline_index, region_screen_px,
-        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, warning_phase,
-        BaseLevel, CameraAction, InputPreset, LayerGroup, Mode, Theme, WarningPhase,
+        base_display_color, build_geom_key, cycle_base_opacity, derive_label, display_grid_pitch,
+        distance_mm, export_file_names, finish_measurement, format_coord_mm, geom_cache_dirty,
+        group_layers, hidden_note, is_version_like, layer_group, legacy_base_opacity,
+        measure_click, measure_rail_click, measurement_remove, pans_on, pick_outline_index,
+        region_screen_px, scroll_to_camera_action, short_layer_name, single_layer_hint,
+        step_in_order, toggle_panel, warning_phase, CameraAction, InputPreset, LayerGroup,
+        Measurement, Mode, PanelTab, RailSide, Theme, WarningPhase, BASE_OPACITY_FAINT,
+        BASE_OPACITY_STRONG,
     };
     use etchy_core::LayerKind;
+
+    #[test]
+    fn gear_tooth_quad_is_a_radial_rectangle() {
+        use super::gear_tooth_quad;
+        // Angle 0 points along +x: the tooth is an axis-aligned rectangle spanning
+        // x in [r0, r1], y in [-half_w, +half_w] around the centre.
+        let q = gear_tooth_quad([0.0, 0.0], 0.0, 2.0, 4.0, 1.0);
+        assert_eq!(q, [[2.0, -1.0], [4.0, -1.0], [4.0, 1.0], [2.0, 1.0]]);
+        // Angle PI/2 points along +y: the same rectangle rotated a quarter turn.
+        let q = gear_tooth_quad([0.0, 0.0], std::f32::consts::FRAC_PI_2, 2.0, 4.0, 1.0);
+        for (got, want) in q
+            .iter()
+            .flatten()
+            .zip([1.0, 2.0, 1.0, 4.0, -1.0, 4.0, -1.0, 2.0])
+        {
+            assert!((got - want).abs() < 1e-5, "{q:?}");
+        }
+        // A non-zero centre translates every corner.
+        let q = gear_tooth_quad([10.0, 20.0], 0.0, 2.0, 4.0, 1.0);
+        assert_eq!(q, [[12.0, 19.0], [14.0, 19.0], [14.0, 21.0], [12.0, 21.0]]);
+    }
 
     #[test]
     fn hidden_note_only_when_something_is_hidden() {
@@ -4461,6 +5614,52 @@ mod tests {
         assert_eq!(single_layer_hint(13, 13), None); // all shown
         assert_eq!(single_layer_hint(1, 1), None); // only one layer exists
         assert_eq!(single_layer_hint(0, 5), None); // none shown
+    }
+
+    #[test]
+    fn display_grid_pitch_keeps_base_when_zoomed_in() {
+        // #195: zoomed in, the drawn grid is the snap grid itself — same as today.
+        assert_eq!(display_grid_pitch(1.0, 100.0).0, 1.0); // 100 px between lines
+        assert_eq!(display_grid_pitch(1.0, 24.0).0, 1.0); // exactly at the threshold
+        assert_eq!(display_grid_pitch(0.5, 60.0).0, 0.5);
+    }
+
+    #[test]
+    fn display_grid_pitch_scales_1_2_5_when_zoomed_out() {
+        // #195: zoomed out, the base pitch would be sub-24 px — walk the 1-2-5
+        // sequence up from grid_mm until lines are >= 24 px apart, like
+        // Altium/KiCad, instead of dropping the grid entirely.
+        assert_eq!(display_grid_pitch(1.0, 20.0).0, 2.0); // 1 mm → 20 px; 2 mm → 40 px
+        assert_eq!(display_grid_pitch(1.0, 10.0).0, 5.0); // 2 mm → 20 px; 5 mm → 50 px
+        assert_eq!(display_grid_pitch(1.0, 1.0).0, 50.0); // ...20 mm → 20 px; 50 → 50 px
+        assert_eq!(display_grid_pitch(0.5, 30.0).0, 1.0); // 0.5 mm → 15 px; 1 mm → 30 px
+    }
+
+    #[test]
+    fn display_grid_pitch_survives_extreme_zoom() {
+        // Deep zoom-out crosses several x10 decades and must stay finite — the
+        // grid never vanishes and the loop never spins forever.
+        assert_eq!(display_grid_pitch(1.0, 0.1).0, 500.0); // 200 mm → 20 px; 500 → 50
+        let p = display_grid_pitch(1.0, 1e-12).0;
+        assert!(p.is_finite() && p * 1e-12 >= 24.0);
+        // Absurdly tiny px-per-mm still terminates with a finite pitch.
+        let p = display_grid_pitch(1.0, f64::MIN_POSITIVE).0;
+        assert!(p.is_finite());
+        // Degenerate inputs fall back to the base pitch (caller guards them).
+        assert_eq!(display_grid_pitch(0.0, 100.0), (0.0, None));
+        assert_eq!(display_grid_pitch(1.0, 0.0), (1.0, None));
+        assert_eq!(display_grid_pitch(1.0, f64::NAN), (1.0, None));
+    }
+
+    #[test]
+    fn display_grid_pitch_reports_the_minor_step() {
+        // #195: when the drawn pitch was scaled up, the previous 1-2-5 step is the
+        // fainter minor grid; at the base pitch there is nothing below the snap
+        // grid to show.
+        assert_eq!(display_grid_pitch(1.0, 100.0), (1.0, None));
+        assert_eq!(display_grid_pitch(1.0, 20.0), (2.0, Some(1.0)));
+        assert_eq!(display_grid_pitch(1.0, 10.0), (5.0, Some(2.0)));
+        assert_eq!(display_grid_pitch(1.0, 1.0), (50.0, Some(20.0)));
     }
 
     #[test]
@@ -4602,7 +5801,7 @@ mod tests {
                     &cache,
                     &cam,
                     rect,
-                    BaseLevel::Faint,
+                    BASE_OPACITY_FAINT,
                     0,
                     |_| super::C_BASE,
                     egui::Color32::BLACK,
@@ -4648,14 +5847,16 @@ mod tests {
     #[test]
     fn base_display_color_dims_toward_canvas() {
         use super::{C_CANVAS, C_COPPER};
-        // Off shows the canvas (base not drawn); Strong reads closer to the real
-        // layer colour than Faint — both opaque so unchanged copper isn't black.
-        assert_eq!(
-            base_display_color(C_COPPER, C_CANVAS, BaseLevel::Off),
-            C_CANVAS
-        );
-        let faint = base_display_color(C_COPPER, C_CANVAS, BaseLevel::Faint);
-        let strong = base_display_color(C_COPPER, C_CANVAS, BaseLevel::Strong);
+        // Opacity 0 shows the canvas (base off); 1 shows the pure layer colour. The
+        // old faint/strong stops (0.4/0.8) still order the same, and both are opaque
+        // so unchanged copper isn't black.
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, 0.0), C_CANVAS);
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, 1.0), C_COPPER);
+        // Values outside 0..=1 are clamped, never a wrap/overflow.
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, -0.5), C_CANVAS);
+        assert_eq!(base_display_color(C_COPPER, C_CANVAS, 1.5), C_COPPER);
+        let faint = base_display_color(C_COPPER, C_CANVAS, BASE_OPACITY_FAINT);
+        let strong = base_display_color(C_COPPER, C_CANVAS, BASE_OPACITY_STRONG);
         assert!(strong.r() > faint.r());
         assert!(faint.r() > C_CANVAS.r()); // even faint is visibly above the black canvas
         assert_eq!(strong.a(), 255); // opaque
@@ -4663,40 +5864,40 @@ mod tests {
 
     #[test]
     fn geom_key_tracks_selection_inputs_only() {
-        let base = build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, true, Some(1));
-        // base Faint vs Strong is a colour, not geometry -> same key (no rebuild)
+        let base = build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1));
+        // base 0.4 vs 0.8 is a colour, not geometry -> same key (no rebuild)
         assert_eq!(
             base,
-            build_geom_key(&[0], Mode::Overlay, BaseLevel::Strong, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_STRONG, true, Some(1))
         );
-        // base Off flips base_on -> different key (the base mesh joins/leaves the draw)
+        // base opacity 0 flips base_on -> different key (the base mesh joins/leaves the draw)
         assert_ne!(
             base,
-            build_geom_key(&[0], Mode::Overlay, BaseLevel::Off, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, 0.0, true, Some(1))
         );
         // visible set / mode changes -> different key
         assert_ne!(
             base,
-            build_geom_key(&[2], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[2], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         assert_ne!(
             base,
-            build_geom_key(&[0], Mode::Old, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0], Mode::Old, BASE_OPACITY_FAINT, true, Some(1))
         );
         // With multiple layers shown, the outline still draws (it's enabled and
         // exists), so a visible-set change is what flips the key.
         assert_ne!(
             base,
-            build_geom_key(&[0, 1], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 1], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
     }
 
     #[test]
     fn geom_cache_dirty_on_none_or_change() {
-        let k = build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, false, None);
+        let k = build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_FAINT, false, None);
         assert!(geom_cache_dirty(None, &k));
         assert!(!geom_cache_dirty(Some(&k), &k));
-        let k2 = build_geom_key(&[2], Mode::Overlay, BaseLevel::Faint, false, None);
+        let k2 = build_geom_key(&[2], Mode::Overlay, BASE_OPACITY_FAINT, false, None);
         assert!(geom_cache_dirty(Some(&k), &k2));
     }
 
@@ -4923,10 +6124,43 @@ mod tests {
     }
 
     #[test]
-    fn cycle_base_rotates_off_faint_strong() {
-        assert_eq!(cycle_base(BaseLevel::Off), BaseLevel::Faint);
-        assert_eq!(cycle_base(BaseLevel::Faint), BaseLevel::Strong);
-        assert_eq!(cycle_base(BaseLevel::Strong), BaseLevel::Off);
+    fn cycle_base_opacity_rotates_off_faint_strong() {
+        // The S key steps the three familiar stops: 0 → faint → strong → 0.
+        assert_eq!(cycle_base_opacity(0.0), BASE_OPACITY_FAINT);
+        assert_eq!(cycle_base_opacity(BASE_OPACITY_FAINT), BASE_OPACITY_STRONG);
+        assert_eq!(cycle_base_opacity(BASE_OPACITY_STRONG), 0.0);
+        // An in-between slider value below strong steps up to strong; at/above strong wraps to off.
+        assert_eq!(cycle_base_opacity(0.2), BASE_OPACITY_STRONG);
+        assert_eq!(cycle_base_opacity(1.0), 0.0);
+    }
+
+    #[test]
+    fn legacy_base_level_migrates_to_opacity() {
+        // Pre-#12 off/faint/strong strings map to the equivalent opacity; unknown
+        // values fall back to faint (the old default).
+        assert_eq!(legacy_base_opacity("off"), 0.0);
+        assert_eq!(legacy_base_opacity("faint"), BASE_OPACITY_FAINT);
+        assert_eq!(legacy_base_opacity("strong"), BASE_OPACITY_STRONG);
+        assert_eq!(legacy_base_opacity("bogus"), BASE_OPACITY_FAINT);
+    }
+
+    #[test]
+    fn old_settings_json_migrates_base_level_to_opacity() {
+        use super::{Settings, ViewApp};
+        // An old persisted blob carries `base_level` as a string and no `base_opacity`.
+        // Deserializing fills base_opacity from Default, and apply_settings migrates
+        // the legacy string over it.
+        let old = r#"{"theme":"dark","base_level":"strong"}"#;
+        let s: Settings = serde_json::from_str(old).expect("deserialize old blob");
+        assert_eq!(s.base_level.as_deref(), Some("strong"));
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.apply_settings(s);
+        assert_eq!(app.base_opacity, BASE_OPACITY_STRONG);
+        // A blob with neither field keeps the faint default.
+        let bare: Settings = serde_json::from_str("{}").expect("deserialize empty");
+        let mut app2 = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app2.apply_settings(bare);
+        assert_eq!(app2.base_opacity, BASE_OPACITY_FAINT);
     }
 
     #[test]
@@ -4941,14 +6175,6 @@ mod tests {
         let none = [LayerKind::TopCopper, LayerKind::BottomCopper];
         assert_eq!(pick_outline_index(none.len(), |i| none[i]), None);
         assert_eq!(pick_outline_index(0, |_| LayerKind::Outline), None);
-    }
-
-    #[test]
-    fn outline_legend_visible_only_when_shown_and_not_selected() {
-        assert!(outline_legend_visible(true, Some(2), 1)); // shown, different layer
-        assert!(!outline_legend_visible(true, Some(2), 2)); // viewing the outline itself
-        assert!(!outline_legend_visible(false, Some(2), 1)); // hidden
-        assert!(!outline_legend_visible(true, None, 1)); // no outline layer
     }
 
     #[test]
@@ -5140,12 +6366,397 @@ mod tests {
     }
 
     #[test]
+    fn rail_side_serde_round_trips() {
+        for s in [RailSide::Left, RailSide::Right] {
+            let json = serde_json::to_string(&s).expect("serialize");
+            let back: RailSide = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(s, back);
+        }
+        // Unknown / legacy values fall back to the default (left), never error.
+        assert_eq!(
+            serde_json::from_str::<RailSide>("\"bogus\"").expect("deserialize"),
+            RailSide::Left,
+        );
+        assert_eq!(RailSide::default(), RailSide::Left);
+    }
+
+    #[test]
+    fn toggle_panel_opens_switches_and_collapses() {
+        // Clicking an inactive tab opens it; clicking the active tab collapses the
+        // panel; clicking a different tab switches to it.
+        assert_eq!(toggle_panel(None, PanelTab::Layers), Some(PanelTab::Layers));
+        assert_eq!(toggle_panel(Some(PanelTab::Layers), PanelTab::Layers), None);
+        assert_eq!(
+            toggle_panel(Some(PanelTab::Layers), PanelTab::Measure),
+            Some(PanelTab::Measure)
+        );
+        assert_eq!(
+            toggle_panel(Some(PanelTab::Measure), PanelTab::Layers),
+            Some(PanelTab::Layers)
+        );
+        // The rail's bottom gear drives Settings through the same semantics (#199).
+        assert_eq!(
+            toggle_panel(Some(PanelTab::Layers), PanelTab::Settings),
+            Some(PanelTab::Settings)
+        );
+        assert_eq!(
+            toggle_panel(Some(PanelTab::Settings), PanelTab::Settings),
+            None
+        );
+    }
+
+    #[test]
+    fn binding_conflict_blocks_taken_and_reserved_keys() {
+        use super::{binding_conflict, HotkeyAction, InputPreset, KeyBinding, Keymap};
+        use egui::Key;
+        let km = Keymap::default();
+        // A key another rebindable action already owns is refused...
+        assert!(binding_conflict(
+            &km,
+            HotkeyAction::FitView,
+            KeyBinding::plain(Key::S), // = Cycle base opacity
+            InputPreset::KiCad,
+        )
+        .is_some());
+        // ...but re-capturing an action's own current binding is fine.
+        assert!(binding_conflict(
+            &km,
+            HotkeyAction::CycleBase,
+            KeyBinding::plain(Key::S),
+            InputPreset::KiCad,
+        )
+        .is_none());
+        // Fixed plain-key aliases are reserved (O/B/A modes, J/K layer step)...
+        for key in [Key::O, Key::B, Key::A, Key::J, Key::K] {
+            assert!(
+                binding_conflict(
+                    &km,
+                    HotkeyAction::FitView,
+                    KeyBinding::plain(key),
+                    InputPreset::KiCad,
+                )
+                .is_some(),
+                "plain {key:?} is a fixed alias and must be refused"
+            );
+        }
+        // ...but the same letters WITH a modifier are free (aliases are bare-key).
+        assert!(binding_conflict(
+            &km,
+            HotkeyAction::FitView,
+            KeyBinding {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::O
+            },
+            InputPreset::KiCad,
+        )
+        .is_none());
+        // Altium's preset Shift+C clear is reserved while no custom clear
+        // binding stands it down — and only under Altium.
+        let shift_c = KeyBinding {
+            ctrl: false,
+            shift: true,
+            alt: false,
+            key: Key::C,
+        };
+        assert!(
+            binding_conflict(&km, HotkeyAction::FitView, shift_c, InputPreset::Altium).is_some()
+        );
+        assert!(
+            binding_conflict(&km, HotkeyAction::FitView, shift_c, InputPreset::KiCad).is_none()
+        );
+        // A genuinely free key binds without complaint.
+        assert!(binding_conflict(
+            &km,
+            HotkeyAction::FitView,
+            KeyBinding::plain(Key::T),
+            InputPreset::Altium,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn keymap_defaults_match_the_shipped_bindings() {
+        use super::{HotkeyAction, KeyBinding, Keymap};
+        use egui::Key;
+        let km = Keymap::default();
+        assert_eq!(
+            km.toggle_measure,
+            KeyBinding {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::M
+            },
+            "measure arms on Ctrl+M (#197)"
+        );
+        // Clear-measurements follows the #198 preset (Shift+C / Esc) until an
+        // explicit rebind overrides it.
+        assert_eq!(km.clear_measure, None);
+        assert_eq!(km.fit_view, KeyBinding::plain(Key::F));
+        assert_eq!(km.cycle_base, KeyBinding::plain(Key::S));
+        assert_eq!(km.cycle_unit, KeyBinding::plain(Key::U));
+        assert_eq!(km.toggle_grid, KeyBinding::plain(Key::G));
+        assert_eq!(km.mode_overlay, KeyBinding::plain(Key::Num1));
+        assert_eq!(km.mode_old, KeyBinding::plain(Key::Num2));
+        assert_eq!(km.mode_new, KeyBinding::plain(Key::Num3));
+        assert_eq!(km.mode_split, KeyBinding::plain(Key::Num4));
+        assert_eq!(km.mode_swipe, KeyBinding::plain(Key::Num5));
+        // get/set round-trip through the action enum, for every action.
+        let mut km = km;
+        for (action, _) in HotkeyAction::ALL {
+            let b = KeyBinding {
+                ctrl: false,
+                shift: true,
+                alt: false,
+                key: Key::X,
+            };
+            km.set(action, b);
+            assert_eq!(km.get(action), Some(b));
+        }
+    }
+
+    #[test]
+    fn format_binding_reads_like_a_shortcut() {
+        use super::{format_binding, KeyBinding};
+        use egui::Key;
+        assert_eq!(
+            format_binding(KeyBinding {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::M
+            }),
+            "Ctrl+M"
+        );
+        assert_eq!(
+            format_binding(KeyBinding {
+                ctrl: false,
+                shift: true,
+                alt: false,
+                key: Key::C
+            }),
+            "Shift+C"
+        );
+        assert_eq!(format_binding(KeyBinding::plain(Key::S)), "S");
+        assert_eq!(format_binding(KeyBinding::plain(Key::Num1)), "1");
+        assert_eq!(
+            format_binding(KeyBinding {
+                ctrl: true,
+                shift: true,
+                alt: true,
+                key: Key::X
+            }),
+            "Ctrl+Shift+Alt+X"
+        );
+    }
+
+    #[test]
+    fn parse_binding_round_trips_and_rejects_unknown() {
+        use super::{format_binding, parse_binding, HotkeyAction, KeyBinding, Keymap};
+        use egui::Key;
+        // Every shipped default plus a fully-modified combo round-trips.
+        let km = Keymap::default();
+        let mut all: Vec<KeyBinding> = HotkeyAction::ALL
+            .iter()
+            .filter_map(|(a, _)| km.get(*a))
+            .collect();
+        all.push(KeyBinding {
+            ctrl: true,
+            shift: true,
+            alt: true,
+            key: Key::Home,
+        });
+        for b in all {
+            assert_eq!(parse_binding(&format_binding(b)), Some(b), "{b:?}");
+        }
+        // Unknown key names and dangling modifiers are rejected, never guessed.
+        assert_eq!(parse_binding("Bogus"), None);
+        assert_eq!(parse_binding("Ctrl+"), None);
+        assert_eq!(parse_binding(""), None);
+    }
+
+    #[test]
+    fn keymap_serde_round_trips_and_defaults_missing_fields() {
+        use super::{HotkeyAction, KeyBinding, Keymap, Settings};
+        use egui::Key;
+        let mut km = Keymap::default();
+        km.set(
+            HotkeyAction::FitView,
+            KeyBinding {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::Home,
+            },
+        );
+        km.set(
+            HotkeyAction::ClearMeasurements,
+            KeyBinding {
+                ctrl: false,
+                shift: true,
+                alt: false,
+                key: Key::Delete,
+            },
+        );
+        let json = serde_json::to_string(&km).expect("serialize");
+        let back: Keymap = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(km, back);
+        // A pre-#201 config (no keymap at all) gets the defaults.
+        let s: Settings = serde_json::from_str("{}").expect("deserialize empty");
+        assert_eq!(s.keymap, Keymap::default());
+        // A partial keymap fills the missing fields from the defaults.
+        let partial: Keymap =
+            serde_json::from_str(r#"{"fit_view":"Ctrl+Home"}"#).expect("deserialize partial");
+        assert_eq!(
+            partial.fit_view,
+            KeyBinding {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::Home
+            }
+        );
+        assert_eq!(partial.toggle_measure, Keymap::default().toggle_measure);
+    }
+
+    #[test]
+    fn capture_key_binds_next_press_and_esc_cancels() {
+        use super::{capture_key, CaptureResult, KeyBinding};
+        use egui::Key;
+        // Esc cancels the capture — even with modifiers held, it never binds
+        // Ctrl+Esc.
+        assert_eq!(
+            capture_key(Key::Escape, false, false, false),
+            CaptureResult::Cancel
+        );
+        assert_eq!(
+            capture_key(Key::Escape, true, true, true),
+            CaptureResult::Cancel
+        );
+        // Any other press becomes the binding, modifiers included.
+        assert_eq!(
+            capture_key(Key::M, true, false, false),
+            CaptureResult::Bind(KeyBinding {
+                ctrl: true,
+                shift: false,
+                alt: false,
+                key: Key::M
+            })
+        );
+        assert_eq!(
+            capture_key(Key::X, false, true, true),
+            CaptureResult::Bind(KeyBinding {
+                ctrl: false,
+                shift: true,
+                alt: true,
+                key: Key::X
+            })
+        );
+    }
+
+    #[test]
+    fn custom_clear_binding_disables_preset_clears() {
+        use super::{measure_key_action, MeasureAction, MeasureKey};
+        // With an explicit Clear-measurements rebind (#201), the preset defaults
+        // stand down: Shift+C under Altium no longer clears the list…
+        assert_eq!(
+            measure_key_action(
+                InputPreset::Altium,
+                MeasureKey::ShiftC,
+                true,
+                false,
+                true,
+                true
+            ),
+            MeasureAction::None
+        );
+        // …and KiCad's Esc skips the list-clear step, going straight to exit.
+        assert_eq!(
+            measure_key_action(
+                InputPreset::KiCad,
+                MeasureKey::Escape,
+                true,
+                false,
+                true,
+                true
+            ),
+            MeasureAction::ExitTool
+        );
+        // The point-clear and exit steps of the Esc cascade are untouched.
+        assert_eq!(
+            measure_key_action(
+                InputPreset::KiCad,
+                MeasureKey::Escape,
+                true,
+                true,
+                true,
+                true
+            ),
+            MeasureAction::ClearPoints
+        );
+        assert_eq!(
+            measure_key_action(
+                InputPreset::KiCad,
+                MeasureKey::Escape,
+                false,
+                false,
+                true,
+                true
+            ),
+            MeasureAction::None
+        );
+    }
+
+    #[test]
+    fn export_file_names_mirror_build_export() {
+        // The preview must match `build_export`'s naming exactly: an
+        // index-prefixed SVG per chosen layer (so two layers with the same
+        // display name don't clobber each other) plus a trailing `areas.csv`.
+        let names = vec!["top-copper".to_string(), "inner-copper1".to_string()];
+        assert_eq!(
+            export_file_names(&names),
+            vec![
+                "00-top-copper.svg".to_string(),
+                "01-inner-copper1.svg".to_string(),
+                "areas.csv".to_string(),
+            ]
+        );
+
+        // No layers (e.g. nothing changed, or none selected) still writes the CSV.
+        assert_eq!(export_file_names(&[]), vec!["areas.csv".to_string()]);
+
+        // Same display name twice → distinct index-prefixed files.
+        let dup = vec!["other".to_string(), "other".to_string()];
+        assert_eq!(
+            export_file_names(&dup),
+            vec![
+                "00-other.svg".to_string(),
+                "01-other.svg".to_string(),
+                "areas.csv".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn settings_serde_round_trips() {
-        use super::{color_to_rgba, rgba_to_color, Settings};
-        use egui::Color32;
+        use super::{color_to_rgba, rgba_to_color, HotkeyAction, KeyBinding, Keymap, Settings};
+        use egui::{Color32, Key};
+        let mut keymap = Keymap::default();
+        keymap.set(
+            HotkeyAction::ToggleMeasure,
+            KeyBinding {
+                ctrl: true,
+                shift: true,
+                alt: false,
+                key: Key::M,
+            },
+        );
         let s = Settings {
             theme: Theme::Light,
-            base_level: BaseLevel::Strong,
+            base_opacity: BASE_OPACITY_STRONG,
+            base_level: None, // legacy migration field; never written, always None after a round trip
             base_overrides: vec![(0, [1, 2, 3, 4]), (3, [255, 0, 128, 255])],
             min_area_mm2: 0.0123,
             col_added: [10, 20, 30, 255],
@@ -5157,6 +6768,8 @@ mod tests {
             input_preset: InputPreset::KiCad,
             visible_layers: vec![0, 2, 5],
             swipe_frac: 0.42,
+            rail_side: RailSide::Right,
+            keymap,
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
@@ -5168,14 +6781,204 @@ mod tests {
 
     #[test]
     fn measure_escape_clears_then_exits() {
-        use super::measure_escape;
+        use super::{measure_key_action, MeasureAction, MeasureKey};
         // In measure mode with an in-progress measurement: first Esc clears the
-        // points but stays in measure mode (#50).
-        assert_eq!(measure_escape(true, true), (true, true));
-        // In measure mode with nothing to clear: a second Esc exits measure mode.
-        assert_eq!(measure_escape(true, false), (false, false));
-        // Not in measure mode: Esc is a no-op.
-        assert_eq!(measure_escape(false, false), (false, false));
+        // points but stays in measure mode (#50) — same in every preset.
+        for p in [InputPreset::Altium, InputPreset::KiCad] {
+            assert_eq!(
+                measure_key_action(p, MeasureKey::Escape, true, true, false, false),
+                MeasureAction::ClearPoints
+            );
+        }
+        // Altium, in measure mode with nothing in progress: Esc exits measure
+        // mode — even when the completed list is non-empty (#198: list-clearing
+        // Esc is KiCad-only; Altium uses Shift+C).
+        assert_eq!(
+            measure_key_action(
+                InputPreset::Altium,
+                MeasureKey::Escape,
+                true,
+                false,
+                true,
+                false
+            ),
+            MeasureAction::ExitTool
+        );
+        assert_eq!(
+            measure_key_action(
+                InputPreset::Altium,
+                MeasureKey::Escape,
+                true,
+                false,
+                false,
+                false
+            ),
+            MeasureAction::ExitTool
+        );
+        // Not in measure mode, nothing to clear: Esc is a no-op.
+        assert_eq!(
+            measure_key_action(
+                InputPreset::Altium,
+                MeasureKey::Escape,
+                false,
+                false,
+                false,
+                false
+            ),
+            MeasureAction::None
+        );
+    }
+
+    #[test]
+    fn kicad_escape_clears_list_before_exiting() {
+        use super::{measure_key_action, MeasureAction, MeasureKey};
+        let esc = |mode, pts, list| {
+            measure_key_action(
+                InputPreset::KiCad,
+                MeasureKey::Escape,
+                mode,
+                pts,
+                list,
+                false,
+            )
+        };
+        // KiCad (#198): the Esc cascade gains a middle step — in-progress point
+        // first, then the completed list, then exit the tool.
+        assert_eq!(esc(true, true, true), MeasureAction::ClearPoints);
+        assert_eq!(esc(true, false, true), MeasureAction::ClearList);
+        assert_eq!(esc(true, false, false), MeasureAction::ExitTool);
+        // A leftover list still clears even when the tool is disarmed.
+        assert_eq!(esc(false, false, true), MeasureAction::ClearList);
+        assert_eq!(esc(false, false, false), MeasureAction::None);
+    }
+
+    #[test]
+    fn shift_c_clears_list_under_altium_only() {
+        use super::{measure_key_action, MeasureAction, MeasureKey};
+        // Altium (#198): Shift+C clears the completed list whenever it's
+        // non-empty, armed or not; it never touches the in-progress point.
+        for (mode, pts) in [(true, true), (true, false), (false, false)] {
+            assert_eq!(
+                measure_key_action(
+                    InputPreset::Altium,
+                    MeasureKey::ShiftC,
+                    mode,
+                    pts,
+                    true,
+                    false
+                ),
+                MeasureAction::ClearList
+            );
+        }
+        // Nothing listed: no-op.
+        assert_eq!(
+            measure_key_action(
+                InputPreset::Altium,
+                MeasureKey::ShiftC,
+                true,
+                true,
+                false,
+                false
+            ),
+            MeasureAction::None
+        );
+        // KiCad doesn't bind Shift+C (it clears via Esc).
+        assert_eq!(
+            measure_key_action(
+                InputPreset::KiCad,
+                MeasureKey::ShiftC,
+                true,
+                false,
+                true,
+                false
+            ),
+            MeasureAction::None
+        );
+    }
+
+    #[test]
+    fn finish_measurement_carries_both_endpoints() {
+        let m = finish_measurement([1.0, 2.0], [3.0, 4.0]);
+        assert_eq!(
+            m,
+            Measurement {
+                a: [1.0, 2.0],
+                b: [3.0, 4.0]
+            }
+        );
+    }
+
+    #[test]
+    fn measure_click_completes_a_pair_then_resets() {
+        // Two clicks produce one Measurement and leave the buffer empty, ready for
+        // the next pair (#50).
+        let mut pts: Vec<[f64; 2]> = Vec::new();
+        // First click: stores the point, nothing completed yet.
+        assert_eq!(measure_click(&mut pts, [0.0, 0.0]), None);
+        assert_eq!(pts, vec![[0.0, 0.0]]);
+        // Second click: completes the pair and empties the buffer.
+        let done = measure_click(&mut pts, [3_000_000.0, 4_000_000.0]);
+        assert_eq!(
+            done,
+            Some(Measurement {
+                a: [0.0, 0.0],
+                b: [3_000_000.0, 4_000_000.0],
+            })
+        );
+        assert!(pts.is_empty(), "buffer resets after completing a pair");
+        // Third click starts a fresh pair.
+        assert_eq!(measure_click(&mut pts, [5.0, 6.0]), None);
+        assert_eq!(pts, vec![[5.0, 6.0]]);
+    }
+
+    #[test]
+    fn measurement_remove_deletes_index_and_is_bounds_safe() {
+        let mut list = vec![
+            Measurement {
+                a: [0.0, 0.0],
+                b: [1.0, 0.0],
+            },
+            Measurement {
+                a: [0.0, 0.0],
+                b: [2.0, 0.0],
+            },
+            Measurement {
+                a: [0.0, 0.0],
+                b: [3.0, 0.0],
+            },
+        ];
+        // Removes the requested index and keeps the rest in order.
+        measurement_remove(&mut list, 1);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].b, [1.0, 0.0]);
+        assert_eq!(list[1].b, [3.0, 0.0]);
+        // Out-of-range index is a no-op, never a panic.
+        measurement_remove(&mut list, 9);
+        assert_eq!(list.len(), 2);
+        // Clearing empties the list.
+        list.clear();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn measure_rail_click_arms_on_open_disarms_on_collapse() {
+        // Clicking Measure from any non-Measure state opens the panel and arms.
+        assert_eq!(
+            measure_rail_click(None),
+            (Some(PanelTab::Measure), true),
+            "opening Measure arms the tool"
+        );
+        assert_eq!(
+            measure_rail_click(Some(PanelTab::Layers)),
+            (Some(PanelTab::Measure), true),
+            "switching to Measure from another tab arms the tool"
+        );
+        // Clicking the active Measure tab collapses the panel and disarms.
+        assert_eq!(
+            measure_rail_click(Some(PanelTab::Measure)),
+            (None, false),
+            "collapsing Measure disarms the tool"
+        );
     }
 
     #[test]
@@ -5250,7 +7053,7 @@ mod tests {
         use egui::Color32;
         let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
         app.theme = Theme::Light;
-        app.base_level = BaseLevel::Strong;
+        app.base_opacity = BASE_OPACITY_STRONG;
         app.min_area_mm2 = 0.05;
         app.col_added = Color32::from_rgb(1, 2, 3);
         app.col_removed = Color32::from_rgb(4, 5, 6);
@@ -5265,7 +7068,7 @@ mod tests {
         let mut fresh = ViewApp::new(empty_diff(), "x".into(), "y".into());
         fresh.apply_settings(settings);
         assert_eq!(fresh.theme, app.theme);
-        assert_eq!(fresh.base_level, app.base_level);
+        assert_eq!(fresh.base_opacity, app.base_opacity);
         assert_eq!(fresh.min_area_mm2, app.min_area_mm2);
         assert_eq!(fresh.col_added, app.col_added);
         assert_eq!(fresh.col_removed, app.col_removed);
@@ -5312,18 +7115,24 @@ mod tests {
     #[test]
     fn view_mode_visibility_presets() {
         use super::{visibility_for_mode, ViewMode};
-        // Single: only the active layer is on.
+        // Single: the active layer plus the board outline are on (#157).
         assert_eq!(
-            visibility_for_mode(ViewMode::Single, 4, 2),
+            visibility_for_mode(ViewMode::Single, 4, 2, Some(0)),
+            vec![true, false, true, false]
+        );
+        // No outline layer: Single is just the active layer.
+        assert_eq!(
+            visibility_for_mode(ViewMode::Single, 4, 2, None),
             vec![false, false, true, false]
         );
-        // Highlight and All: every layer on (they differ only in dimming).
+        // Highlight and All: every layer on (they differ only in dimming); the
+        // outline is already covered by the all-on set.
         assert_eq!(
-            visibility_for_mode(ViewMode::Highlight, 3, 0),
+            visibility_for_mode(ViewMode::Highlight, 3, 0, Some(2)),
             vec![true, true, true]
         );
         assert_eq!(
-            visibility_for_mode(ViewMode::All, 3, 0),
+            visibility_for_mode(ViewMode::All, 3, 0, None),
             vec![true, true, true]
         );
     }
@@ -5376,15 +7185,25 @@ mod tests {
     }
 
     #[test]
-    fn default_visible_shows_only_the_selected_layer() {
+    fn default_visible_shows_the_selected_layer_and_outline() {
         use super::default_visible;
-        // On load only the selected layer is visible; multi-layer is opt-in (#9/#10
-        // perf — fewer layers transformed by default).
-        assert_eq!(default_visible(4, 2), vec![false, false, true, false]);
-        assert_eq!(default_visible(1, 0), vec![true]);
+        // On load the selected layer plus the board outline are visible; every other
+        // layer is opt-in (#9/#10 perf), and the outline reads as orientation from the
+        // start (#157).
+        assert_eq!(
+            default_visible(4, 2, Some(0)),
+            vec![true, false, true, false]
+        );
+        // No outline layer: just the selected one, as before.
+        assert_eq!(default_visible(4, 2, None), vec![false, false, true, false]);
+        // Outline == selected: a single true, no double-set panic.
+        assert_eq!(default_visible(3, 1, Some(1)), vec![false, true, false]);
+        // Out-of-range outline is ignored (only the selected turns on).
+        assert_eq!(default_visible(2, 0, Some(9)), vec![true, false]);
+        assert_eq!(default_visible(1, 0, None), vec![true]);
         // Empty board / out-of-range selected: no panic, nothing forced on.
-        assert_eq!(default_visible(0, 0), Vec::<bool>::new());
-        assert_eq!(default_visible(3, 9), vec![false, false, false]);
+        assert_eq!(default_visible(0, 0, None), Vec::<bool>::new());
+        assert_eq!(default_visible(3, 9, None), vec![false, false, false]);
     }
 
     #[test]
@@ -5413,29 +7232,29 @@ mod tests {
 
     #[test]
     fn geom_key_tracks_the_visible_set() {
-        let base = build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Faint, true, Some(1));
+        let base = build_geom_key(&[0, 2], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1));
         // Same visible set + same other inputs -> equal (no rebuild).
         assert_eq!(
             base,
-            build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 2], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         // A different visible set -> different key (the merged mesh changes).
         assert_ne!(
             base,
-            build_geom_key(&[0], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         assert_ne!(
             base,
-            build_geom_key(&[0, 2, 3], Mode::Overlay, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 2, 3], Mode::Overlay, BASE_OPACITY_FAINT, true, Some(1))
         );
         // base-off and mode still flip the key.
         assert_ne!(
             base,
-            build_geom_key(&[0, 2], Mode::Overlay, BaseLevel::Off, true, Some(1))
+            build_geom_key(&[0, 2], Mode::Overlay, 0.0, true, Some(1))
         );
         assert_ne!(
             base,
-            build_geom_key(&[0, 2], Mode::Old, BaseLevel::Faint, true, Some(1))
+            build_geom_key(&[0, 2], Mode::Old, BASE_OPACITY_FAINT, true, Some(1))
         );
     }
 
