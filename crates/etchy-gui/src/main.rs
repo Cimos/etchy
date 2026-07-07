@@ -716,6 +716,15 @@ impl ViewMode {
     fn dims_others(self) -> bool {
         matches!(self, ViewMode::Highlight)
     }
+
+    /// In All view, non-selected layers draw DIFF-ONLY — their faint base copper
+    /// (the bulk of the per-frame vertices, ~70% on a 13-layer board) is dropped so
+    /// panning stays smooth on dense boards (#158). The selected layer keeps its
+    /// base for context, and Highlight keeps every layer's dimmed base as context;
+    /// only All trades the non-selected base away.
+    fn hides_unselected_base(self) -> bool {
+        matches!(self, ViewMode::All)
+    }
 }
 
 /// The per-layer visibility a view mode selects (#59): Single shows only the active
@@ -2395,6 +2404,15 @@ impl eframe::App for ViewApp {
                                 open_side = Some(RevSide::New);
                                 ui.close();
                             }
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new(
+                                    "…or drag a folder / .zip onto the window\n\
+                                     (if the file dialog doesn't open)",
+                                )
+                                .weak()
+                                .small(),
+                            );
                         });
                     }
                     // Flexible middle (left of the actions in RTL): transient export
@@ -2495,7 +2513,34 @@ impl eframe::App for ViewApp {
                 let mut toggle: Option<(usize, bool)> = None; // (layer, show)
                 let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
                 let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
+                let mut toggle_outline = false; // board-edge visibility (#157)
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    // Board edge is its own reference "layer" (#157): a row in the list
+                    // with the others (an eye toggle like every layer row), not a
+                    // separate control. It's a faint outline drawn on every layer.
+                    if self.outline.is_some() {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Reference").small().color(C_COPPER));
+                        ui.horizontal(|ui| {
+                            if eye_toggle(ui, self.show_outline)
+                                .on_hover_text("Show / hide the board outline reference")
+                                .clicked()
+                            {
+                                toggle_outline = true;
+                            }
+                            let (sw, _) = ui
+                                .allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
+                            ui.painter().rect_stroke(
+                                sw,
+                                2.0,
+                                Stroke::new(1.5, C_COPPER),
+                                egui::StrokeKind::Inside,
+                            );
+                            ui.label("board edge").on_hover_text(
+                                "The board outline (Edge.Cuts/GKO), drawn faint on every layer.",
+                            );
+                        });
+                    }
                     // Group into sections (copper / mask / silk / …) in fixed order,
                     // changed-first within each (G5).
                     let groups =
@@ -2655,25 +2700,8 @@ impl eframe::App for ViewApp {
                         self.base_overrides.push((idx, c));
                     }
                 }
-                // Board-edge reference toggle, moved off the top bar (#157). It's a
-                // reference outline drawn on every layer, not a diff layer, so it sits
-                // below the list with its own faint-copper swatch.
-                if self.outline.is_some() {
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        let (sw, _) =
-                            ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-                        ui.painter().rect_stroke(
-                            sw,
-                            2.0,
-                            Stroke::new(1.5, C_COPPER),
-                            egui::StrokeKind::Inside,
-                        );
-                        ui.checkbox(&mut self.show_outline, "board edge").on_hover_text(
-                            "Show the board outline (Edge.Cuts/GKO) as a faint reference on every layer.",
-                        );
-                    });
+                if toggle_outline {
+                    self.show_outline = !self.show_outline;
                 }
             });
 
@@ -3009,8 +3037,13 @@ impl ViewApp {
         // pan logic below is skipped for this frame. The handle has a few px of
         // grab tolerance and shows a horizontal-resize cursor on hover.
         let mut swipe_dragging = false;
+        // Hover-or-drag on the divider (#61) — drives a heavier, highlighted handle
+        // in the draw pass so it reads as grabbable.
+        let mut swipe_hot = false;
         if self.mode == Mode::Swipe {
-            const GRAB_PX: f32 = 6.0;
+            // Generous grab band (#61): the old 6px was very hard to hit on a
+            // trackpad. A wide band the full height of the divider makes it easy.
+            const GRAB_PX: f32 = 16.0;
             let (_, _, div_x) = swipe_rects(rect, self.swipe_frac);
             let near_div = response
                 .hover_pos()
@@ -3030,7 +3063,8 @@ impl ViewApp {
                 }
                 swipe_dragging = true;
             }
-            if near_div || self.swipe_drag {
+            swipe_hot = near_div || self.swipe_drag;
+            if swipe_hot {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
         } else {
@@ -3239,20 +3273,45 @@ impl ViewApp {
             if !rmesh.is_empty() {
                 painter.with_clip_rect(rr).add(Shape::from(rmesh));
             }
-            // The divider: a copper wipe line. In Swipe it's the draggable handle —
-            // drawn a touch heavier, with grab pips, so it reads as movable.
+            // The divider: a copper wipe line. In Swipe it's the draggable handle,
+            // heavier and brighter when hovered/dragged (#61) so it reads as movable.
+            let line_col = if swipe && swipe_hot {
+                C_CREAM
+            } else {
+                C_COPPER
+            };
             painter.line_segment(
                 [
                     Pos2::new(div_x, rect.top()),
                     Pos2::new(div_x, rect.bottom()),
                 ],
-                Stroke::new(if swipe { 2.5 } else { 1.5 }, C_COPPER),
+                Stroke::new(if swipe { 2.5 } else { 1.5 }, line_col),
             );
             if swipe {
-                // A small grab handle at mid-height so the divider reads as draggable.
+                // A clear grab handle at mid-height: a rounded copper pill with three
+                // grip lines, so the divider is an obvious, easy target (#61). It
+                // brightens with a cream outline when hovered/dragged.
                 let mid_y = rect.center().y;
-                for dy in [-14.0, 0.0, 14.0] {
-                    painter.circle_filled(Pos2::new(div_x, mid_y + dy), 2.5, C_COPPER);
+                let handle =
+                    Rect::from_center_size(Pos2::new(div_x, mid_y), egui::vec2(12.0, 48.0));
+                painter.rect_filled(handle, 6.0, C_COPPER);
+                if swipe_hot {
+                    painter.rect_stroke(
+                        handle,
+                        6.0,
+                        Stroke::new(1.5, C_CREAM),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                // Grip lines.
+                for dy in [-8.0, 0.0, 8.0] {
+                    painter.line_segment(
+                        [
+                            Pos2::new(div_x - 3.0, mid_y + dy),
+                            Pos2::new(div_x + 3.0, mid_y + dy),
+                        ],
+                        Stroke::new(1.2, C_CANVAS),
+                    );
                 }
             }
             // Labels at each half's BOTTOM-left so they don't collide with the
@@ -3309,6 +3368,7 @@ impl ViewApp {
                     min_area_nm2,
                     false,
                     self.view_mode.dims_others(),
+                    self.view_mode.hides_unselected_base(),
                 );
                 self.last_hidden = hidden;
                 n = shapes.len();
@@ -3480,42 +3540,6 @@ enum Role {
     Removed,
 }
 
-/// Stroke a diff region's outer edge only once its on-screen EXTENT clears this
-/// (#113): big enough that the eye is parsing shape, small enough to help as soon
-/// as adjacent added/removed slivers start to merge visually.
-const DIFF_EDGE_MIN_PX: f32 = 14.0;
-/// …and only when the region is visibly FILLED on screen (thickness in px). The
-/// thickness LOD deliberately fades sub-pixel slivers (pour rims); stroking those
-/// would resurrect them as full-length hairlines of noise.
-const DIFF_EDGE_MIN_THICK_PX: f32 = 2.5;
-/// …and only for reasonably COMPACT regions (extent ≤ this × thickness). #113's
-/// intent is to delineate adjacent added/removed *blobs* (moved pads/vias); a long
-/// thin sliver (a shifted trace) has extent ≫ thickness, and stroking its outline
-/// just draws a long line that reads as a stray diagonal artifact, not a boundary
-/// (#153). The fill already shows such slivers; the outline adds nothing there.
-const DIFF_EDGE_MAX_ASPECT: i64 = 6;
-
-/// Whether a diff region should get a #113 edge stroke: it must read as a filled
-/// shape on screen (thickness), be sizeable (extent), still be visible (alpha), and
-/// be compact rather than an elongated sliver (extent ≤ MAX_ASPECT × thickness).
-/// Pure so the sliver-vs-blob decision is unit-testable (#153).
-fn diff_edge_eligible(area_nm2: f64, extent_nm: i64, scale: f64, alpha: u8) -> bool {
-    let thickness_nm = feature_thickness_nm(area_nm2, extent_nm);
-    let thickness_px = region_screen_px(thickness_nm, scale);
-    let extent_px = region_screen_px(extent_nm, scale);
-    thickness_px >= DIFF_EDGE_MIN_THICK_PX
-        && extent_px >= DIFF_EDGE_MIN_PX
-        && alpha >= 48
-        && extent_nm <= thickness_nm.saturating_mul(DIFF_EDGE_MAX_ASPECT)
-}
-
-/// The edge stroke colour for a diff fill: the same hue darkened, alpha kept, so
-/// green/red regions get a crisp boundary without introducing a new colour.
-fn diff_edge_color(fill: Color32) -> Color32 {
-    let d = |v: u8| (v as u16 * 55 / 100) as u8;
-    Color32::from_rgba_unmultiplied(d(fill.r()), d(fill.g()), d(fill.b()), fill.a())
-}
-
 /// One triangulated draw item, in WORLD space (camera-independent). For diff items
 /// `extent_nm`/`area_nm2` drive the per-frame LOD fade + min-area cull without
 /// re-triangulating; base/outline leave them 0.
@@ -3527,11 +3551,6 @@ struct CachedItem {
     /// reference isn't tied to one layer, so it uses `usize::MAX` (never dimmed).
     layer_index: usize,
     tris: Vec<[Pt; 3]>,
-    /// The region's OUTER ring (world space), stroked as a thin edge when the
-    /// region is large enough on screen — adjacent added/removed slivers from a
-    /// moved feature read as two distinct shapes instead of one smear (#113).
-    /// Empty for base/outline items (no edge drawn).
-    ring: Vec<Pt>,
     /// World bbox [minx, miny, maxx, maxy] — for off-screen culling per frame.
     bbox: [i64; 4],
     extent_nm: i64,
@@ -3594,7 +3613,6 @@ fn push_context_items(
                 side,
                 layer_index,
                 tris,
-                ring: Vec::new(),
                 bbox: bb,
                 extent_nm,
                 area_nm2,
@@ -3619,7 +3637,6 @@ fn push_diff_items(items: &mut Vec<CachedItem>, set: &PolygonSet, role: Role, la
                 side: Side::Full,
                 layer_index,
                 tris,
-                ring: outer.clone(),
                 bbox: bb,
                 extent_nm,
                 area_nm2,
@@ -3731,14 +3748,46 @@ const TIER_LABELS_PX: f32 = 940.0;
 /// Below this window width (pt) the right action cluster collapses into "More".
 const TIER_MORE_PX: f32 = 900.0;
 
+/// Running under WSL? WSL sets `WSL_DISTRO_NAME`, and the kernel release contains
+/// "microsoft". On real Windows/macOS/Linux this is always false (the /proc read
+/// just fails), so it only affects the WSL dev path.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_wsl() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
+/// Open a URL in the user's browser (#159). On WSL the Linux browser handlers
+/// don't reach the Windows browser, so route through `explorer.exe`; everywhere
+/// else use egui's normal handler (Win32 ShellExecute / macOS `open` / a Linux
+/// desktop's opener).
+fn open_url(ctx: &egui::Context, url: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if is_wsl() {
+        let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+        return;
+    }
+    ctx.open_url(egui::OpenUrl::new_tab(url));
+}
+
 /// The Help menu's links + version — shared by the top bar's Help button and the
-/// narrow "More" menu (#57).
+/// narrow "More" menu (#57). Uses [`open_url`] so the links work on WSL too (#159).
 fn help_links(ui: &mut egui::Ui) {
-    ui.hyperlink_to("etchy on GitHub", URL_REPO);
-    ui.hyperlink_to("Website", URL_SITE);
-    ui.hyperlink_to("Report an issue", URL_ISSUES);
+    for (label, url) in [
+        ("etchy on GitHub", URL_REPO),
+        ("Website", URL_SITE),
+        ("Report an issue", URL_ISSUES),
+    ] {
+        if ui.link(label).clicked() {
+            open_url(ui.ctx(), url);
+        }
+    }
     ui.separator();
-    ui.hyperlink_to("Sponsor / fund etchy", URL_SPONSOR);
+    if ui.link("Sponsor / fund etchy").clicked() {
+        open_url(ui.ctx(), URL_SPONSOR);
+    }
     ui.separator();
     ui.label(format!("etchy v{}", env!("CARGO_PKG_VERSION")))
         .on_hover_text("The engine version.");
@@ -3820,6 +3869,9 @@ fn transform_cache(
     skip_base: bool,
     // Whether non-selected layers are dimmed (#59 Highlight mode).
     dim_others: bool,
+    // Whether non-selected layers' base copper is dropped (#158 All view) — the
+    // selected layer keeps its base; others draw diff-only, cutting ~70% of verts.
+    hide_unselected_base: bool,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
     // instead of one Mesh+Shape per region — the FMU top-copper layer was ~5.5k
@@ -3835,8 +3887,6 @@ fn transform_cache(
     mesh.vertices.reserve(cap);
     mesh.indices.reserve(cap);
     let mut hidden = 0usize;
-    // Edge strokes for sizeable diff regions (#113), appended after the fill mesh.
-    let mut strokes: Vec<Shape> = Vec::new();
     for item in &cache.items {
         if !bbox_visible(item.bbox, cam, rect) {
             continue; // off-screen: not a threshold "hidden", just nothing to draw
@@ -3851,6 +3901,12 @@ fn transform_cache(
             if skip_base {
                 continue; // base drawn on the GPU this frame (#106)
             }
+            // All view (#158): drop non-selected layers' base copper (diff-only for
+            // them) — it's ~70% of the verts and just dimmed context. The selected
+            // layer keeps its base.
+            if hide_unselected_base && item.layer_index != selected {
+                continue;
+            }
             let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
             if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
                 continue;
@@ -3859,7 +3915,6 @@ fn transform_cache(
         // Highlight/dim (#59): the active layer at full opacity, the other visible
         // layers dimmed; layer-less items (outline) never dim.
         let dim = dim_factor(item.layer_index, selected, dim_others);
-        let mut edge = false;
         let (mut color, is_diff) = match item.role {
             Role::Base => (
                 base_display_color(base_of(item.layer_index), canvas, base_level),
@@ -3900,9 +3955,6 @@ fn transform_cache(
                 // layer's diffs sit behind the active layer's.
                 lod::Lod::Fade(alpha) => color = with_alpha(color, alpha * dim),
             }
-            // Edge-stroke eligibility (#113/#153): filled, sizeable, visible, and
-            // COMPACT — an elongated sliver's outline is just a stray line (#153).
-            edge = diff_edge_eligible(item.area_nm2, item.extent_nm, cam.scale, color.a());
         }
         for tri in &item.tris {
             let base = mesh.vertices.len() as u32;
@@ -3915,27 +3967,12 @@ fn transform_cache(
             }
             mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
-        // Edge stroke (#113): outline sizeable added/removed regions so adjacent
-        // green/red slivers from a MOVED feature read as two shapes, not a smear.
-        if edge && !item.ring.is_empty() {
-            let pts: Vec<Pos2> = item
-                .ring
-                .iter()
-                .map(|&p| world_to_screen(cam, p, rect))
-                .collect();
-            strokes.push(Shape::closed_line(
-                pts,
-                Stroke::new(1.0, diff_edge_color(color)),
-            ));
-        }
     }
-    let mut shapes = if mesh.is_empty() {
+    let shapes = if mesh.is_empty() {
         Vec::new()
     } else {
         vec![Shape::from(mesh)]
     };
-    // Edges draw on top of the fills.
-    shapes.append(&mut strokes);
     (shapes, hidden)
 }
 
@@ -4270,7 +4307,6 @@ mod tests {
                 side: super::Side::Full,
                 layer_index: 0,
                 tris,
-                ring: Vec::new(),
                 bbox: [cx, cy, cx + s, cy + s],
                 extent_nm: s,
                 area_nm2: (s as f64) * (s as f64),
@@ -4315,6 +4351,7 @@ mod tests {
                     0.0,
                     false, // skip_base: CPU path draws everything in this bench
                     true,  // dim_others
+                    false, // hide_unselected_base
                 );
                 sink += shapes.len();
             }
@@ -4435,31 +4472,6 @@ mod tests {
         // so LOD treats it as THIN (it fades) rather than as a big feature by extent.
         assert_eq!(feature_thickness_nm(100_000.0, 10_000), 10);
         assert_eq!(feature_thickness_nm(5.0, 0), 0); // guard
-    }
-
-    #[test]
-    fn diff_edge_eligible_strokes_blobs_not_slivers() {
-        use super::diff_edge_eligible;
-        // Zoom where a 0.3mm feature is ~47px extent (scale = 47/300_000 px/nm).
-        let scale = 47.0 / 300_000.0;
-        // A compact 0.3mm x 0.3mm blob (moved pad/via): extent≈thickness → stroke it.
-        let blob_area = 300_000.0 * 300_000.0; // nm²
-        assert!(
-            diff_edge_eligible(blob_area, 300_000, scale, 255),
-            "compact blob should get an edge stroke"
-        );
-        // A long thin diagonal sliver (shifted trace): 3mm long, 0.02mm thick — same
-        // thickness-px range but extent ≫ thickness → NO stroke (that's the #153
-        // stray-diagonal artifact).
-        let sliver_area = 3_000_000.0 * 20_000.0; // nm²
-        assert!(
-            !diff_edge_eligible(sliver_area, 3_000_000, scale, 255),
-            "elongated sliver must NOT be stroked (would draw a stray line)"
-        );
-        // Faded-out region (alpha below floor) → no stroke.
-        assert!(!diff_edge_eligible(blob_area, 300_000, scale, 30));
-        // Zoomed way out (sub-pixel) → no stroke.
-        assert!(!diff_edge_eligible(blob_area, 300_000, scale / 20.0, 255));
     }
 
     #[test]
@@ -5050,6 +5062,10 @@ mod tests {
         assert!(ViewMode::Highlight.dims_others());
         assert!(!ViewMode::All.dims_others());
         assert!(!ViewMode::Single.dims_others());
+        // Only All drops non-selected base copper (#158); Single/Highlight keep it.
+        assert!(ViewMode::All.hides_unselected_base());
+        assert!(!ViewMode::Highlight.hides_unselected_base());
+        assert!(!ViewMode::Single.hides_unselected_base());
     }
 
     #[test]
