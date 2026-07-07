@@ -1067,24 +1067,27 @@ struct FilePick {
     result: anyhow::Result<LoadedBoard>,
 }
 
-/// How many layers the canvas shows at once (#59). A quick preset over the
+/// How many layers the canvas shows at once (#59/#207). A quick preset over the
 /// per-layer visibility checkboxes: Single = only the active layer (the fast
 /// default on dense boards); Highlight = every layer, active at full strength and
 /// the rest dimmed (the Altium/KiCad way of reading a stack); All = every layer at
-/// equal strength.
+/// equal strength; None = every layer hidden. All and None replace the old
+/// Show all / Hide all buttons (#207) — one control group instead of two.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum ViewMode {
     #[default]
     Single,
     Highlight,
     All,
+    None,
 }
 
 impl ViewMode {
-    const ALL: [(ViewMode, &'static str); 3] = [
+    const ALL: [(ViewMode, &'static str); 4] = [
         (ViewMode::Single, "single"),
         (ViewMode::Highlight, "highlight"),
         (ViewMode::All, "all"),
+        (ViewMode::None, "none"),
     ];
     /// Non-selected layers are dimmed only in Highlight (Single shows one layer;
     /// All shows every layer at equal strength).
@@ -1104,8 +1107,9 @@ impl ViewMode {
 
 /// The per-layer visibility a view mode selects (#59): Single shows the active layer
 /// (plus the board outline for orientation, #157); Highlight and All show every layer
-/// (they differ only in dimming, handled by [`ViewMode::dims_others`]). Pure, so the
-/// preset is unit-testable.
+/// (they differ only in dimming, handled by [`ViewMode::dims_others`]); None hides
+/// every layer — including the outline — like the old Hide all button (#173/#207).
+/// Pure, so the preset is unit-testable.
 fn visibility_for_mode(
     mode: ViewMode,
     n: usize,
@@ -1115,6 +1119,7 @@ fn visibility_for_mode(
     match mode {
         ViewMode::Single => default_visible(n, selected, outline),
         ViewMode::Highlight | ViewMode::All => vec![true; n],
+        ViewMode::None => vec![false; n],
     }
 }
 
@@ -3146,45 +3151,37 @@ impl ViewApp {
     /// per-layer colour. The board outline is a normal layer row here now (#157).
     fn layers_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Layers");
-        // Quick visibility actions (#58): show/hide every layer, or only the
-        // changed ones. They never move the selection or camera.
-        ui.horizontal(|ui| {
-            if ui.small_button("Show all").clicked() {
-                for v in self.visible_layers.iter_mut() {
-                    *v = true;
-                }
-            }
-            if ui.small_button("Hide all").clicked() {
-                // Hide-all clears EVERY layer (#2) — including the selected
-                // one. (Split/Swipe still force the active layer visible in
-                // those modes so their view is never blank.)
-                for v in self.visible_layers.iter_mut() {
-                    *v = false;
-                }
-            }
-            // "Show changed" button hidden per feedback #8 — the capability
-            // stays in `visible_from_changed` (still unit-tested) so it can be
-            // re-surfaced later, but the button is removed from the row.
-        });
-        // View mode (#59): a quick preset over the per-layer checkboxes —
-        // single active layer / highlight active over dimmed rest / all equal.
-        // Selecting one resets visibility to the preset; per-row checkboxes
-        // still fine-tune afterwards.
+        // View mode (#59/#207): ONE visibility control group — a quick preset over
+        // the per-layer eyes. single = active layer only; highlight = active over
+        // dimmed rest; all = every layer equal (the old Show all); none = every
+        // layer hidden (the old Hide all — clears EVERY layer, #173, including the
+        // selected one; Split/Swipe still force the active layer visible in those
+        // modes so their view is never blank). Selecting one — including the
+        // already-active one — resets visibility to the preset; per-row eyes still
+        // fine-tune afterwards.
+        // "Show changed" stays hidden per feedback #8 — the capability lives on in
+        // `visible_from_changed` (still unit-tested) so it can be re-surfaced later.
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("view").weak().small());
-            ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
-            ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
-            for (mode, label) in ViewMode::ALL {
-                if ui.selectable_label(self.view_mode == mode, label).clicked() {
-                    self.view_mode = mode;
-                    self.visible_layers = visibility_for_mode(
-                        mode,
-                        self.diff.layers.len(),
-                        self.selected,
-                        self.outline,
-                    );
+            segmented_frame(ui, |ui| {
+                for (mode, label) in ViewMode::ALL {
+                    let on = self.view_mode == mode;
+                    let text = if on {
+                        egui::RichText::new(label).color(C_CANVAS).strong()
+                    } else {
+                        egui::RichText::new(label)
+                    };
+                    if ui.selectable_label(on, text).clicked() {
+                        self.view_mode = mode;
+                        self.visible_layers = visibility_for_mode(
+                            mode,
+                            self.diff.layers.len(),
+                            self.selected,
+                            self.outline,
+                        );
+                    }
                 }
-            }
+            });
         });
         // Base opacity (#12/#6): the unchanged base copper's strength, moved here
         // from the top bar and made continuous. 0 hides the base; the old off/faint/
@@ -3398,11 +3395,15 @@ impl ViewApp {
             );
 
         ui.add_space(6.0);
+        // Same segmented chips as Settings › Display (#205), so the units picker
+        // reads identically wherever it appears.
         ui.horizontal(|ui| {
             ui.label("Units");
-            ui.selectable_value(&mut self.measure_unit, Unit::Mm, "mm");
-            ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
-            ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
+            segmented(
+                ui,
+                &mut self.measure_unit,
+                &[(Unit::Mm, "mm"), (Unit::Mil, "mil"), (Unit::Inch, "inch")],
+            );
         });
 
         ui.add_space(8.0);
@@ -3456,7 +3457,17 @@ impl ViewApp {
                             {
                                 remove = Some(i);
                             }
-                            ui.label(format_distance(distance_mm(m.a, m.b), unit));
+                            // Distance primary, with the dX/dY/angle components
+                            // underneath (#208) in the same unit.
+                            let (dx, dy, angle) = measure_components(m.a, m.b);
+                            ui.vertical(|ui| {
+                                ui.label(format_distance(distance_mm(m.a, m.b), unit));
+                                ui.label(
+                                    egui::RichText::new(format_components(dx, dy, angle, unit))
+                                        .weak()
+                                        .small(),
+                                );
+                            });
                         });
                     }
                 });
@@ -3680,22 +3691,33 @@ impl ViewApp {
     }
 
     /// Settings → Display: theme, measure units, and (feature build) the GPU path.
+    /// The selectable values render as segmented chips (#205) — the shared
+    /// `segmented` chrome, selected = copper fill — so they read as controls,
+    /// clearly distinct from the plain row label.
     fn settings_display(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Theme");
-            ui.selectable_value(&mut self.theme, Theme::Dark, "dark");
-            ui.selectable_value(&mut self.theme, Theme::Light, "light");
+            segmented(
+                ui,
+                &mut self.theme,
+                &[(Theme::Dark, "dark"), (Theme::Light, "light")],
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Measure units");
-            ui.selectable_value(&mut self.measure_unit, Unit::Mm, "mm");
-            ui.selectable_value(&mut self.measure_unit, Unit::Inch, "inch");
-            ui.selectable_value(&mut self.measure_unit, Unit::Mil, "mil");
+            segmented(
+                ui,
+                &mut self.measure_unit,
+                &[(Unit::Mm, "mm"), (Unit::Inch, "inch"), (Unit::Mil, "mil")],
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Activity rail");
-            ui.selectable_value(&mut self.rail_side, RailSide::Left, "left");
-            ui.selectable_value(&mut self.rail_side, RailSide::Right, "right");
+            segmented(
+                ui,
+                &mut self.rail_side,
+                &[(RailSide::Left, "left"), (RailSide::Right, "right")],
+            );
         })
         .response
         .on_hover_text("Which edge the activity rail and its panel dock to (Feature 8).");
@@ -3769,11 +3791,18 @@ impl ViewApp {
     }
 
     /// Settings → Input: pan/zoom scheme matching the user's ECAD tool (#54).
+    /// Values are segmented chips, distinct from the row label (#205).
     fn settings_input(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("ECAD preset");
-            ui.selectable_value(&mut self.input_preset, InputPreset::Altium, "Altium");
-            ui.selectable_value(&mut self.input_preset, InputPreset::KiCad, "KiCad");
+            segmented(
+                ui,
+                &mut self.input_preset,
+                &[
+                    (InputPreset::Altium, "Altium"),
+                    (InputPreset::KiCad, "KiCad"),
+                ],
+            );
         })
         .response
         .on_hover_text(
@@ -3786,18 +3815,25 @@ impl ViewApp {
     fn settings_colours(&mut self, ui: &mut egui::Ui) {
         Self::settings_header(ui, "Diff colours");
         // One-click palette presets (#155); the pickers below still fine-tune.
+        // Rendered as segmented chips (#205) — "selected" is derived from the
+        // current colours, so this uses the frame directly, not `segmented`.
         ui.horizontal(|ui| {
             ui.label("Preset");
-            ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
-            ui.visuals_mut().selection.stroke = Stroke::new(1.0, C_COPPER);
-            for (pal, label) in DiffPalette::ALL {
-                let (a, r) = pal.colors();
-                let active = self.col_added == a && self.col_removed == r;
-                if ui.selectable_label(active, label).clicked() {
-                    self.col_added = a;
-                    self.col_removed = r;
+            segmented_frame(ui, |ui| {
+                for (pal, label) in DiffPalette::ALL {
+                    let (a, r) = pal.colors();
+                    let active = self.col_added == a && self.col_removed == r;
+                    let text = if active {
+                        egui::RichText::new(label).color(C_CANVAS).strong()
+                    } else {
+                        egui::RichText::new(label)
+                    };
+                    if ui.selectable_label(active, text).clicked() {
+                        self.col_added = a;
+                        self.col_removed = r;
+                    }
                 }
-            }
+            });
         });
         ui.horizontal(|ui| {
             ui.label("added");
@@ -4459,11 +4495,13 @@ impl ViewApp {
         // reference even when the tool is disarmed; the Measure tab list mirrors
         // them (delete/clear there update the canvas too).
         for m in &self.measurements {
+            let (dx, dy, angle) = measure_components(m.a, m.b);
             draw_ruler(
                 &painter,
                 w2s(m.a),
                 w2s(m.b),
                 &format_distance(distance_mm(m.a, m.b), self.measure_unit),
+                &format_components(dx, dy, angle, self.measure_unit),
             );
         }
         if self.measure_mode {
@@ -5209,6 +5247,33 @@ fn distance_mm(a: [f64; 2], b: [f64; 2]) -> f64 {
     (dx * dx + dy * dy).sqrt() / etchy_core::NM_PER_MM as f64
 }
 
+/// ΔX / ΔY components (mm) and angle (degrees) of a measurement a→b (#208) — the
+/// pure kernel behind the per-measurement detail line. World coords are nm with
+/// y up (board coordinates), so the components convert straight to mm. The angle
+/// is measured from the +X axis, counter-clockwise positive, in SIGNED degrees in
+/// (-180, 180] — atan2's native range — so "up" is 90, "down" is -90 and "left"
+/// is 180. Signed beats 0..180 here because it keeps the measurement's direction
+/// (a→b), not just its slope.
+fn measure_components(a: [f64; 2], b: [f64; 2]) -> (f64, f64, f64) {
+    let mm = etchy_core::NM_PER_MM as f64;
+    let dx = (b[0] - a[0]) / mm;
+    let dy = (b[1] - a[1]) / mm;
+    let angle_deg = dy.atan2(dx).to_degrees();
+    (dx, dy, angle_deg)
+}
+
+/// The compact "dX · dY · angle" detail line shown under a measurement's distance
+/// (#208) — in the Measure tab rows and on the canvas ruler label. Reuses
+/// [`format_distance`] so dX/dY carry the exact same unit formatting as the
+/// primary distance.
+fn format_components(dx_mm: f64, dy_mm: f64, angle_deg: f64, unit: Unit) -> String {
+    format!(
+        "dX {} · dY {} · {angle_deg:.1}°",
+        format_distance(dx_mm, unit),
+        format_distance(dy_mm, unit),
+    )
+}
+
 /// A completed measurement: the two world-space endpoints of a ruler (#50). The
 /// Measure tab keeps a running list of these; `distance_mm(a, b)` gives the length
 /// in the chosen unit.
@@ -5440,30 +5505,51 @@ fn draw_grid_lines(
     }
 }
 
-/// Draw the measure distance label as text on a filled copper chip with dark text
-/// (#50), centred at `at` — legible instead of bare text over the copper line.
-fn measure_label(painter: &egui::Painter, at: Pos2, text: &str) {
-    let font = egui::FontId::proportional(13.0);
-    let galley = painter.layout_no_wrap(text.to_owned(), font, C_CANVAS);
+/// Draw the measure label as text on a filled copper chip with dark text (#50),
+/// centred at `at` — legible instead of bare text over the copper line. The
+/// distance is the primary line; the dX/dY/angle `detail` renders beneath it in a
+/// smaller size (#208), both centred within one chip.
+fn measure_label(painter: &egui::Painter, at: Pos2, text: &str, detail: &str) {
+    let main = painter.layout_no_wrap(text.to_owned(), egui::FontId::proportional(13.0), C_CANVAS);
+    let sub = painter.layout_no_wrap(
+        detail.to_owned(),
+        egui::FontId::proportional(10.0),
+        C_CANVAS,
+    );
+    let (main_size, sub_size) = (main.size(), sub.size());
+    let gap = 1.0;
+    let inner = egui::vec2(main_size.x.max(sub_size.x), main_size.y + gap + sub_size.y);
     let pad = egui::vec2(5.0, 3.0);
-    let rect = Rect::from_center_size(at, galley.size() + pad * 2.0);
+    let rect = Rect::from_center_size(at, inner + pad * 2.0);
     painter.rect_filled(rect, 3.0, C_COPPER);
-    painter.galley(rect.min + pad, galley, C_CANVAS);
+    let top = rect.min.y + pad.y;
+    painter.galley(
+        Pos2::new(rect.center().x - main_size.x / 2.0, top),
+        main,
+        C_CANVAS,
+    );
+    painter.galley(
+        Pos2::new(rect.center().x - sub_size.x / 2.0, top + main_size.y + gap),
+        sub,
+        C_CANVAS,
+    );
 }
 
 /// Draw one complete measure ruler in screen space (#50): both endpoints, the
-/// segment, and the distance `label` offset ~14 px perpendicular to the line so it
-/// never sits on top of it. Shared by the completed-measurement loop so every
-/// ruler looks identical.
-fn draw_ruler(painter: &egui::Painter, a: Pos2, b: Pos2, label: &str) {
+/// segment, and the distance `label` (+ its component `detail` line, #208) offset
+/// perpendicular to the line so it never sits on top of it. Shared by the
+/// completed-measurement loop so every ruler looks identical.
+fn draw_ruler(painter: &egui::Painter, a: Pos2, b: Pos2, label: &str, detail: &str) {
     painter.circle_filled(a, 3.0, C_COPPER);
     painter.circle_filled(b, 3.0, C_COPPER);
     painter.line_segment([a, b], Stroke::new(1.5, C_COPPER));
     let mid = Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len = (dx * dx + dy * dy).sqrt().max(1.0);
-    let off = egui::vec2(-dy / len, dx / len) * 14.0;
-    measure_label(painter, mid + off, label);
+    // The two-line chip is taller than the old single-line one — push it a
+    // little further off the segment so the line stays clear.
+    let off = egui::vec2(-dy / len, dx / len) * 18.0;
+    measure_label(painter, mid + off, label, detail);
 }
 
 /// A small, unobtrusive status chip anchored into a canvas corner — copper text
@@ -5829,6 +5915,51 @@ mod tests {
         // Symmetric, and zero for a point on itself.
         assert!((distance_mm(b, a) - 5.0).abs() < 1e-9);
         assert_eq!(distance_mm(a, a), 0.0);
+    }
+
+    #[test]
+    fn measure_components_axis_aligned_diagonal_and_negative() {
+        use super::measure_components;
+        let mm = etchy_core::NM_PER_MM as f64;
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Axis-aligned: +X is 0°, +Y (up, world y-up) is 90°.
+        let (dx, dy, ang) = measure_components([0.0, 0.0], [10.0 * mm, 0.0]);
+        assert!(close(dx, 10.0) && close(dy, 0.0) && close(ang, 0.0));
+        let (dx, dy, ang) = measure_components([0.0, 0.0], [0.0, 5.0 * mm]);
+        assert!(close(dx, 0.0) && close(dy, 5.0) && close(ang, 90.0));
+        // Diagonal: equal legs → 45°.
+        let (dx, dy, ang) = measure_components([1.0 * mm, 1.0 * mm], [3.0 * mm, 3.0 * mm]);
+        assert!(close(dx, 2.0) && close(dy, 2.0) && close(ang, 45.0));
+        // Negative directions: the angle keeps a→b's direction (signed range,
+        // (-180, 180]) — left is 180, down is -90, down-left is -135.
+        let (dx, dy, ang) = measure_components([10.0 * mm, 0.0], [0.0, 0.0]);
+        assert!(close(dx, -10.0) && close(dy, 0.0) && close(ang, 180.0));
+        let (dx, dy, ang) = measure_components([0.0, 5.0 * mm], [0.0, 0.0]);
+        assert!(close(dx, 0.0) && close(dy, -5.0) && close(ang, -90.0));
+        let (_, _, ang) = measure_components([0.0, 0.0], [-mm, -mm]);
+        assert!(close(ang, -135.0));
+        // Degenerate zero-length measurement: no NaN, angle reads 0.
+        let (dx, dy, ang) = measure_components([2.0 * mm, 2.0 * mm], [2.0 * mm, 2.0 * mm]);
+        assert!(close(dx, 0.0) && close(dy, 0.0) && close(ang, 0.0));
+    }
+
+    #[test]
+    fn format_components_matches_distance_formatting() {
+        use super::{format_components, Unit};
+        // dX/dY ride format_distance, so they carry the unit's precision; the
+        // angle is one decimal of signed degrees.
+        assert_eq!(
+            format_components(2.0, -3.0, -56.3099324, Unit::Mm),
+            "dX 2.000 mm · dY -3.000 mm · -56.3°"
+        );
+        assert_eq!(
+            format_components(25.4, 0.0, 0.0, Unit::Inch),
+            "dX 1.0000 in · dY 0.0000 in · 0.0°"
+        );
+        assert_eq!(
+            format_components(25.4, 25.4, 45.0, Unit::Mil),
+            "dX 1000.0 mil · dY 1000.0 mil · 45.0°"
+        );
     }
 
     #[test]
@@ -7135,6 +7266,16 @@ mod tests {
             visibility_for_mode(ViewMode::All, 3, 0, None),
             vec![true, true, true]
         );
+        // None: every layer hidden — including the outline (#173/#207, the old
+        // Hide all).
+        assert_eq!(
+            visibility_for_mode(ViewMode::None, 3, 0, Some(2)),
+            vec![false, false, false]
+        );
+        assert_eq!(
+            visibility_for_mode(ViewMode::None, 0, 0, None),
+            Vec::<bool>::new()
+        );
     }
 
     #[test]
@@ -7150,10 +7291,13 @@ mod tests {
         assert!(ViewMode::Highlight.dims_others());
         assert!(!ViewMode::All.dims_others());
         assert!(!ViewMode::Single.dims_others());
-        // Only All drops non-selected base copper (#158); Single/Highlight keep it.
+        assert!(!ViewMode::None.dims_others());
+        // Only All drops non-selected base copper (#158); Single/Highlight keep it
+        // (None draws nothing, so the flag is moot there).
         assert!(ViewMode::All.hides_unselected_base());
         assert!(!ViewMode::Highlight.hides_unselected_base());
         assert!(!ViewMode::Single.hides_unselected_base());
+        assert!(!ViewMode::None.hides_unselected_base());
     }
 
     #[test]
