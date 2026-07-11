@@ -279,7 +279,6 @@ const BASE_OPACITY_STRONG: f32 = 0.8;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PanelTab {
     Layers,
-    Measure,
     Export,
     Settings,
 }
@@ -287,15 +286,14 @@ enum PanelTab {
 impl PanelTab {
     /// The rail's top-down panel tabs. Settings is NOT here — its gear is pinned
     /// to the rail's bottom (#199) but drives the same `toggle_panel` flow. Each
-    /// tab has a full body: Layers (`layers_panel_ui`), Measure
-    /// (`measure_panel_ui`), Export (`export_panel_ui`), Settings
-    /// (`settings_panel_ui`).
-    const ALL: [PanelTab; 3] = [PanelTab::Layers, PanelTab::Measure, PanelTab::Export];
+    /// tab has a full body: Layers (`layers_panel_ui`), Export
+    /// (`export_panel_ui`), Settings (`settings_panel_ui`). Measure is NOT a tab
+    /// (#211): its rail ruler icon is a plain tool toggle that opens no panel.
+    const ALL: [PanelTab; 2] = [PanelTab::Layers, PanelTab::Export];
 
     fn label(self) -> &'static str {
         match self {
             PanelTab::Layers => "Layers",
-            PanelTab::Measure => "Measure",
             PanelTab::Export => "Export",
             PanelTab::Settings => "Settings",
         }
@@ -320,18 +318,6 @@ fn toggle_panel(current: Option<PanelTab>, clicked: PanelTab) -> Option<PanelTab
     } else {
         Some(clicked)
     }
-}
-
-/// Rail-click semantics for the Measure tab — the one icon with a side effect
-/// beyond show/hide (#50). Clicking it opens the Measure panel *and* arms measure
-/// mode; clicking it again while active collapses the panel *and* disarms. Returns
-/// `(next_panel, armed)` where `armed` is the measure-mode flag: it follows the
-/// panel, so arming always tracks whether Measure ends up open. Pure →
-/// unit-testable off-screen.
-fn measure_rail_click(current: Option<PanelTab>) -> (Option<PanelTab>, bool) {
-    let next = toggle_panel(current, PanelTab::Measure);
-    let armed = next == Some(PanelTab::Measure);
-    (next, armed)
 }
 
 /// The file names an export writes, in order, for the Export tab's preview.
@@ -625,7 +611,13 @@ struct Keymap {
     clear_measure: Option<KeyBinding>,
     fit_view: KeyBinding,
     cycle_base: KeyBinding,
-    cycle_unit: KeyBinding,
+    /// `None` = the preset defaults stand: Altium **Q**, KiCad **Ctrl+U** —
+    /// each tool's own units toggle (#211). An explicit rebind overrides them,
+    /// same pattern as `clear_measure`. Persisted under a new name so a
+    /// pre-#211 config's fixed `"cycle_unit":"U"` default is dropped (back to
+    /// the preset) instead of read in as an explicit rebind pinning U forever.
+    #[serde(rename = "cycle_units")]
+    cycle_unit: Option<KeyBinding>,
     toggle_grid: KeyBinding,
     mode_overlay: KeyBinding,
     mode_old: KeyBinding,
@@ -648,7 +640,7 @@ impl Default for Keymap {
             clear_measure: None,
             fit_view: KeyBinding::plain(Key::F),
             cycle_base: KeyBinding::plain(Key::S),
-            cycle_unit: KeyBinding::plain(Key::U),
+            cycle_unit: None,
             toggle_grid: KeyBinding::plain(Key::G),
             mode_overlay: KeyBinding::plain(Key::Num1),
             mode_old: KeyBinding::plain(Key::Num2),
@@ -661,14 +653,15 @@ impl Default for Keymap {
 
 impl Keymap {
     /// The current binding for an action; `None` only for Clear-measurements
-    /// while it still rides the #198 preset defaults.
+    /// and Cycle-measure-units while they still ride their preset defaults
+    /// (#198 clear, #211 units).
     fn get(&self, a: HotkeyAction) -> Option<KeyBinding> {
         match a {
             HotkeyAction::ToggleMeasure => Some(self.toggle_measure),
             HotkeyAction::ClearMeasurements => self.clear_measure,
             HotkeyAction::FitView => Some(self.fit_view),
             HotkeyAction::CycleBase => Some(self.cycle_base),
-            HotkeyAction::CycleUnit => Some(self.cycle_unit),
+            HotkeyAction::CycleUnit => self.cycle_unit,
             HotkeyAction::ToggleGrid => Some(self.toggle_grid),
             HotkeyAction::ModeOverlay => Some(self.mode_overlay),
             HotkeyAction::ModeOld => Some(self.mode_old),
@@ -685,7 +678,7 @@ impl Keymap {
             HotkeyAction::ClearMeasurements => self.clear_measure = Some(b),
             HotkeyAction::FitView => self.fit_view = b,
             HotkeyAction::CycleBase => self.cycle_base = b,
-            HotkeyAction::CycleUnit => self.cycle_unit = b,
+            HotkeyAction::CycleUnit => self.cycle_unit = Some(b),
             HotkeyAction::ToggleGrid => self.toggle_grid = b,
             HotkeyAction::ModeOverlay => self.mode_overlay = b,
             HotkeyAction::ModeOld => self.mode_old = b,
@@ -694,13 +687,37 @@ impl Keymap {
             HotkeyAction::ModeSwipe => self.mode_swipe = b,
         }
     }
+
+    /// The effective cycle-units binding (#211): the explicit rebind when one
+    /// exists, else the input preset's default (`preset_unit_binding`).
+    fn unit_binding(&self, preset: InputPreset) -> KeyBinding {
+        self.cycle_unit
+            .unwrap_or_else(|| preset_unit_binding(preset))
+    }
+}
+
+/// The preset default for the cycle-units hotkey (#211): each ECAD tool's own
+/// units toggle — Altium **Q**, KiCad **Ctrl+U**. Stands until an explicit
+/// rebind (`Keymap::cycle_unit`) overrides it, like the clear-measure preset
+/// defaults (#198). Pure → unit-testable.
+fn preset_unit_binding(preset: InputPreset) -> KeyBinding {
+    match preset {
+        InputPreset::Altium => KeyBinding::plain(egui::Key::Q),
+        InputPreset::KiCad => KeyBinding {
+            ctrl: true,
+            shift: false,
+            alt: false,
+            key: egui::Key::U,
+        },
+    }
 }
 
 /// Why a candidate binding can't be used: the label of whatever already owns
 /// it — another rebindable action, a fixed plain-key alias (O/B/A modes,
-/// J/K/arrow layer-step, Esc), or the Altium preset's Shift+C clear while no
-/// custom clear binding stands it down. Checked at capture time so a rebind
-/// can never make one key press dispatch two actions (#201 review).
+/// J/K/arrow layer-step, Esc), or a preset-driven default while no custom
+/// binding stands it down (the Altium Shift+C clear, the preset units-cycle
+/// key). Checked at capture time so a rebind can never make one key press
+/// dispatch two actions (#201 review).
 fn binding_conflict(
     km: &Keymap,
     action: HotkeyAction,
@@ -734,6 +751,14 @@ fn binding_conflict(
         && !b.alt
     {
         return Some("Clear measurements (preset Shift+C)");
+    }
+    // The active preset's units-cycle key (#211: Altium Q / KiCad Ctrl+U) is
+    // reserved while no custom cycle-units binding stands it down.
+    if action != HotkeyAction::CycleUnit
+        && km.cycle_unit.is_none()
+        && b == preset_unit_binding(preset)
+    {
+        return Some("Cycle measure units (preset)");
     }
     None
 }
@@ -1206,8 +1231,9 @@ struct ViewApp {
     /// The in-progress ruler buffer (#50): 0 or 1 world-space points. A second
     /// click completes the pair into `measurements` and empties this.
     measure_pts: Vec<[f64; 2]>,
-    /// Completed measurements (#50): the running list the Measure tab shows and the
-    /// canvas draws. Runtime-only and per-board — cleared on load.
+    /// Completed measurements (#50): the running list the canvas draws as
+    /// persistent rulers (#211 — no list UI; cleared by key, MEAS-4).
+    /// Runtime-only and per-board — cleared on load.
     measurements: Vec<Measurement>,
     /// Unit the measure label is shown in (#50): mm / inch / mil.
     measure_unit: Unit,
@@ -1218,7 +1244,7 @@ struct ViewApp {
     /// Snap measure clicks to the nearest grid intersection (#51).
     snap_grid: bool,
     /// Always-on cursor crosshair + coordinate readout (#179), independent of
-    /// measure mode. On by default; the toggle lands in the Measure tab later.
+    /// measure mode. On by default; toggled in Settings › Measure (#211).
     show_crosshair: bool,
     /// Input scheme matching the user's ECAD tool (#54). MVP: controls which mouse
     /// button pans the canvas. Persisted via #52.
@@ -1684,6 +1710,12 @@ const C_CANVAS: Color32 = Color32::from_rgb(0x0b, 0x0f, 0x0e); // #0b0f0e
 /// the diff fast.
 const SPLASH_HOLD_SECS: f64 = 0.9;
 const SPLASH_FADE_SECS: f64 = 0.6;
+
+/// The git short sha this binary was built from (#213), stamped by `build.rs`
+/// at compile time — so it works identically on native and wasm, and a browser
+/// tab can prove which build it runs (the stale-wasm confusion). Shown in the
+/// Help menu and the brand icon's tooltip; "unknown" outside a git checkout.
+const BUILD_SHA: &str = env!("ETCHY_BUILD_SHA");
 
 /// Links for the Help menu.
 const URL_REPO: &str = "https://github.com/Cimos/etchy";
@@ -2708,6 +2740,9 @@ impl eframe::App for ViewApp {
         }
         let suppressed = typing || capturing;
         let km = self.keymap;
+        // The effective cycle-units binding (#211): an explicit rebind, else the
+        // preset default (Altium Q / KiCad Ctrl+U — the tools' own units keys).
+        let unit_kb = km.unit_binding(self.input_preset);
         let (
             toggle_base,
             fit,
@@ -2757,7 +2792,7 @@ impl eframe::App for ViewApp {
                 (i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::J)) && i.modifiers.is_none(),
                 (i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::K)) && i.modifiers.is_none(),
                 i.key_pressed(Key::Escape),
-                b(km.cycle_unit),
+                b(unit_kb),
                 b(km.toggle_grid),
                 // Default Ctrl+M (Cmd on mac) arms/disarms the measure tool
                 // (#197); rebindable via Settings > Hotkeys (#201).
@@ -2775,11 +2810,8 @@ impl eframe::App for ViewApp {
         });
         if toggle_measure {
             // Ctrl+M arms/disarms measure mode (#50/#197), mirroring the rail
-            // Measure icon. Suppressed while typing via the `typing` guard.
-            self.measure_mode = !self.measure_mode;
-            if !self.measure_mode {
-                self.measure_pts.clear();
-            }
+            // ruler icon (#211). Suppressed while typing via the `typing` guard.
+            self.set_measure_mode(!self.measure_mode);
         }
         // An Esc aimed at an open menu/popup (egui doesn't consume it) must not
         // also fall through to the measure cascade — under the KiCad preset it
@@ -2871,7 +2903,14 @@ impl eframe::App for ViewApp {
                 ui.add(egui::Image::new(egui::load::SizedTexture::new(
                     brand_id,
                     egui::vec2(BRAND_ICON_PT, BRAND_ICON_PT),
-                )));
+                )))
+                // The brand mark doubles as the build stamp (#213): hovering it
+                // names the version + git sha, so any running instance — native
+                // or a wasm tab — can prove which build it is.
+                .on_hover_text(format!(
+                    "etchy v{} · build {BUILD_SHA}",
+                    env!("CARGO_PKG_VERSION")
+                ));
                 ui.add_space(8.0);
                 ui.label(
                     // ASCII "->" — egui's default font has no arrow glyph (→ renders
@@ -2911,7 +2950,7 @@ impl eframe::App for ViewApp {
             // Moved OUT of the bar: base opacity → Layers panel slider (#12/#6), noise
             // filter → Settings > Diff (#154), board edge → Layers panel (#157), Open
             // A/B → the Open menu (#160), GPU checkbox (Settings > Display), and — this
-            // slice (#57) — Measure → rail Measure tab, Export → rail Export tab,
+            // slice (#57) — Measure → rail ruler toggle, Export → rail Export tab,
             // Settings → the rail cog. The top bar spans the full window width (laid
             // out above the left panel), so the window width is the reliable tier
             // measure — available_width inside the nested layout doesn't reflect the
@@ -2939,7 +2978,7 @@ impl eframe::App for ViewApp {
                 );
                 // Right-aligned action cluster. RTL adds in reverse, so the visual
                 // order is Open · Fit · Help. Measure/Export/Settings moved to the rail
-                // (Measure tab, Export tab, Settings cog — #57).
+                // (ruler toggle, Export tab, Settings cog — #57/#211).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // The cluster shares the mode picker's segmented chrome (#200):
                     // one outlined group, flat segments inside. `segmented_frame`
@@ -3054,39 +3093,37 @@ impl eframe::App for ViewApp {
                         });
                         ui.add_space(4.0);
                     });
-                // Panel tabs fill the rest, top-down (no monogram — #190).
+                // Panel tabs fill the rest, top-down (no monogram — #190). The
+                // measure ruler sits between them but is NOT a tab (#211): it's a
+                // plain tool toggle — armed = highlighted — and opens no panel.
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(8.0);
                         for tab in PanelTab::ALL {
                             let active = self.active_panel == Some(tab);
-                            let hover = if tab == PanelTab::Measure {
-                                format!(
-                                    "Measure — arms the tool and opens the panel ({})",
-                                    format_binding(self.keymap.toggle_measure)
-                                )
-                            } else {
-                                tab.label().to_string()
-                            };
                             if rail_button(ui, active, |p, r, c| draw_panel_icon(tab, p, r, c))
-                                .on_hover_text(hover)
+                                .on_hover_text(tab.label())
                                 .clicked()
                             {
-                                if tab == PanelTab::Measure {
-                                    // The Measure icon both arms the tool and opens
-                                    // the panel; re-clicking disarms + collapses. It
-                                    // arms even while the panel is collapsed (#50).
-                                    let (next, armed) = measure_rail_click(self.active_panel);
-                                    self.active_panel = next;
-                                    self.measure_mode = armed;
-                                    if !armed {
-                                        self.measure_pts.clear();
-                                    }
-                                } else {
-                                    self.active_panel = toggle_panel(self.active_panel, tab);
-                                }
+                                self.active_panel = toggle_panel(self.active_panel, tab);
                             }
                             ui.add_space(2.0);
+                            if tab == PanelTab::Layers {
+                                // Measure tool toggle (#211), in the old tab slot
+                                // between Layers and Export. Its options live in
+                                // Settings › Measure; rulers persist on canvas.
+                                let hover = format!(
+                                    "Measure — arm/disarm the tool ({})",
+                                    format_binding(self.keymap.toggle_measure)
+                                );
+                                if rail_button(ui, self.measure_mode, draw_measure_icon)
+                                    .on_hover_text(hover)
+                                    .clicked()
+                                {
+                                    self.set_measure_mode(!self.measure_mode);
+                                }
+                                ui.add_space(2.0);
+                            }
                         }
                     });
                 });
@@ -3104,7 +3141,6 @@ impl eframe::App for ViewApp {
                 .default_size(260.0)
                 .show_inside(ui, |ui| match tab {
                     PanelTab::Layers => self.layers_panel_ui(ui),
-                    PanelTab::Measure => self.measure_panel_ui(ui),
                     PanelTab::Export => self.export_panel_ui(ui),
                     PanelTab::Settings => self.settings_panel_ui(ui),
                 });
@@ -3365,115 +3401,14 @@ impl ViewApp {
         }
     }
 
-    /// Measure tab (stub). Feature 3 fills this with the measurement list, snap
-    /// and crosshair toggles, and unit selector; the seam lives here for PR A.
-    fn measure_panel_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Measure");
-        ui.add_space(6.0);
-
-        // Hint line replacing the old Armed checkbox (#197): the rail Measure
-        // icon or the toggle-measure hotkey (default Ctrl+M, rebindable #201)
-        // arms the tool; canvas clicks then drop ruler points.
-        let measure_key = format_binding(self.keymap.toggle_measure);
-        ui.label(
-            egui::RichText::new(format!("{measure_key} to measure"))
-                .weak()
-                .small(),
-        )
-        .on_hover_text(
-            "Arm the measure tool (also the rail Measure icon), then click \
-             two points on the canvas to add a measurement.",
-        );
-
-        ui.add_space(6.0);
-        ui.checkbox(&mut self.snap_grid, "Snap clicks to grid")
-            .on_hover_text("Snap each placed point to the nearest grid intersection (#51).");
-        ui.checkbox(&mut self.show_crosshair, "Cursor crosshair + readout")
-            .on_hover_text(
-                "Show a crosshair at the cursor plus live coordinates in the \
-                 bottom-left chip, always (not only while measuring).",
-            );
-
-        ui.add_space(6.0);
-        // Same segmented chips as Settings › Display (#205), so the units picker
-        // reads identically wherever it appears.
-        ui.horizontal(|ui| {
-            ui.label("Units");
-            segmented(
-                ui,
-                &mut self.measure_unit,
-                &[(Unit::Mm, "mm"), (Unit::Mil, "mil"), (Unit::Inch, "inch")],
-            );
-        });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("Measurements ({})", self.measurements.len())).strong(),
-            );
-            if !self.measurements.is_empty() {
-                // Push "Clear all" to the trailing edge, with the hotkey hint
-                // beside it: a custom clear binding (#201) if set, else the
-                // preset default (#198) — Altium Shift+C, KiCad Esc (once
-                // nothing is in progress).
-                let clear_hint = match self.keymap.clear_measure {
-                    Some(b) => format!("{} clears", format_binding(b)),
-                    None => match self.input_preset {
-                        InputPreset::Altium => "Shift+C clears".to_string(),
-                        InputPreset::KiCad => "Esc clears".to_string(),
-                    },
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Clear all").clicked() {
-                        self.measurements.clear();
-                    }
-                    ui.label(egui::RichText::new(clear_hint).weak().small());
-                });
-            }
-        });
-        ui.add_space(4.0);
-
-        if self.measurements.is_empty() {
-            ui.label(
-                egui::RichText::new(format!(
-                    "No measurements yet. Arm the tool ({measure_key}) and click two points.",
-                ))
-                .weak()
-                .small(),
-            );
-        } else {
-            let unit = self.measure_unit;
-            let mut remove: Option<usize> = None;
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for (i, m) in self.measurements.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("Remove this measurement")
-                                .clicked()
-                            {
-                                remove = Some(i);
-                            }
-                            // Distance primary, with the dX/dY/angle components
-                            // underneath (#208) in the same unit.
-                            let (dx, dy, angle) = measure_components(m.a, m.b);
-                            ui.vertical(|ui| {
-                                ui.label(format_distance(distance_mm(m.a, m.b), unit));
-                                ui.label(
-                                    egui::RichText::new(format_components(dx, dy, angle, unit))
-                                        .weak()
-                                        .small(),
-                                );
-                            });
-                        });
-                    }
-                });
-            if let Some(i) = remove {
-                measurement_remove(&mut self.measurements, i);
-            }
+    /// Arm/disarm the measure tool (#211): the rail ruler button and the
+    /// toggle-measure hotkey (default Ctrl+M) both route here. Disarming drops
+    /// the in-progress point; COMPLETED measurements stay drawn on the canvas
+    /// until cleared by key (MEAS-4) — there is no list UI to manage them.
+    fn set_measure_mode(&mut self, on: bool) {
+        self.measure_mode = on;
+        if !on {
+            self.measure_pts.clear();
         }
     }
 
@@ -3610,17 +3545,58 @@ impl ViewApp {
         // brand-copper, not the default blue. Child uis inherit it.
         ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
         ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, C_COPPER);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::CollapsingHeader::new("Display")
-                .default_open(true)
-                .show(ui, |ui| self.settings_display(ui));
-            egui::CollapsingHeader::new("Diff").show(ui, |ui| self.settings_diff(ui));
-            egui::CollapsingHeader::new("Grid").show(ui, |ui| self.settings_grid(ui));
-            egui::CollapsingHeader::new("Input").show(ui, |ui| self.settings_input(ui));
-            egui::CollapsingHeader::new("Colours").show(ui, |ui| self.settings_colours(ui));
-            egui::CollapsingHeader::new("Layers").show(ui, |ui| self.settings_layers(ui));
-            egui::CollapsingHeader::new("Hotkeys").show(ui, |ui| self.settings_hotkeys(ui));
-        });
+        // auto_shrink off (#212): the scroll area always fills the panel width,
+        // so the panel keeps its user-dragged size instead of re-fitting itself
+        // to the widest visible row every time a section opens or closes (which
+        // also fought the resize handle — the drag was undone the next frame).
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                egui::CollapsingHeader::new("Display")
+                    .default_open(true)
+                    .show(ui, |ui| self.settings_display(ui));
+                egui::CollapsingHeader::new("Diff").show(ui, |ui| self.settings_diff(ui));
+                egui::CollapsingHeader::new("Grid").show(ui, |ui| self.settings_grid(ui));
+                egui::CollapsingHeader::new("Measure").show(ui, |ui| self.settings_measure(ui));
+                egui::CollapsingHeader::new("Input").show(ui, |ui| self.settings_input(ui));
+                egui::CollapsingHeader::new("Colours").show(ui, |ui| self.settings_colours(ui));
+                egui::CollapsingHeader::new("Layers").show(ui, |ui| self.settings_layers(ui));
+                egui::CollapsingHeader::new("Hotkeys").show(ui, |ui| self.settings_hotkeys(ui));
+            });
+    }
+
+    /// Settings → Measure (#211): the measure tool's options, moved here from
+    /// the removed Measure tab. ONE home for snap/crosshair/units — the copies
+    /// that used to sit in the Grid section and the Display units row are
+    /// consolidated here, not duplicated.
+    fn settings_measure(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Units");
+            segmented(
+                ui,
+                &mut self.measure_unit,
+                &[(Unit::Mm, "mm"), (Unit::Mil, "mil"), (Unit::Inch, "inch")],
+            );
+        })
+        .response
+        .on_hover_text(format!(
+            "Unit for measurements and the coordinate readout; {} cycles",
+            format_binding(self.keymap.unit_binding(self.input_preset))
+        ));
+        ui.checkbox(
+            &mut self.snap_grid,
+            "Snap measure clicks to grid intersections",
+        )
+        .on_hover_text("Snap each placed point to the nearest grid intersection (#51).");
+        ui.checkbox(
+            &mut self.show_crosshair,
+            "Cursor crosshair + coordinate readout",
+        )
+        .on_hover_text(
+            "Show a crosshair at the cursor plus live coordinates in the \
+             bottom-left chip, always (not only while measuring). Snaps to \
+             the grid when snap is on.",
+        );
     }
 
     /// Settings → Hotkeys (#201): one row per rebindable action — name, current
@@ -3655,8 +3631,12 @@ impl ViewApp {
                     } else {
                         let binding = match self.keymap.get(action) {
                             Some(b) => format_binding(b),
-                            // Clear-measurements still rides the #198 preset
-                            // defaults until it's explicitly rebound.
+                            // Preset-driven defaults until explicitly rebound:
+                            // clear-measurements (#198) and cycle-units (#211).
+                            None if action == HotkeyAction::CycleUnit => format!(
+                                "{} (preset)",
+                                format_binding(preset_unit_binding(self.input_preset))
+                            ),
                             None => match self.input_preset {
                                 InputPreset::Altium => "Shift+C (preset)".to_string(),
                                 InputPreset::KiCad => "Esc (preset)".to_string(),
@@ -3680,7 +3660,7 @@ impl ViewApp {
             .button("Reset to defaults")
             .on_hover_text(
                 "Restore every binding, including the preset-driven \
-                 clear-measurements key (#198).",
+                 clear-measurements (#198) and cycle-units (#211) keys.",
             )
             .clicked()
         {
@@ -3690,10 +3670,11 @@ impl ViewApp {
         }
     }
 
-    /// Settings → Display: theme, measure units, and (feature build) the GPU path.
+    /// Settings → Display: theme, rail side, and (feature build) the GPU path.
     /// The selectable values render as segmented chips (#205) — the shared
     /// `segmented` chrome, selected = copper fill — so they read as controls,
-    /// clearly distinct from the plain row label.
+    /// clearly distinct from the plain row label. Measure units moved to the
+    /// Measure section (#211) so the tool's options have one home.
     fn settings_display(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Theme");
@@ -3701,14 +3682,6 @@ impl ViewApp {
                 ui,
                 &mut self.theme,
                 &[(Theme::Dark, "dark"), (Theme::Light, "light")],
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Measure units");
-            segmented(
-                ui,
-                &mut self.measure_unit,
-                &[(Unit::Mm, "mm"), (Unit::Inch, "inch"), (Unit::Mil, "mil")],
             );
         });
         ui.horizontal(|ui| {
@@ -3757,7 +3730,9 @@ impl ViewApp {
         );
     }
 
-    /// Settings → Grid: reference grid overlay + snap.
+    /// Settings → Grid: the reference grid overlay. Snap + crosshair moved to
+    /// the Measure section (#211) — one home, no duplicate toggles; snapping
+    /// still uses the spacing configured here.
     fn settings_grid(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(
             &mut self.show_grid,
@@ -3774,20 +3749,9 @@ impl ViewApp {
                     .range(0.01..=100.0)
                     .suffix(" mm"),
             );
-        });
-        ui.checkbox(
-            &mut self.snap_grid,
-            "Snap measure clicks to grid intersections",
-        );
-        ui.checkbox(
-            &mut self.show_crosshair,
-            "Cursor crosshair + coordinate readout",
-        )
-        .on_hover_text(
-            "Show a crosshair at the cursor plus live coordinates in the \
-                 bottom-left chip, always (not only in measure mode). Snaps to \
-                 the grid when snap is on.",
-        );
+        })
+        .response
+        .on_hover_text("Grid pitch; measure snapping (Settings › Measure) uses this spacing.");
     }
 
     /// Settings → Input: pan/zoom scheme matching the user's ECAD tool (#54).
@@ -4461,11 +4425,22 @@ impl ViewApp {
             chips.push(hint);
         }
         if self.measure_mode {
-            // The units key is rebindable (#201) — read it from the keymap
-            // instead of hardcoding "U".
+            // With the Measure panel gone (#211) this chip is the tool's whole
+            // how-to. All three keys resolve from the live keymap/preset: the
+            // units cycle (preset Q / Ctrl+U unless rebound), the list clear
+            // (#198 preset unless rebound), and the toggle-off key.
+            let clear_key = match self.keymap.clear_measure {
+                Some(b) => format_binding(b),
+                None => match self.input_preset {
+                    InputPreset::Altium => "Shift+C".to_string(),
+                    InputPreset::KiCad => "Esc".to_string(),
+                },
+            };
             chips.push(format!(
-                "measure: click two points · {} units · Esc clears · toggle off to exit",
-                format_binding(self.keymap.cycle_unit)
+                "measure: click two points · {} units · {} clears · {} exits",
+                format_binding(self.keymap.unit_binding(self.input_preset)),
+                clear_key,
+                format_binding(self.keymap.toggle_measure),
             ));
         }
         // Split/Swipe draw their old/new identity labels at this same corner
@@ -4492,8 +4467,8 @@ impl ViewApp {
             Pos2::new(x as f32, y as f32)
         };
         // Completed measurements persist on-canvas so they stay visible for
-        // reference even when the tool is disarmed; the Measure tab list mirrors
-        // them (delete/clear there update the canvas too).
+        // reference even when the tool is disarmed (#211: the canvas is their
+        // only home — cleared by the preset key / a custom clear binding).
         for m in &self.measurements {
             let (dx, dy, angle) = measure_components(m.a, m.b);
             draw_ruler(
@@ -4808,6 +4783,14 @@ fn help_links(ui: &mut egui::Ui) {
     ui.separator();
     ui.label(format!("etchy v{}", env!("CARGO_PKG_VERSION")))
         .on_hover_text("The engine version.");
+    // The build stamp (#213): a weak one-liner so a user can prove which build
+    // is running — e.g. a browser tab still serving stale wasm.
+    ui.label(
+        egui::RichText::new(format!("build {BUILD_SHA}"))
+            .weak()
+            .small(),
+    )
+    .on_hover_text("The git commit this build was made from.");
 }
 
 /// Opacity multiplier for an item from `layer_index` given the active `selected`
@@ -4911,11 +4894,12 @@ fn rail_button(
     resp
 }
 
-/// Draw the glyph for a panel tab's rail icon (painter marks, glyph-free).
+/// Draw the glyph for a panel tab's rail icon (painter marks, glyph-free). The
+/// measure ruler is not a tab (#211) — the rail draws `draw_measure_icon`
+/// directly for its tool toggle.
 fn draw_panel_icon(tab: PanelTab, p: &egui::Painter, r: Rect, col: Color32) {
     match tab {
         PanelTab::Layers => draw_layers_icon(p, r, col),
-        PanelTab::Measure => draw_measure_icon(p, r, col),
         PanelTab::Export => draw_export_icon(p, r, col),
         PanelTab::Settings => draw_cog_icon(p, r, col),
     }
@@ -5263,7 +5247,7 @@ fn measure_components(a: [f64; 2], b: [f64; 2]) -> (f64, f64, f64) {
 }
 
 /// The compact "dX · dY · angle" detail line shown under a measurement's distance
-/// (#208) — in the Measure tab rows and on the canvas ruler label. Reuses
+/// (#208) on the canvas ruler label. Reuses
 /// [`format_distance`] so dX/dY carry the exact same unit formatting as the
 /// primary distance.
 fn format_components(dx_mm: f64, dy_mm: f64, angle_deg: f64, unit: Unit) -> String {
@@ -5275,8 +5259,8 @@ fn format_components(dx_mm: f64, dy_mm: f64, angle_deg: f64, unit: Unit) -> Stri
 }
 
 /// A completed measurement: the two world-space endpoints of a ruler (#50). The
-/// Measure tab keeps a running list of these; `distance_mm(a, b)` gives the length
-/// in the chosen unit.
+/// canvas draws the running list of these as persistent rulers (#211);
+/// `distance_mm(a, b)` gives the length in the chosen unit.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Measurement {
     a: [f64; 2],
@@ -5305,14 +5289,6 @@ fn measure_click(pts: &mut Vec<[f64; 2]>, p: [f64; 2]) -> Option<Measurement> {
             pts.push(p);
             None
         }
-    }
-}
-
-/// Remove the measurement at `idx` from the running list if in range (#50).
-/// Bounds-checked so a stale index carried across a frame can never panic.
-fn measurement_remove(list: &mut Vec<Measurement>, idx: usize) {
-    if idx < list.len() {
-        list.remove(idx);
     }
 }
 
@@ -5643,11 +5619,10 @@ mod tests {
         base_display_color, build_geom_key, cycle_base_opacity, derive_label, display_grid_pitch,
         distance_mm, export_file_names, finish_measurement, format_coord_mm, geom_cache_dirty,
         group_layers, hidden_note, is_version_like, layer_group, legacy_base_opacity,
-        measure_click, measure_rail_click, measurement_remove, pans_on, pick_outline_index,
-        region_screen_px, scroll_to_camera_action, short_layer_name, single_layer_hint,
-        step_in_order, toggle_panel, warning_phase, CameraAction, InputPreset, LayerGroup,
-        Measurement, Mode, PanelTab, RailSide, Theme, WarningPhase, BASE_OPACITY_FAINT,
-        BASE_OPACITY_STRONG,
+        measure_click, pans_on, pick_outline_index, preset_unit_binding, region_screen_px,
+        scroll_to_camera_action, short_layer_name, single_layer_hint, step_in_order, toggle_panel,
+        warning_phase, CameraAction, InputPreset, LayerGroup, Measurement, Mode, PanelTab,
+        RailSide, Theme, WarningPhase, BASE_OPACITY_FAINT, BASE_OPACITY_STRONG,
     };
     use etchy_core::LayerKind;
 
@@ -6518,13 +6493,15 @@ mod tests {
         assert_eq!(toggle_panel(None, PanelTab::Layers), Some(PanelTab::Layers));
         assert_eq!(toggle_panel(Some(PanelTab::Layers), PanelTab::Layers), None);
         assert_eq!(
-            toggle_panel(Some(PanelTab::Layers), PanelTab::Measure),
-            Some(PanelTab::Measure)
+            toggle_panel(Some(PanelTab::Layers), PanelTab::Export),
+            Some(PanelTab::Export)
         );
         assert_eq!(
-            toggle_panel(Some(PanelTab::Measure), PanelTab::Layers),
+            toggle_panel(Some(PanelTab::Export), PanelTab::Layers),
             Some(PanelTab::Layers)
         );
+        // Measure is NOT a tab (#211) — the rail's tab set is Layers + Export.
+        assert_eq!(PanelTab::ALL, [PanelTab::Layers, PanelTab::Export]);
         // The rail's bottom gear drives Settings through the same semantics (#199).
         assert_eq!(
             toggle_panel(Some(PanelTab::Layers), PanelTab::Settings),
@@ -6597,6 +6574,27 @@ mod tests {
         assert!(
             binding_conflict(&km, HotkeyAction::FitView, shift_c, InputPreset::KiCad).is_none()
         );
+        // The preset units-cycle key (#211) is reserved the same way — under
+        // its own preset only…
+        let q = KeyBinding::plain(Key::Q);
+        let ctrl_u = KeyBinding {
+            ctrl: true,
+            shift: false,
+            alt: false,
+            key: Key::U,
+        };
+        assert!(binding_conflict(&km, HotkeyAction::FitView, q, InputPreset::Altium).is_some());
+        assert!(binding_conflict(&km, HotkeyAction::FitView, q, InputPreset::KiCad).is_none());
+        assert!(binding_conflict(&km, HotkeyAction::FitView, ctrl_u, InputPreset::KiCad).is_some());
+        assert!(
+            binding_conflict(&km, HotkeyAction::FitView, ctrl_u, InputPreset::Altium).is_none()
+        );
+        // …recapturing it for Cycle-units itself is fine, and an explicit
+        // cycle-units rebind stands the preset reservation down.
+        assert!(binding_conflict(&km, HotkeyAction::CycleUnit, q, InputPreset::Altium).is_none());
+        let mut km2 = km;
+        km2.set(HotkeyAction::CycleUnit, KeyBinding::plain(Key::U));
+        assert!(binding_conflict(&km2, HotkeyAction::FitView, q, InputPreset::Altium).is_none());
         // A genuinely free key binds without complaint.
         assert!(binding_conflict(
             &km,
@@ -6623,11 +6621,12 @@ mod tests {
             "measure arms on Ctrl+M (#197)"
         );
         // Clear-measurements follows the #198 preset (Shift+C / Esc) until an
-        // explicit rebind overrides it.
+        // explicit rebind overrides it; cycle-units likewise rides the #211
+        // preset defaults (Altium Q / KiCad Ctrl+U).
         assert_eq!(km.clear_measure, None);
+        assert_eq!(km.cycle_unit, None);
         assert_eq!(km.fit_view, KeyBinding::plain(Key::F));
         assert_eq!(km.cycle_base, KeyBinding::plain(Key::S));
-        assert_eq!(km.cycle_unit, KeyBinding::plain(Key::U));
         assert_eq!(km.toggle_grid, KeyBinding::plain(Key::G));
         assert_eq!(km.mode_overlay, KeyBinding::plain(Key::Num1));
         assert_eq!(km.mode_old, KeyBinding::plain(Key::Num2));
@@ -7063,53 +7062,86 @@ mod tests {
     }
 
     #[test]
-    fn measurement_remove_deletes_index_and_is_bounds_safe() {
-        let mut list = vec![
-            Measurement {
-                a: [0.0, 0.0],
-                b: [1.0, 0.0],
-            },
-            Measurement {
-                a: [0.0, 0.0],
-                b: [2.0, 0.0],
-            },
-            Measurement {
-                a: [0.0, 0.0],
-                b: [3.0, 0.0],
-            },
-        ];
-        // Removes the requested index and keeps the rest in order.
-        measurement_remove(&mut list, 1);
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].b, [1.0, 0.0]);
-        assert_eq!(list[1].b, [3.0, 0.0]);
-        // Out-of-range index is a no-op, never a panic.
-        measurement_remove(&mut list, 9);
-        assert_eq!(list.len(), 2);
-        // Clearing empties the list.
-        list.clear();
-        assert!(list.is_empty());
+    fn preset_unit_binding_matches_each_ecad_tool() {
+        use super::{format_binding, KeyBinding};
+        use egui::Key;
+        // Each preset defaults the units cycle to that tool's own key (#211):
+        // Altium's Q, KiCad's Ctrl+U.
+        assert_eq!(
+            preset_unit_binding(InputPreset::Altium),
+            KeyBinding::plain(Key::Q)
+        );
+        assert_eq!(
+            format_binding(preset_unit_binding(InputPreset::KiCad)),
+            "Ctrl+U"
+        );
     }
 
     #[test]
-    fn measure_rail_click_arms_on_open_disarms_on_collapse() {
-        // Clicking Measure from any non-Measure state opens the panel and arms.
+    fn unit_binding_prefers_an_explicit_rebind_over_the_preset() {
+        use super::{HotkeyAction, KeyBinding, Keymap};
+        use egui::Key;
+        // Default keymap: the effective binding follows the preset (#211)…
+        let km = Keymap::default();
         assert_eq!(
-            measure_rail_click(None),
-            (Some(PanelTab::Measure), true),
-            "opening Measure arms the tool"
+            km.unit_binding(InputPreset::Altium),
+            preset_unit_binding(InputPreset::Altium)
         );
         assert_eq!(
-            measure_rail_click(Some(PanelTab::Layers)),
-            (Some(PanelTab::Measure), true),
-            "switching to Measure from another tab arms the tool"
+            km.unit_binding(InputPreset::KiCad),
+            preset_unit_binding(InputPreset::KiCad)
         );
-        // Clicking the active Measure tab collapses the panel and disarms.
-        assert_eq!(
-            measure_rail_click(Some(PanelTab::Measure)),
-            (None, false),
-            "collapsing Measure disarms the tool"
+        // …and an explicit rebind overrides it under EVERY preset.
+        let mut km = km;
+        let custom = KeyBinding {
+            ctrl: false,
+            shift: true,
+            alt: false,
+            key: Key::U,
+        };
+        km.set(HotkeyAction::CycleUnit, custom);
+        assert_eq!(km.unit_binding(InputPreset::Altium), custom);
+        assert_eq!(km.unit_binding(InputPreset::KiCad), custom);
+    }
+
+    #[test]
+    fn legacy_cycle_unit_default_yields_the_preset_default() {
+        use super::Keymap;
+        // A pre-#211 config persisted the fixed default `"cycle_unit":"U"`.
+        // The field moved (serde rename), so the stale value is dropped and the
+        // preset defaults take over instead of U being read back as an
+        // explicit rebind that pins the old key forever.
+        let km: Keymap = serde_json::from_str(r#"{"cycle_unit":"U"}"#).expect("deserialize");
+        assert_eq!(km.cycle_unit, None);
+        // The renamed field round-trips an explicit rebind.
+        let mut km = Keymap::default();
+        km.set(
+            super::HotkeyAction::CycleUnit,
+            super::KeyBinding::plain(egui::Key::U),
         );
+        let json = serde_json::to_string(&km).expect("serialize");
+        assert!(json.contains("cycle_units"), "{json}");
+        let back: Keymap = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, km);
+    }
+
+    #[test]
+    fn set_measure_mode_disarm_drops_the_point_keeps_the_rulers() {
+        // The rail ruler toggle / Ctrl+M route through set_measure_mode (#211):
+        // disarming clears only the in-progress point — completed rulers stay
+        // drawn on the canvas (they're cleared by key, MEAS-4).
+        let mut app = super::ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.set_measure_mode(true);
+        assert!(app.measure_mode);
+        app.measure_pts.push([0.0, 0.0]);
+        app.measurements.push(Measurement {
+            a: [0.0, 0.0],
+            b: [1.0, 0.0],
+        });
+        app.set_measure_mode(false);
+        assert!(!app.measure_mode);
+        assert!(app.measure_pts.is_empty(), "in-progress point is dropped");
+        assert_eq!(app.measurements.len(), 1, "completed rulers persist");
     }
 
     #[test]
