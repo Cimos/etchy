@@ -71,11 +71,27 @@ mod native {
         let viewport = egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 760.0])
             .with_title("etchy — PCB diff viewer");
+        // 4x MSAA so sub-pixel slivers (thin track/pad junctions, shared edges)
+        // cover at least one sample and don't drop out as "no copper" (#55/#47).
+        // BUT under software GL — Mesa llvmpipe on WSLg (no GPU passthrough) —
+        // rasterisation runs across every core, so 4x MSAA on a dense board
+        // pegs the whole machine per rendered frame (#215). Drop MSAA there and
+        // keep it on real GPUs; `ETCHY_MSAA=<n>` overrides either way (e.g. a WSL
+        // user with working GPU passthrough who wants the samples back). Diffs
+        // stay safe without MSAA — sub-pixel changes are marker-LOD'd, not
+        // multisample-dependent.
+        let multisampling: u16 = std::env::var("ETCHY_MSAA")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(if is_wsl() { 0 } else { 4 });
+        if multisampling == 0 {
+            eprintln!(
+                "etchy-gui: MSAA off for software rendering (WSL) — set ETCHY_MSAA=4 to force it on"
+            );
+        }
         let native_options = eframe::NativeOptions {
             viewport,
-            // 4x MSAA so sub-pixel slivers (thin track/pad junctions, shared edges)
-            // cover at least one sample and don't drop out as "no copper" (#55/#47).
-            multisampling: 4,
+            multisampling,
             ..Default::default()
         };
         // Move the labels + diff into the creation closure so persisted settings
