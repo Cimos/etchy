@@ -11,8 +11,8 @@ timestamps + severities quoted from it), the hosted M1 demo round
 tracker. Reporter is Simon unless noted. Repeated reports of one problem are
 merged into a single row (count noted).
 
-**Outcome legend:** ✅ shipped · 🔜 open (issue) · 📋 deferred/future ·
-↔ superseded by a later decision (see §9).
+**Outcome legend:** ✅ shipped · 🔶 built, in an open PR · 🔜 open (issue) ·
+📋 deferred/future · ↔ superseded by a later decision (see §9).
 
 ---
 
@@ -142,13 +142,16 @@ done backlog (#105 waiver).
 | Feedback | Became | Outcome |
 |---|---|---|
 | Page: requirements docs — merge #204 as-is; nothing missing; review the shell chain next | #204 merged; chain #167→#175→#182→#202 merged | ✅ |
-| Settings rows: hard to tell the setting name ("Theme") from the clickable values (dark/light) | #205 → new requirement GUI-9 | 🔜 |
+| Settings rows: hard to tell the setting name ("Theme") from the clickable values (dark/light) | #205 → new requirement GUI-9 (shipped in #210) | ✅ |
 | (chat) All feedback must live in documentation as requirements, backdated | this log + REQUIREMENTS.md | ✅ |
 | (chat) Support other EDA tool formats — X1/X2 etc. | IN-6 | ✅ X1/X2 · 🔜 more schemes |
 | (chat) Report generating as a requirement | CLI-7 | ✅ |
 | (chat) GitHub Action: 5-line adoption; every Gerber-touching PR gets a layer-by-layer diff comment | CLI-8 | 🔜 validate |
-| Show/hide-all and single/highlight/all overlap — merge into one control group (22:32) | #207 → VIEW-6 refinement | 🔜 |
-| Measurements need ΔX/ΔY offsets + angle, not just distance (22:33) | #208 → MEAS-6 | 🔜 |
+| Show/hide-all and single/highlight/all overlap — merge into one control group (22:32) | #207 → VIEW-6 refinement (shipped in #210) | ✅ |
+| Measurements need ΔX/ΔY offsets + angle, not just distance (22:33) | #208 → MEAS-6 (shipped in #210) | ✅ |
+| Measure tab must not auto-arm the tool; move its settings into Settings; drop the Measurements list — the tab can go (23:08) | #211 → MEAS-1/2/3 rework (rail ruler = plain tool toggle, no panel; Settings › Measure; rulers persist on canvas, cleared by key) | 🔶 |
+| Settings panel: others resize, it doesn't — and it re-sizes itself when sections open/close (23:09) | #212 → GUI-6 refinement (resizable, stable width) | 🔶 |
+| Swipe still pans (web, 100%, post-merge) — fixes verified on main, so likely a stale wasm tab; the running build must be provable (23:10) | #213 → GUI-10 build stamp (git sha in Help + brand tooltip) | 🔶 stamp · 🔜 re-test |
 
 ## 8 · Decision record (owner quiz answers, dated)
 
@@ -172,6 +175,7 @@ honestly. None are open disputes; flag anything you want reopened.
 | Plain **M** to measure (the shell plan) | **Ctrl+M** (07-06 note + quiz) |
 | Painter-drawn E monogram as branding (shell PR A) | The real pad-built brand icon; no rail monogram (07-06, #190/#191) |
 | Drill + P&P ingestion flagged as possible scope creep (06-18 triage) | Accepted into scope and shipped (SCOPE-2) |
+| Measure as a rail **tab** whose icon arms the tool + opens the panel (MEAS-1 as built, #197); the tab held the **measurements list** (MEAS-2) and the **units picker** (MEAS-3) | 07-07 23:08 reversal (#211): the ruler icon is a **plain tool toggle** — no panel, no auto-arm side effects beyond the toggle itself; the **list UI is gone** (rulers persist on canvas, cleared by key); snap/crosshair/units live in **Settings › Measure**; the units hotkey went preset-aware (Altium Q / KiCad Ctrl+U) |
 | Native lag → GPU transform path (#106) | GPU path stays off — it breaks marker-LOD trust (PERF-3); lag fixed by the all-view base cut instead (#158) |
 
 ---
