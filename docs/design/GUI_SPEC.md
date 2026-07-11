@@ -141,7 +141,7 @@ Defaults (KEY-4); all rebindable in Settings › Hotkeys except the fixed aliase
 | Clear measurements | *preset:* Altium **Shift+C** / KiCad **Esc** | rebind overrides preset |
 | Fit view | F | frames the whole board |
 | Cycle base opacity | S | 0 → 40 → 80% |
-| Cycle measure units | *preset:* Altium **Q** / KiCad **Ctrl+U** | each tool's own units key (#211); rebind overrides preset; mm → mil → inch |
+| Cycle measure units | *preset:* Altium **Q** / KiCad **Ctrl+U** | each tool's own units key (#211); rebind overrides preset; cycles mm → inch → mil |
 | Toggle grid | G | |
 | Modes | 1–5 | fixed aliases: O=Overlay, B=Old, A=New (bare key only) |
 | Step layer | J/K or ↓/↑ | fixed |

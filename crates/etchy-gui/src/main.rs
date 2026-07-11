@@ -718,12 +718,7 @@ fn preset_unit_binding(preset: InputPreset) -> KeyBinding {
 /// binding stands it down (the Altium Shift+C clear, the preset units-cycle
 /// key). Checked at capture time so a rebind can never make one key press
 /// dispatch two actions (#201 review).
-fn binding_conflict(
-    km: &Keymap,
-    action: HotkeyAction,
-    b: KeyBinding,
-    preset: InputPreset,
-) -> Option<&'static str> {
+fn binding_conflict(km: &Keymap, action: HotkeyAction, b: KeyBinding) -> Option<&'static str> {
     use egui::Key;
     for (other, label) in HotkeyAction::ALL {
         if other != action && km.get(other) == Some(b) {
@@ -742,8 +737,12 @@ fn binding_conflict(
             _ => {}
         }
     }
-    if preset == InputPreset::Altium
-        && action != HotkeyAction::ClearMeasurements
+    // Preset-driven defaults are reserved regardless of which Input preset is
+    // ACTIVE — otherwise a key bound while one preset is selected would collide
+    // the moment the user switches presets, making one press dispatch two
+    // actions (#211 review). Altium's Shift+C clear (KiCad's clear is the fixed
+    // Esc, reserved above):
+    if action != HotkeyAction::ClearMeasurements
         && km.clear_measure.is_none()
         && b.key == Key::C
         && b.shift
@@ -752,11 +751,12 @@ fn binding_conflict(
     {
         return Some("Clear measurements (preset Shift+C)");
     }
-    // The active preset's units-cycle key (#211: Altium Q / KiCad Ctrl+U) is
-    // reserved while no custom cycle-units binding stands it down.
+    // Either preset's units-cycle key (Altium Q, KiCad Ctrl+U), while no custom
+    // cycle-units binding stands it down.
     if action != HotkeyAction::CycleUnit
         && km.cycle_unit.is_none()
-        && b == preset_unit_binding(preset)
+        && (b == preset_unit_binding(InputPreset::Altium)
+            || b == preset_unit_binding(InputPreset::KiCad))
     {
         return Some("Cycle measure units (preset)");
     }
@@ -2720,9 +2720,7 @@ impl eframe::App for ViewApp {
                 Some(CaptureResult::Bind(b)) => {
                     // Refuse a binding something else already owns — one key
                     // press must never dispatch two actions.
-                    if let Some(owner) =
-                        binding_conflict(&self.keymap, action, b, self.input_preset)
-                    {
+                    if let Some(owner) = binding_conflict(&self.keymap, action, b) {
                         self.capture_conflict =
                             Some(format!("{} is taken by {owner}", format_binding(b)));
                     } else {
@@ -6515,35 +6513,19 @@ mod tests {
 
     #[test]
     fn binding_conflict_blocks_taken_and_reserved_keys() {
-        use super::{binding_conflict, HotkeyAction, InputPreset, KeyBinding, Keymap};
+        use super::{binding_conflict, HotkeyAction, KeyBinding, Keymap};
         use egui::Key;
         let km = Keymap::default();
         // A key another rebindable action already owns is refused...
-        assert!(binding_conflict(
-            &km,
-            HotkeyAction::FitView,
-            KeyBinding::plain(Key::S), // = Cycle base opacity
-            InputPreset::KiCad,
-        )
-        .is_some());
+        assert!(binding_conflict(&km, HotkeyAction::FitView, KeyBinding::plain(Key::S)).is_some());
         // ...but re-capturing an action's own current binding is fine.
-        assert!(binding_conflict(
-            &km,
-            HotkeyAction::CycleBase,
-            KeyBinding::plain(Key::S),
-            InputPreset::KiCad,
-        )
-        .is_none());
+        assert!(
+            binding_conflict(&km, HotkeyAction::CycleBase, KeyBinding::plain(Key::S)).is_none()
+        );
         // Fixed plain-key aliases are reserved (O/B/A modes, J/K layer step)...
         for key in [Key::O, Key::B, Key::A, Key::J, Key::K] {
             assert!(
-                binding_conflict(
-                    &km,
-                    HotkeyAction::FitView,
-                    KeyBinding::plain(key),
-                    InputPreset::KiCad,
-                )
-                .is_some(),
+                binding_conflict(&km, HotkeyAction::FitView, KeyBinding::plain(key)).is_some(),
                 "plain {key:?} is a fixed alias and must be refused"
             );
         }
@@ -6557,25 +6539,18 @@ mod tests {
                 alt: false,
                 key: Key::O
             },
-            InputPreset::KiCad,
         )
         .is_none());
-        // Altium's preset Shift+C clear is reserved while no custom clear
-        // binding stands it down — and only under Altium.
+        // Preset-driven clear/units keys are reserved regardless of the active
+        // preset (so switching preset can't create a double-fire, #211 review):
+        // Altium Shift+C, Altium Q, and KiCad Ctrl+U are ALL refused for other
+        // actions while no custom binding stands them down.
         let shift_c = KeyBinding {
             ctrl: false,
             shift: true,
             alt: false,
             key: Key::C,
         };
-        assert!(
-            binding_conflict(&km, HotkeyAction::FitView, shift_c, InputPreset::Altium).is_some()
-        );
-        assert!(
-            binding_conflict(&km, HotkeyAction::FitView, shift_c, InputPreset::KiCad).is_none()
-        );
-        // The preset units-cycle key (#211) is reserved the same way — under
-        // its own preset only…
         let q = KeyBinding::plain(Key::Q);
         let ctrl_u = KeyBinding {
             ctrl: true,
@@ -6583,26 +6558,20 @@ mod tests {
             alt: false,
             key: Key::U,
         };
-        assert!(binding_conflict(&km, HotkeyAction::FitView, q, InputPreset::Altium).is_some());
-        assert!(binding_conflict(&km, HotkeyAction::FitView, q, InputPreset::KiCad).is_none());
-        assert!(binding_conflict(&km, HotkeyAction::FitView, ctrl_u, InputPreset::KiCad).is_some());
-        assert!(
-            binding_conflict(&km, HotkeyAction::FitView, ctrl_u, InputPreset::Altium).is_none()
-        );
-        // …recapturing it for Cycle-units itself is fine, and an explicit
-        // cycle-units rebind stands the preset reservation down.
-        assert!(binding_conflict(&km, HotkeyAction::CycleUnit, q, InputPreset::Altium).is_none());
+        for b in [shift_c, q, ctrl_u] {
+            assert!(
+                binding_conflict(&km, HotkeyAction::FitView, b).is_some(),
+                "{b:?} is a preset default and must be refused for other actions"
+            );
+        }
+        // Recapturing the units key for Cycle-units itself is fine, and an
+        // explicit cycle-units rebind stands the preset reservation down.
+        assert!(binding_conflict(&km, HotkeyAction::CycleUnit, q).is_none());
         let mut km2 = km;
         km2.set(HotkeyAction::CycleUnit, KeyBinding::plain(Key::U));
-        assert!(binding_conflict(&km2, HotkeyAction::FitView, q, InputPreset::Altium).is_none());
+        assert!(binding_conflict(&km2, HotkeyAction::FitView, q).is_none());
         // A genuinely free key binds without complaint.
-        assert!(binding_conflict(
-            &km,
-            HotkeyAction::FitView,
-            KeyBinding::plain(Key::T),
-            InputPreset::Altium,
-        )
-        .is_none());
+        assert!(binding_conflict(&km, HotkeyAction::FitView, KeyBinding::plain(Key::T)).is_none());
     }
 
     #[test]
