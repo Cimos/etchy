@@ -26,7 +26,9 @@ As of writing, the shell described here lives in **PR #202** (stacked on
 ```
 
 - **Activity rail** (VS Code style): slim vertical strip of painter-drawn icons
-  (GUI-1). Tabs top-down: **Layers, Measure, Export**; a **Settings gear pinned
+  (GUI-1). Panel tabs top-down: **Layers, Export**; between them sits the
+  **Measure ruler — a plain tool toggle, not a tab** (it arms/disarms the tool,
+  highlights while armed, and opens no panel — #211); a **Settings gear pinned
   at the bottom** (GUI-3). Clicking an inactive tab opens its panel; clicking
   the active tab collapses the panel to the rail. No brand mark on the rail.
 - **Rail side** flips left/right via Settings › Display and persists (GUI-2).
@@ -58,18 +60,20 @@ As of writing, the shell described here lives in **PR #202** (stacked on
   Split/Swipe the outline still draws into both halves for orientation.
 - Selecting a row highlights it and **never moves the camera** (VIEW-1).
 
-### Measure
-- The rail icon **arms the tool and opens this tab in one click** — including
-  while the panel is collapsed; re-click disarms and collapses (MEAS-1).
-  A hint line names the shortcut (**Ctrl+M**); there is no Armed widget.
-- Contents: snap-to-grid toggle · crosshair toggle · units **mm / mil / inch**
-  · the running **measurements list** — each row shows its distance in the
-  active unit with a per-row remove; plus clear-all (MEAS-2/3).
-- Completed measurements persist drawn on the board (ruler + distance label)
-  until deleted; the in-progress point shows only while armed.
+### Measure (a tool, not a panel — #211)
+- The rail ruler icon is a **plain tool toggle**: click arms measure mode
+  (icon highlights), click again disarms — it opens **no panel** (MEAS-1).
+  **Ctrl+M** toggles it too. While armed, the bottom-left measure chip is the
+  how-to: the click gesture plus the live units / clear / exit keys.
+- Two clicks make a measurement. Completed measurements **persist drawn on the
+  board** (ruler + distance with ΔX/ΔY/angle beneath, MEAS-6) until cleared by
+  key — there is **no measurements list UI** (MEAS-2). The in-progress point
+  shows only while armed; disarming drops it but keeps completed rulers.
+- The tool's options — snap-to-grid, crosshair, units **mm / mil / inch** —
+  live in **Settings › Measure** (MEAS-3), one home, no duplicates.
 - **Clearing by key follows the input preset** (MEAS-4): Altium → exact
   **Shift+C** (no Ctrl/Alt supersets); KiCad → **Esc**, in the cascade
-  *in-progress point → completed list → exit tool*. An Esc aimed at an open
+  *in-progress point → completed rulers → exit tool*. An Esc aimed at an open
   menu/popup never reaches the cascade. An explicit Clear rebind (Hotkeys)
   replaces the preset defaults.
 
@@ -81,11 +85,15 @@ As of writing, the shell described here lives in **PR #202** (stacked on
   `./etchy-export/`; wasm downloads.
 
 ### Settings (a rail panel — no floating window)
-Stacked collapsible sections, Display open by default (GUI-6):
-- **Display** — theme dark/light · measure units · **activity rail left/right**.
+Stacked collapsible sections, Display open by default (GUI-6). The panel is
+**resizable like the others and holds its width** — opening/closing a section
+never re-sizes it (#212):
+- **Display** — theme dark/light · **activity rail left/right**.
 - **Diff** — min-area noise filter (suppression always surfaced, TRUST-3).
 - **Grid** — spacing, colours (display pitch adapts per VIEW-9; snap uses this).
-- **Input** — preset **Altium / KiCad** (pan buttons + clear-measure key).
+- **Measure** — units **mm / mil / inch** · snap-to-grid · crosshair + readout
+  (the measure tool's one home, #211).
+- **Input** — preset **Altium / KiCad** (pan buttons + clear/units keys).
 - **Colours** — canvas/added/removed/per-layer colours, theme presets.
 - **Layers** — per-layer colour rows (square swatches).
 - **Hotkeys** — see §4.
@@ -129,11 +137,11 @@ Defaults (KEY-4); all rebindable in Settings › Hotkeys except the fixed aliase
 
 | Action | Default | Notes |
 |---|---|---|
-| Toggle measure | **Ctrl+M** | also the rail Measure icon |
+| Toggle measure | **Ctrl+M** | also the rail ruler toggle |
 | Clear measurements | *preset:* Altium **Shift+C** / KiCad **Esc** | rebind overrides preset |
 | Fit view | F | frames the whole board |
 | Cycle base opacity | S | 0 → 40 → 80% |
-| Cycle measure units | U | mm → mil → inch |
+| Cycle measure units | *preset:* Altium **Q** / KiCad **Ctrl+U** | each tool's own units key (#211); rebind overrides preset; mm → mil → inch |
 | Toggle grid | G | |
 | Modes | 1–5 | fixed aliases: O=Overlay, B=Old, A=New (bare key only) |
 | Step layer | J/K or ↓/↑ | fixed |
@@ -141,9 +149,10 @@ Defaults (KEY-4); all rebindable in Settings › Hotkeys except the fixed aliase
 
 Editor rules (KEY-1..3): press-to-capture with Esc cancel; a capture **refuses
 a taken key** (any other action, the fixed aliases, or the active preset clear
-key) with an inline "taken by …" note; captures cancel when the editor leaves
-the screen; focused text fields keep their keystrokes; exact-modifier matching
-everywhere; Reset restores every default.
+and units keys) with an inline "taken by …" note; captures cancel when the
+editor leaves the screen; focused text fields keep their keystrokes;
+exact-modifier matching everywhere; Reset restores every default. Preset-driven
+defaults display as e.g. "Q (preset)" until explicitly rebound.
 
 ## 5. Branding
 
@@ -158,6 +167,10 @@ everywhere; Reset restores every default.
 
 - The GUI compiles for native and `wasm32-unknown-unknown`; every GUI change
   must keep both building (PROC-2).
+- **Build stamp** (GUI-10, #213): the git short sha is baked in at compile time
+  and shown subtly — a `build <sha>` line in the Help menu and the brand icon's
+  hover tooltip — identical on native and wasm, so a browser tab can prove
+  which build it runs (the stale-wasm case).
 - Native on WSLg: Help links open via `explorer.exe`; file dialogs need
   `xdg-desktop-portal`. Known open defect #203 (pointer offset suspected —
   clicks miss widgets while drags work).
