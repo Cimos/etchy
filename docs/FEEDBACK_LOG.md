@@ -157,9 +157,9 @@ done backlog (#105 waiver).
 
 | Feedback | Became | Outcome |
 |---|---|---|
-| Export does nothing on the PDF diff (17:16) | #222 | 🔜 |
-| PDF render resolution needs to be higher (17:16) | #223 → CLI-6/GUI DPI setting | 🔜 |
-| Layers visibility model (segment + eyes) feels off — deep-dive + quiz wanted (17:17) | #224 → VIEW-6 redesign discussion | 🔜 |
+| Export does nothing on the PDF diff (17:16) | #222 → VIEW-16 (native: absolute export dir next to the inputs; web: DOM-attached anchor + multi-file sets bundled into one zip) | 🔶 |
+| PDF render resolution needs to be higher (17:16) | #223 → VIEW-15 (Settings › Diff DPI chips 150/200/300, GUI default 200, re-rasterize on change; CLI keeps 150 + `--dpi`) | 🔶 |
+| Layers visibility model (segment + eyes) feels off — deep-dive + quiz wanted (17:17) | #224 → VIEW-6 rework, owner-locked variant B (view segment deleted; eyes-only visibility + Focus slider; base slider → Settings › Diff; PERF-2 superseded) | 🔶 |
 
 ## 8 · Decision record (owner quiz answers, dated)
 
@@ -185,6 +185,7 @@ honestly. None are open disputes; flag anything you want reopened.
 | Drill + P&P ingestion flagged as possible scope creep (06-18 triage) | Accepted into scope and shipped (SCOPE-2) |
 | Measure as a rail **tab** whose icon arms the tool + opens the panel (MEAS-1 as built, #197); the tab held the **measurements list** (MEAS-2) and the **units picker** (MEAS-3) | 07-07 23:08 reversal (#211): the ruler icon is a **plain tool toggle** — no panel, no auto-arm side effects beyond the toggle itself; the **list UI is gone** (rulers persist on canvas, cleared by key); snap/crosshair/units live in **Settings › Measure**; the units hotkey went preset-aware (Altium Q / KiCad Ctrl+U) |
 | Native lag → GPU transform path (#106) | GPU path stays off — it breaks marker-LOD trust (PERF-3); lag fixed by the all-view base cut instead (#158) |
+| Show/hide-all + view segment merged into **one visibility control group** single/highlight/all/none (07-07, #207 → VIEW-6 as then built) — itself the first reversal of the visibility controls | 07-12 second reversal (#224): the segment and the eyes interacted weirdly, so the **segment is deleted entirely** — per-row/group **eyes are the only visibility control**, a **Focus slider** replaces highlight-dimming (non-selected visible layers at `1 − focus`, base and diff), the base slider moved to Settings › Diff, and the #158 all-view diff-only trick (PERF-2) retired with the segment |
 
 ---
 
