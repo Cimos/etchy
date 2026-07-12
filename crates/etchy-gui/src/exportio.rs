@@ -1,12 +1,13 @@
 //! File output for the GUI export (#60). The viewer owns I/O (like the CLI); what
-//! to export — per-layer SVGs + the copper-area CSV — is built by the caller from
-//! `etchy-core`. Native writes a folder next to the cwd; web triggers downloads.
-//! PNG is deferred (it needs a rasterizer dep / bundle cost — tracked on #60).
+//! to export — per-layer SVGs + the copper-area CSV, or per-page PDF-diff overlay
+//! PNGs (#63) — is built by the caller from `etchy-core`/`etchy-pdf`. Native
+//! writes a folder next to the cwd; web triggers downloads. Contents are bytes so
+//! binary formats (PNG) ride the same path as text.
 
-/// One file to emit: a name and its text contents.
+/// One file to emit: a name and its contents (text or binary).
 pub struct ExportFile {
     pub name: String,
-    pub content: String,
+    pub content: Vec<u8>,
 }
 
 /// Save the files. Returns a short user-facing message for the toast (Ok) or an
@@ -20,7 +21,7 @@ pub fn save(files: &[ExportFile]) -> Result<String, String> {
     for f in files {
         let path = dir.join(&f.name);
         std::fs::File::create(&path)
-            .and_then(|mut w| w.write_all(f.content.as_bytes()))
+            .and_then(|mut w| w.write_all(&f.content))
             .map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     Ok(format!(
@@ -39,14 +40,15 @@ pub fn save(files: &[ExportFile]) -> Result<String, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn download(name: &str, content: &str) -> Result<(), String> {
+fn download(name: &str, content: &[u8]) -> Result<(), String> {
     use wasm_bindgen::JsCast;
     let win = web_sys::window().ok_or("no window")?;
     let doc = win.document().ok_or("no document")?;
-    // Blob from the text, an object URL, and a synthetic <a download> click.
+    // Blob from the bytes (binary-safe — a str blob would mangle PNGs), an object
+    // URL, and a synthetic <a download> click.
     let parts = js_sys::Array::new();
-    parts.push(&wasm_bindgen::JsValue::from_str(content));
-    let blob = web_sys::Blob::new_with_str_sequence(&parts).map_err(|_| "blob")?;
+    parts.push(&js_sys::Uint8Array::from(content));
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&parts).map_err(|_| "blob")?;
     let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(|_| "url")?;
     let a = doc
         .create_element("a")
