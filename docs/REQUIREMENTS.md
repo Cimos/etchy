@@ -72,7 +72,7 @@ numbered requirements with their source and current status.
 | CLI-3 | Threshold gates: `--fail-on-area`, `--fail-on-regions`, `--gate-layers` (validated tokens; misnamed layers must not silently skip the gate). | #137, #144 | ✅ |
 | CLI-4 | **Git-refs invocation**: `etchy refA refB [subdir]` diffs committed fab packs without a checkout; ref names are never guessed from typos. | #138, #144 | ✅ |
 | CLI-5 | GitHub Action (composite) posts the Markdown summary on PRs; runs fully offline/self-hosted. | M2 | ✅ |
-| CLI-6 | PDF inputs: `.pdf` old/new → page-by-page pixel diff summary + overlay PNGs, same exit-code contract. | #63 | 🔜 (engine ✅ #150/#151) |
+| CLI-6 | PDF inputs: `.pdf` old/new → page-by-page pixel diff summary + overlay PNGs (`--out`), same exit-code contract. Behind the `pdf` feature; `--dpi` sets resolution. | #63 | ✅ built, in PR (engine #150/#151, CLI wiring feat/pdf-cli) |
 | CLI-7 | **Report generation** is first-class: one run produces a shareable, self-contained **HTML report** plus SVG overlays, JSON v1, and a Markdown summary — no separate tooling. | owner 2026-07-07, #139 | ✅ |
 | CLI-8 | **Five-line CI adoption:** adding the GitHub Action to a repo takes ≤ 5 workflow lines, and every PR that touches Gerbers gets a **layer-by-layer diff posted in its comments**. | owner 2026-07-07 | 🔜 validate the 5-line bar + comment format against the shipped Action |
 

@@ -12,7 +12,17 @@ authors.workspace = true
 name = "etchy"
 path = "src/main.rs"
 
+[features]
+# Off by default: the schematic-PDF pixel-diff path (etchy-pdf/hayro) stays out
+# of the default build so the geometric-diff binary keeps its lean dep tree and
+# low MSRV. Turn on with `--features pdf` (release binaries ship it on).
+default = []
+pdf = ["dep:etchy-pdf", "etchy-pdf/pdf", "dep:serde", "dep:serde_json"]
+
 [dependencies]
 etchy-core = { path = "../etchy-core" }
+etchy-pdf = { path = "../etchy-pdf", optional = true }
 clap.workspace = true
 anyhow.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
