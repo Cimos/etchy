@@ -10,7 +10,7 @@ numbered requirements with their source and current status.
   (dated feedback → requirement traceability), [`ROADMAP.md`](ROADMAP.md)
   (sequencing), [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md) (architecture).
 - **Status legend:** ✅ shipped on `main` · 🔶 built, in an open PR · 🔜 accepted,
-  not built · 📋 future (post-1.0).
+  not built · 📋 future (post-1.0) · ↔ superseded by a later decision.
 - **Source** is the GitHub issue, PR, or the decision record that produced the
   requirement. "Owner" decisions were made by Simon in review sessions.
 
@@ -103,8 +103,8 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | VIEW-2 | **Fit frames the whole board** (union of every layer's extent), not the changed region or one layer. | #170 | ✅ |
 | VIEW-3 | **Left-drag pans** in every input preset (right/middle per preset still work). | #172/#18 | ✅ |
 | VIEW-4 | **Swipe is a curtain over one board**: the divider bisects a single board (left = old, right = new), travels the full canvas width, and dragging it never pans the board. | #171/#183, owner | ✅ |
-| VIEW-5 | Base copper (unchanged geometry) renders at a user-set **opacity slider** (0–100%, in the Layers panel); the S key cycles the familiar off/faint/strong stops. | #12, owner | ✅ |
-| VIEW-6 | View modes **single / highlight / all** control multi-layer display; hide-all clears **every** layer. Show/hide-all and the view segment merged into **one visibility control group** (single/highlight/all/none). | #59, #173, #207, #210 | ✅ |
+| VIEW-5 | Base copper (unchanged geometry) renders at a user-set **opacity slider** (0–100% with typed entry), in **Settings › Diff** (moved out of the Layers panel — the Focus slider took its spot, #224); the S key cycles the familiar off/faint/strong stops. | #12, owner; #224 | 🔶 |
+| VIEW-6 | **Eyes are the only visibility control** (per-row + group-header toggles); selection stays separate from visibility. The view segment (single/highlight/all/none) is **deleted**. A **Focus slider** (0–100%, top of the Layers panel, persisted, default 25%) renders every non-selected VISIBLE layer at `1 − focus` — base and diff geometry alike; 100% shows only the selected layer. Panel rows ghost to mirror the canvas. Hiding every eye leaves a **truly blank canvas**; Split/Swipe still force the selected layer visible. | #224 owner-locked (variant B); supersedes #59/#173/#207/#210 | 🔶 |
 | VIEW-7 | The **board edge is a normal layer** (Mechanical › outline): plain eye toggle, visible by default; no special row, control, or legend entry. | #3/#157, owner clarified | ✅ |
 | VIEW-8 | **Always-on crosshair + grid-snapped cursor** with a live coordinate readout, independent of measure mode (toggles live in Settings › Measure; snap defaults on and the readout says "· grid" so precision is honest). | #16/#17/#179, owner | ✅ |
 | VIEW-9 | The **drawn grid adapts to zoom** (1-2-5 pitch selection) so a grid is visible at any zoom; **snapping stays at the configured pitch** — the display never changes what snap does. | #195 | ✅ |
@@ -113,6 +113,8 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | VIEW-12 | Colour/theme presets selectable in Settings; per-layer colours editable; dark/light themes with readable contrast in both. | #155, 2026-06-21 feedback | ✅ |
 | VIEW-13 | Wheel semantics: plain wheel zooms at the cursor; Ctrl+wheel pans Y; Shift+wheel pans X; a physical notch feels the same on web and native. | 2026-06-20 feedback, #56 | ✅ |
 | VIEW-14 | Warnings are named, concise, auto-fade to an icon, and never shift the layout on hover. | 2026-06-21 feedback | ✅ |
+| VIEW-15 | **PDF rasterization DPI is user-settable** in Settings › Diff (chips 150/200/300, default **200** — deliberately higher than the CLI's 150 default, which keeps its `--dpi` flag). Changing it **re-rasterizes the loaded pair** from the retained source bytes; a DPI that breaches the raster caps (50 MP/page, 8192 px/side, 250 MP/doc) fails loud and the setting reverts. Persisted. | #223 | 🔶 |
+| VIEW-16 | **Export always produces findable output**: native writes `etchy-export/` next to the last opened input (absolute path in the toast); web downloads a single file directly and bundles a multi-file set into one zip (browsers block the 2nd+ automatic download). PDF mode exports the changed pages' overlay PNGs. | #222 | 🔶 |
 
 ## 8. Measure system
 
@@ -139,7 +141,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | ID | Requirement | Source | Status |
 |---|---|---|---|
 | PERF-1 | Smooth pan/zoom on a dense 16-layer board: tessellate once (cached by geometry key), transform per frame, cull off-screen, one merged mesh. | discovery, G6 | ✅ |
-| PERF-2 | In **all-layers** view, non-selected layers draw diff-only (base copper dropped) — the ~70% vertex cut that keeps dense pan smooth without losing any diff. | #158 | ✅ |
+| PERF-2 | ~~In **all-layers** view, non-selected layers draw diff-only (base copper dropped).~~ **Superseded by #224:** the view segment is gone and the Focus model always draws every visible layer's base (dimmed by `1 − focus`); the #158 diff-only trick is retired — GPU-era surfaces carry the cost, and PERF-1's caching remains the perf backbone. | #158 → #224 | ↔ superseded |
 | PERF-3 | The optional GPU transform path stays **off by default**: it draws true-scale with no marker LOD, which violates TRUST-2 for tiny diffs. Do not enable it as a perf fix. | #106/#117 decision | standing |
 | PERF-4 | Per-layer parallel diff (rayon); render never re-triangulates on camera or colour changes. | M3 | ✅ |
 | PERF-5 | Adaptive flash tessellation (fewer segments for tiny pads) is accepted future work. | #94 | 📋 |

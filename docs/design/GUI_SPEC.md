@@ -15,10 +15,9 @@ As of writing, the shell described here lives in **PR #202** (stacked on
 │ E │ Mad_RP2040 v0.0.0 → v0.0.1   [Overlay|Old|New|Split|Swipe]    │
 ├───┼───────────────┬──────────────────────────────────────────────┤
 │ ▤ │ Layers        │                                    ┌────────┐│
-│ ⌖ │  base ───●─── │                                    │ added  ││
-│ ⤓ │  view s/h/all │                                    │ removed││
-│   │  ▸ Copper     │            board canvas            └────────┘│
-│   │  ▸ Soldermask │                                              │
+│ ⌖ │ focus ───●─── │                                    │ added  ││
+│ ⤓ │  ▸ Copper     │                                    │ removed││
+│   │  ▸ Soldermask │            board canvas            └────────┘│
 │   │  ▸ Mechanical │                                              │
 │   │      …        │  ┌────────────────────┐                      │
 │ ⚙ │               │  │ x 62.50 y 41.00 ·grid│  ← bottom-left stack│
@@ -44,17 +43,26 @@ As of writing, the shell described here lives in **PR #202** (stacked on
 ## 2. Panels
 
 ### Layers
-- **Base opacity slider** at the top (VIEW-5): 0–100%, percent readout that
-  accepts typed values; replaces the old off/faint/strong segment. `S` cycles
-  0% → 40% → 80% (the familiar stops).
-- **View segment** single / highlight / all (VIEW-6): single shows the active
-  layer; highlight shows all, dimming non-selected; all shows all equally
-  (non-selected layers draw diff-only for speed, PERF-2). Per-row eyes
-  fine-tune afterwards. **Hide all clears every layer** (#173).
+- **Focus slider** at the top (VIEW-6, #224 owner-locked): 0–100%, percent
+  readout that accepts typed values. Every non-selected VISIBLE layer renders
+  at `1 − focus` — its whole render, base AND diff geometry; 0% = all visible
+  layers equal, 100% = only the selected layer visible. The selected layer is
+  always full strength; the outline orientation reference never dims. Default
+  25%; persisted. (The base-opacity slider that used to sit here moved to
+  Settings › Diff, VIEW-5.)
+- **Eyes are the ONLY visibility control** (VIEW-6): per-row eye toggles plus a
+  group-header eye per family. There is **no view segment** (the old
+  single/highlight/all/none is deleted, and with it the #158 diff-only "all
+  view" trick — PERF-2 superseded) and **no show/hide-all buttons**. Selection
+  stays separate from visibility: clicking a row highlights it, only its eye
+  shows/hides it. Hiding every eye leaves a **truly blank canvas** ("no
+  geometry in this view"); Split/Swipe still force the selected layer visible.
 - **Layer rows**, grouped by family (Copper, Soldermask, Silkscreen, Paste,
   Drill, Mechanical, Other), changed-first within groups: eye toggle · small
   **square** colour swatch · name · **copper Δ%** (changed area as share of the
-  layer's new-rev area; mm² split on hover) (VIEW-11).
+  layer's new-rev area; mm² split on hover) (VIEW-11). Visible non-selected
+  rows **ghost** — name and Δ% fade with the canvas focus dim (floored so rows
+  stay legible) — so the panel mirrors what's drawn.
 - **The board edge is just the Mechanical › outline row** (VIEW-7): a normal
   eye toggle, on by default. No special row anywhere, no legend entry. In
   Split/Swipe the outline still draws into both halves for orientation.
@@ -81,15 +89,28 @@ As of writing, the shell described here lives in **PR #202** (stacked on
 - Surfaces the existing exporter — one code path with the CLI. Two actions:
   **Export current layer** and **Export all changed layers**, each preceded by
   the exact file list it writes (index-prefixed SVG per layer + `areas.csv`).
-  No format prose, no nested scroll box (#196). Native writes
-  `./etchy-export/`; wasm downloads.
+  No format prose, no nested scroll box (#196). In PDF mode the tab offers the
+  changed pages' **diff-overlay PNGs** instead (`page-N.png`; unpaired pages
+  are named as having nothing to diff against).
+- **Where it lands** (#222, VIEW-16): native writes `etchy-export/` next to
+  the last opened input (falling back to the cwd) and the toast reports the
+  **absolute** path. Web downloads one file directly; a multi-file set ships
+  as a single `etchy-export.zip` — browsers block the 2nd+ automatic download
+  from one click, so a per-file loop would silently drop most of the set.
 
 ### Settings (a rail panel — no floating window)
 Stacked collapsible sections, Display open by default (GUI-6). The panel is
 **resizable like the others and holds its width** — opening/closing a section
 never re-sizes it (#212):
 - **Display** — theme dark/light · **activity rail left/right**.
-- **Diff** — min-area noise filter (suppression always surfaced, TRUST-3).
+- **Diff** — **base copper opacity** (0–100% slider with typed entry, moved
+  here from the Layers panel by #224; `S` still cycles 0/40/80%, VIEW-5) ·
+  min-area noise filter (suppression always surfaced, TRUST-3) · **PDF
+  resolution** (DPI chips 150/200/300, default 200, VIEW-15): changing it
+  re-rasterizes a loaded PDF pair from the retained bytes; a DPI over the
+  raster caps fails loud into the load error and the setting reverts. The CLI
+  default stays 150 (`--dpi` covers it) — a deliberate divergence: on-screen
+  zooming wants more pixels than a 1:1 overlay PNG.
 - **Grid** — spacing, colours (display pitch adapts per VIEW-9; snap uses this).
 - **Measure** — units **mm / mil / inch** · snap-to-grid · crosshair + readout
   (the measure tool's one home, #211).
