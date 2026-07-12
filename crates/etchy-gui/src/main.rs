@@ -11,10 +11,15 @@ mod exportio;
 mod gpu;
 mod loader;
 mod lod;
+// Without the `pdf` feature the view model can't be constructed, so most of the
+// module is (deliberately) dead — the pure helpers stay compiled + unit-tested.
+#[cfg_attr(not(feature = "pdf"), allow(dead_code))]
+mod pdfview;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
 use etchy_core::{BoardDiff, LayerStatus, LayerView, PolygonSet, Pt};
+use pdfview::PdfView;
 
 // ===========================================================================
 // Native entry (desktop) — diff two Gerber directories given on the CLI.
@@ -113,38 +118,36 @@ mod native {
         derive_label(p)
     }
 
-    /// Load both revisions from CLI paths into source boards + their diff.
+    /// Load both revisions from CLI paths — Gerber dirs/zips or schematic PDFs
+    /// (#63) — into sources + their computed diff.
     fn load_seed(
-        old_dir: &Path,
-        new_dir: &Path,
-    ) -> anyhow::Result<(LoadedBoard, LoadedBoard, BoardDiff)> {
-        let (old_board, of) = loader::load_source(old_dir)?;
-        let (new_board, nf) = loader::load_source(new_dir)?;
-        let old = LoadedBoard {
-            label: label(old_dir),
-            board: old_board,
-            fmt: of,
-        };
-        let new = LoadedBoard {
-            label: label(new_dir),
-            board: new_board,
-            fmt: nf,
-        };
-        let diff = diff_from_sources(&old, &new)?;
+        old_path: &Path,
+        new_path: &Path,
+    ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff)> {
+        let old = load_source_any(old_path, label(old_path))?;
+        let new = load_source_any(new_path, label(new_path))?;
+        let diff = compute_diff(&old, &new)?;
         Ok((old, new, diff))
     }
 
-    /// Construct the app, restoring persisted settings. With a seed, both source
-    /// boards are set so either can be reopened; without one, the welcome screen
-    /// shows (empty diff).
+    /// Construct the app, restoring persisted settings. With a seed, both sources
+    /// are set so either can be reopened; without one, the welcome screen shows
+    /// (empty diff).
     fn build_app(
         cc: &eframe::CreationContext<'_>,
-        seed: Option<(LoadedBoard, LoadedBoard, BoardDiff)>,
+        seed: Option<(LoadedSource, LoadedSource, ComputedDiff)>,
     ) -> ViewApp {
         match seed {
-            Some((old, new, diff)) => {
-                let (ol, nl) = (old.label.clone(), new.label.clone());
-                let mut app = ViewApp::from_cc(cc, diff, ol, nl);
+            Some((old, new, computed)) => {
+                let (ol, nl) = (old.label().to_string(), new.label().to_string());
+                let mut app = match computed {
+                    ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
+                    ComputedDiff::Pdf(view) => {
+                        let mut app = ViewApp::from_cc(cc, empty_diff(), ol, nl);
+                        app.pdf = Some(view);
+                        app
+                    }
+                };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
                 app
@@ -255,8 +258,8 @@ fn main() {
                     let mut app = ViewApp::from_cc(cc, diff, ol, nl);
                     // Seed the sources so "Open A/B" re-diffs against the demo side
                     // the user keeps (#120).
-                    app.src_old = Some(old);
-                    app.src_new = Some(new);
+                    app.src_old = Some(LoadedSource::Board(old));
+                    app.src_new = Some(LoadedSource::Board(new));
                     Ok(Box::new(app))
                 }),
             )
@@ -1092,6 +1095,54 @@ struct LoadedBoard {
     fmt: Option<etchy_core::GerberFormat>,
 }
 
+/// One loaded schematic PDF revision (#63): the raw bytes, rasterized when both
+/// sides are present (the diff needs both, and DPI/pairing are pair-level).
+struct LoadedPdf {
+    label: String,
+    bytes: Vec<u8>,
+}
+
+/// One loaded input revision: a Gerber board or a schematic PDF (#63). The two
+/// kinds never mix — `compute_diff` fails loud on a PDF-vs-Gerber pair.
+enum LoadedSource {
+    Board(LoadedBoard),
+    Pdf(LoadedPdf),
+}
+
+impl LoadedSource {
+    fn label(&self) -> &str {
+        match self {
+            LoadedSource::Board(b) => &b.label,
+            LoadedSource::Pdf(p) => &p.label,
+        }
+    }
+}
+
+/// The computed comparison of two sources: a geometric board diff, or a per-page
+/// PDF pixel diff (#63).
+enum ComputedDiff {
+    Board(BoardDiff),
+    Pdf(PdfView),
+}
+
+/// Diff two loaded sources. Both Gerber → the geometry diff; both PDF → the
+/// per-page pixel diff (a loud error when this build lacks the `pdf` feature);
+/// mixed → a loud error, never a guess.
+fn compute_diff(old: &LoadedSource, new: &LoadedSource) -> anyhow::Result<ComputedDiff> {
+    match (old, new) {
+        (LoadedSource::Board(o), LoadedSource::Board(n)) => {
+            Ok(ComputedDiff::Board(diff_from_sources(o, n)?))
+        }
+        (LoadedSource::Pdf(o), LoadedSource::Pdf(n)) => Ok(ComputedDiff::Pdf(
+            pdfview::build_pdf_view(&o.bytes, &n.bytes)?,
+        )),
+        _ => anyhow::bail!(
+            "cannot compare a PDF with Gerber input — load two schematic PDFs \
+             or two board revisions"
+        ),
+    }
+}
+
 /// Which revision a load targets: the old (A) or new (B) side. (Distinct from
 /// `Side` above, which is the split-view Left/Right.)
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1105,7 +1156,7 @@ enum RevSide {
 #[cfg(target_arch = "wasm32")]
 struct FilePick {
     side: RevSide,
-    result: anyhow::Result<LoadedBoard>,
+    result: anyhow::Result<LoadedSource>,
 }
 
 /// How many layers the canvas shows at once (#59/#207). A quick preset over the
@@ -1272,10 +1323,14 @@ struct ViewApp {
     /// holds the grab across frames so leaving the handle mid-drag keeps it.
     swipe_drag: bool,
 
-    /// Retained source boards (#120) so either side can be reopened and re-diffed.
+    /// PDF mode (#63): the per-page raster diff shown instead of the board diff.
+    /// `Some` exactly when the two loaded sources are PDFs; loading a Gerber pair
+    /// resets it (and vice versa — `adopt_pdf` clears the board state).
+    pdf: Option<PdfView>,
+    /// Retained sources (#120) so either side can be reopened and re-diffed.
     /// `None` before a board is chosen (the welcome screen shows in that state).
-    src_old: Option<LoadedBoard>,
-    src_new: Option<LoadedBoard>,
+    src_old: Option<LoadedSource>,
+    src_new: Option<LoadedSource>,
     /// The last load/diff error, surfaced in the UI (fail-loud, never silent).
     load_error: Option<String>,
     /// The directory of the last board opened, so the next "Open" dialog starts
@@ -1376,6 +1431,7 @@ impl ViewApp {
             input_preset: InputPreset::default(),
             swipe_frac: 0.5,
             swipe_drag: false,
+            pdf: None,
             src_old: None,
             src_new: None,
             load_error: None,
@@ -1421,12 +1477,12 @@ impl ViewApp {
             // "other" layers) don't clobber each other's file.
             files.push(exportio::ExportFile {
                 name: format!("{i:02}-{}.svg", l.name()),
-                content: etchy_core::layer_svg(l),
+                content: etchy_core::layer_svg(l).into_bytes(),
             });
         }
         files.push(exportio::ExportFile {
             name: "areas.csv".into(),
-            content: etchy_core::board_areas_csv(&self.diff),
+            content: etchy_core::board_areas_csv(&self.diff).into_bytes(),
         });
         files
     }
@@ -1515,9 +1571,32 @@ impl ViewApp {
     }
 
     /// Move the selection `delta` steps through the displayed (changed-first)
-    /// order — the keyboard equivalent of clicking the next/previous layer.
+    /// order — the keyboard equivalent of clicking the next/previous layer. In
+    /// PDF mode the same keys step through the pages instead (#63).
     fn step_layer(&mut self, delta: i32) {
+        if self.pdf.is_some() {
+            let next = {
+                let pv = self.pdf.as_ref().unwrap();
+                step_in_order(&pv.order, pv.selected, delta)
+            };
+            self.select_pdf_page(next);
+            return;
+        }
         self.select(step_in_order(&self.order, self.selected, delta));
+    }
+
+    /// Select a PDF page. Unlike board layers — which share one physical world —
+    /// each sheet is its own drawing at origin [0,0], so rulers measured on one
+    /// page would render as stale, misleading annotations on another (#63
+    /// review). Switching pages clears the measurements.
+    fn select_pdf_page(&mut self, idx: usize) {
+        if let Some(pv) = &mut self.pdf {
+            if pv.selected != idx {
+                pv.selected = idx;
+                self.measurements.clear();
+                self.measure_pts.clear();
+            }
+        }
     }
 }
 
@@ -2198,14 +2277,25 @@ impl ViewApp {
         self.warning_shown_at = None;
         self.warning_expanded = false;
         self.load_error = None;
+        // A board load leaves PDF mode (#63): the page rasters/textures are
+        // per-pair state and must never linger behind a board diff.
+        self.pdf = None;
         #[cfg(feature = "gpu-transform")]
         {
             self.gpu_hash = None;
         }
     }
 
-    /// Store a freshly loaded board on one side and re-diff if both sides are set.
-    fn set_side(&mut self, side: RevSide, loaded: LoadedBoard) {
+    /// Enter PDF mode (#63): the same full reset as `adopt_diff` (camera,
+    /// measurements, caches, board state — via an empty board diff), then the
+    /// page view takes over the canvas and panels.
+    fn adopt_pdf(&mut self, view: PdfView, old_label: String, new_label: String) {
+        self.adopt_diff(empty_diff(), old_label, new_label);
+        self.pdf = Some(view);
+    }
+
+    /// Store a freshly loaded source on one side and re-diff if both sides are set.
+    fn set_side(&mut self, side: RevSide, loaded: LoadedSource) {
         match side {
             RevSide::Old => self.src_old = Some(loaded),
             RevSide::New => self.src_new = Some(loaded),
@@ -2214,16 +2304,15 @@ impl ViewApp {
         self.rebuild_diff();
     }
 
-    /// Recompute the diff from the two source boards, if both are present.
+    /// Recompute the comparison from the two sources, if both are present.
     fn rebuild_diff(&mut self) {
         let (Some(o), Some(n)) = (self.src_old.as_ref(), self.src_new.as_ref()) else {
             return;
         };
-        match diff_from_sources(o, n) {
-            Ok(diff) => {
-                let (ol, nl) = (o.label.clone(), n.label.clone());
-                self.adopt_diff(diff, ol, nl);
-            }
+        let (ol, nl) = (o.label().to_string(), n.label().to_string());
+        match compute_diff(o, n) {
+            Ok(ComputedDiff::Board(diff)) => self.adopt_diff(diff, ol, nl),
+            Ok(ComputedDiff::Pdf(view)) => self.adopt_pdf(view, ol, nl),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
@@ -2255,16 +2344,17 @@ impl ViewApp {
         }
     }
 
-    /// Native: open a `.zip` fab-pack picker for `side`.
+    /// Native: open a file picker for `side` — a `.zip` fab pack or a schematic
+    /// `.pdf` (#63).
     #[cfg(not(target_arch = "wasm32"))]
     fn pick_zip(&mut self, side: RevSide) {
         let title = match side {
-            RevSide::Old => "Open old revision — .zip fab pack",
-            RevSide::New => "Open new revision — .zip fab pack",
+            RevSide::Old => "Open old revision — .zip fab pack or schematic PDF",
+            RevSide::New => "Open new revision — .zip fab pack or schematic PDF",
         };
         let mut dialog = rfd::FileDialog::new()
             .set_title(title)
-            .add_filter("fab pack", &["zip"]);
+            .add_filter("fab pack / schematic PDF", &["zip", "pdf"]);
         if let Some(d) = &self.last_dir {
             dialog = dialog.set_directory(d);
         }
@@ -2280,15 +2370,8 @@ impl ViewApp {
         if let Some(parent) = path.parent() {
             self.last_dir = Some(parent.to_path_buf());
         }
-        match loader::load_source(path) {
-            Ok((board, fmt)) => self.set_side(
-                side,
-                LoadedBoard {
-                    label: path_label(path),
-                    board,
-                    fmt,
-                },
-            ),
+        match load_source_any(path, path_label(path)) {
+            Ok(src) => self.set_side(side, src),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
@@ -2333,38 +2416,24 @@ impl ViewApp {
 
     #[cfg(target_arch = "wasm32")]
     fn load_dropped(&mut self, side: RevSide, files: Vec<egui::DroppedFile>) {
-        // Web drops carry bytes. A single `.zip` → load_zip; otherwise every
-        // dropped file is treated as a layer.
-        let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut zip: Option<Vec<u8>> = None;
-        for f in files {
-            let Some(bytes) = f.bytes else { continue };
-            if f.name.to_ascii_lowercase().ends_with(".zip") {
-                zip = Some(bytes.to_vec());
-            } else {
-                byte_files.push((basename(&f.name), bytes.to_vec()));
-            }
+        // Web drops carry bytes; the shared classifier routes a `.zip`, a
+        // schematic `.pdf` (#63), or loose Gerber layers.
+        let byte_files: Vec<(String, Vec<u8>)> = files
+            .into_iter()
+            .filter_map(|f| f.bytes.map(|b| (basename(&f.name), b.to_vec())))
+            .collect();
+        if byte_files.is_empty() {
+            return;
         }
-        let res = if let Some(zb) = zip {
-            loader::load_zip(zb)
-        } else {
-            loader::board_from_bytes(byte_files)
-        };
-        match res {
-            Ok((board, fmt)) => self.set_side(
-                side,
-                LoadedBoard {
-                    label: "dropped files".into(),
-                    board,
-                    fmt,
-                },
-            ),
+        match files_to_source(byte_files, "dropped files") {
+            Ok(src) => self.set_side(side, src),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
 
-    /// Web: open the browser file picker for `side` (multiple Gerbers or one
-    /// `.zip`); the result comes back over the channel and is drained next frame.
+    /// Web: open the browser file picker for `side` (multiple Gerbers, one
+    /// `.zip`, or one schematic `.pdf` — #63); the result comes back over the
+    /// channel and is drained next frame.
     #[cfg(target_arch = "wasm32")]
     fn pick_files_web(&mut self, side: RevSide, ctx: &egui::Context) {
         let tx = self.file_tx.clone();
@@ -2372,10 +2441,10 @@ impl ViewApp {
         wasm_bindgen_futures::spawn_local(async move {
             let Some(handles) = rfd::AsyncFileDialog::new()
                 .add_filter(
-                    "Gerber / fab pack",
+                    "Gerber / fab pack / schematic PDF",
                     &[
                         "gbr", "gtl", "gbl", "gts", "gbs", "gto", "gbo", "gtp", "gbp", "gko",
-                        "gm1", "zip",
+                        "gm1", "zip", "pdf",
                     ],
                 )
                 .pick_files()
@@ -2384,26 +2453,12 @@ impl ViewApp {
                 return;
             };
             let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
-            let mut zip: Option<Vec<u8>> = None;
             for h in handles {
                 let name = h.file_name();
                 let bytes = h.read().await;
-                if name.to_ascii_lowercase().ends_with(".zip") {
-                    zip = Some(bytes);
-                } else {
-                    byte_files.push((basename(&name), bytes));
-                }
+                byte_files.push((basename(&name), bytes));
             }
-            let result = if let Some(zb) = zip {
-                loader::load_zip(zb)
-            } else {
-                loader::board_from_bytes(byte_files)
-            }
-            .map(|(board, fmt)| LoadedBoard {
-                label: "uploaded".into(),
-                board,
-                fmt,
-            });
+            let result = files_to_source(byte_files, "uploaded");
             let _ = tx.send(FilePick { side, result });
             ctx.request_repaint();
         });
@@ -2457,7 +2512,7 @@ impl ViewApp {
             RevSide::New => &self.src_new,
         }
         .as_ref()
-        .map(|l| l.label.clone());
+        .map(|l| l.label().to_string());
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(label).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2490,9 +2545,8 @@ impl ViewApp {
     }
 }
 
-/// The initial empty diff shown before any board is loaded (the welcome screen).
-/// Native start-empty path + tests; web always seeds the demo.
-#[cfg(not(target_arch = "wasm32"))]
+/// The initial empty diff shown before any board is loaded (the welcome screen),
+/// and the board-state blank underneath PDF mode (#63, both surfaces).
 fn empty_diff() -> BoardDiff {
     BoardDiff {
         report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
@@ -2568,11 +2622,57 @@ fn is_version_like(name: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
-/// Basename of a filename string (handles `/` and `\`). Web-only (native uses
-/// `path_label`).
-#[cfg(target_arch = "wasm32")]
+/// Basename of a filename string (handles `/` and `\`). Used by the web loaders
+/// (native uses `path_label`) and the shared in-memory classifier below.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn basename(name: &str) -> String {
     name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
+}
+
+/// Classify a set of in-memory `(filename, bytes)` files into one loaded source
+/// (#63): a single schematic PDF (by `.pdf` name or `%PDF` magic) → PDF mode; a
+/// `.zip` → the fab-pack loader; anything else → loose Gerber layers. A PDF mixed
+/// with other files is a loud error — one PDF per side, never a guess. Shared by
+/// the web drop and web file-pick paths; pure over bytes, so it's unit-tested on
+/// native too.
+fn files_to_source(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<LoadedSource> {
+    let pdf_count = files
+        .iter()
+        .filter(|(name, bytes)| {
+            name.to_ascii_lowercase().ends_with(".pdf") || pdfview::looks_like_pdf(bytes)
+        })
+        .count();
+    if pdf_count > 0 {
+        if files.len() > 1 {
+            anyhow::bail!(
+                "load one schematic PDF per side — a PDF cannot mix with other layer files"
+            );
+        }
+        let (name, bytes) = files.into_iter().next().expect("len checked above");
+        if !pdfview::looks_like_pdf(&bytes) {
+            anyhow::bail!("{name} has a .pdf name but no PDF content (%PDF magic missing)");
+        }
+        return Ok(LoadedSource::Pdf(LoadedPdf { label: name, bytes }));
+    }
+    let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut zip: Option<Vec<u8>> = None;
+    for (name, bytes) in files {
+        if name.to_ascii_lowercase().ends_with(".zip") {
+            zip = Some(bytes);
+        } else {
+            byte_files.push((name, bytes));
+        }
+    }
+    let (board, fmt) = if let Some(zb) = zip {
+        loader::load_zip(zb)
+    } else {
+        loader::board_from_bytes(byte_files)
+    }?;
+    Ok(LoadedSource::Board(LoadedBoard {
+        label: label.to_string(),
+        board,
+        fmt,
+    }))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2583,10 +2683,66 @@ fn path_label(path: &std::path::Path) -> String {
         .to_string()
 }
 
-/// Native: turn dropped paths into a loaded board. A single dropped folder or
-/// `.zip` loads directly; multiple dropped files are read as individual layers.
+/// Native: is this path a schematic PDF? Both signals must agree — `.pdf`
+/// extension AND the `%PDF` magic — so a stray directory named `x.pdf` or a
+/// mislabelled Gerber never silently reroutes into the pixel-diff path (#63;
+/// same rule as the CLI's `is_pdf_input`).
 #[cfg(not(target_arch = "wasm32"))]
-fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedBoard> {
+fn is_pdf_input(path: &std::path::Path) -> bool {
+    let ext_is_pdf = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    if !ext_is_pdf || !path.is_file() {
+        return false;
+    }
+    let mut magic = [0u8; 4];
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            use std::io::Read;
+            f.read_exact(&mut magic).is_ok() && &magic == b"%PDF"
+        }
+        Err(_) => false,
+    }
+}
+
+/// Native: read one schematic PDF, enforcing the shared per-file byte cap before
+/// it hits RAM (#63; same guard as the layer loaders).
+#[cfg(not(target_arch = "wasm32"))]
+fn read_pdf_bytes(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+    let len = path
+        .metadata()
+        .with_context(|| format!("reading metadata for {}", path.display()))?
+        .len();
+    if len > loader::MAX_LAYER_FILE_BYTES {
+        anyhow::bail!(
+            "{} is {len} bytes, over the {}-byte per-file limit",
+            path.display(),
+            loader::MAX_LAYER_FILE_BYTES
+        );
+    }
+    std::fs::read(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// Native: load one revision from a filesystem path — a schematic `.pdf` (#63),
+/// or a Gerber directory / `.zip` fab pack. Shared by the CLI-args seed and the
+/// Open file dialog so both route PDFs identically.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_source_any(path: &std::path::Path, label: String) -> anyhow::Result<LoadedSource> {
+    if is_pdf_input(path) {
+        let bytes = read_pdf_bytes(path)?;
+        return Ok(LoadedSource::Pdf(LoadedPdf { label, bytes }));
+    }
+    let (board, fmt) = loader::load_source(path)?;
+    Ok(LoadedSource::Board(LoadedBoard { label, board, fmt }))
+}
+
+/// Native: turn dropped paths into a loaded source. A single dropped folder,
+/// `.zip`, or schematic `.pdf` (#63) loads directly; multiple dropped files are
+/// read as individual layers (a PDF among them is a loud error via
+/// `files_to_source` — one PDF per side).
+#[cfg(not(target_arch = "wasm32"))]
+fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSource> {
     use anyhow::Context as _;
     if paths.len() == 1 {
         let p = &paths[0];
@@ -2594,13 +2750,8 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedBoar
             .extension()
             .map(|e| e.eq_ignore_ascii_case("zip"))
             .unwrap_or(false);
-        if p.is_dir() || is_zip {
-            let (board, fmt) = loader::load_source(p)?;
-            return Ok(LoadedBoard {
-                label: path_label(p),
-                board,
-                fmt,
-            });
+        if p.is_dir() || is_zip || is_pdf_input(p) {
+            return load_source_any(p, path_label(p));
         }
     }
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
@@ -2608,12 +2759,7 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedBoar
         let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
         files.push((path_label(p), bytes));
     }
-    let (board, fmt) = loader::board_from_bytes(files)?;
-    Ok(LoadedBoard {
-        label: format!("{} files", paths.len()),
-        board,
-        fmt,
-    })
+    files_to_source(files, &format!("{} files", paths.len()))
 }
 
 impl ViewApp {
@@ -2933,26 +3079,52 @@ impl eframe::App for ViewApp {
                         .size(15.0)
                         .color(C_CREAM),
                 );
-                // Totals pushed to the right.
-                let t = &self.diff.report.totals;
+                // Totals pushed to the right. PDF mode has no layers or mm² —
+                // headline the page tallies instead (#63).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "+{:.4}  −{:.4} mm²",
-                            t.added_area_mm2, t.removed_area_mm2
-                        ))
-                        .size(14.0)
-                        .color(Color32::from_gray(170)),
-                    );
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}/{} layers changed",
-                            t.layers_changed, t.layers_total
-                        ))
-                        .size(14.0)
-                        .strong(),
-                    );
+                    if let Some(pv) = &self.pdf {
+                        if pv.old_pages != pv.new_pages {
+                            // Trust: an added/removed sheet must be legible in
+                            // the headline, not folded into a count.
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "old {} / new {} pages",
+                                    pv.old_pages, pv.new_pages
+                                ))
+                                .size(14.0)
+                                .color(C_COPPER),
+                            );
+                            ui.add_space(10.0);
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}/{} pages changed",
+                                pv.changed_count(),
+                                pv.rows.len()
+                            ))
+                            .size(14.0)
+                            .strong(),
+                        );
+                    } else {
+                        let t = &self.diff.report.totals;
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "+{:.4}  −{:.4} mm²",
+                                t.added_area_mm2, t.removed_area_mm2
+                            ))
+                            .size(14.0)
+                            .color(Color32::from_gray(170)),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}/{} layers changed",
+                                t.layers_changed, t.layers_total
+                            ))
+                            .size(14.0)
+                            .strong(),
+                        );
+                    }
                 });
             });
             ui.add_space(4.0);
@@ -2975,6 +3147,10 @@ impl eframe::App for ViewApp {
             // Action intents, set in the (self-borrowing) closures and acted on after.
             let mut fit = false;
             let mut open_side: Option<RevSide> = None;
+            // Native file pick (.zip fab pack or schematic .pdf, #63); web's one
+            // picker already takes every kind.
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut open_file_side: Option<RevSide> = None;
             ui.horizontal(|ui| {
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 8.0);
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -3008,6 +3184,17 @@ impl eframe::App for ViewApp {
                                     open_side = Some(RevSide::New);
                                     ui.close();
                                 }
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    if ui.button("Open old file (.zip / .pdf)…").clicked() {
+                                        open_file_side = Some(RevSide::Old);
+                                        ui.close();
+                                    }
+                                    if ui.button("Open new file (.zip / .pdf)…").clicked() {
+                                        open_file_side = Some(RevSide::New);
+                                        ui.close();
+                                    }
+                                }
                                 ui.separator();
                                 if ui.button("Fit view").clicked() {
                                     fit = true;
@@ -3026,6 +3213,17 @@ impl eframe::App for ViewApp {
                                 if ui.button("New revision…").clicked() {
                                     open_side = Some(RevSide::New);
                                     ui.close();
+                                }
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    if ui.button("Old file (.zip / .pdf)…").clicked() {
+                                        open_file_side = Some(RevSide::Old);
+                                        ui.close();
+                                    }
+                                    if ui.button("New file (.zip / .pdf)…").clicked() {
+                                        open_file_side = Some(RevSide::New);
+                                        ui.close();
+                                    }
                                 }
                                 ui.separator();
                                 ui.label(
@@ -3056,11 +3254,15 @@ impl eframe::App for ViewApp {
             if let Some(side) = open_side {
                 self.open_primary(side, ui.ctx());
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(side) = open_file_side {
+                self.pick_zip(side);
+            }
         });
 
-        // No board loaded yet → welcome / open screen. Returning here skips the
-        // layer list + canvas, which assume at least one layer (#120).
-        if self.diff.layers.is_empty() {
+        // No board (or PDF pair, #63) loaded yet → welcome / open screen.
+        // Returning here skips the layer list + canvas, which assume content.
+        if self.diff.layers.is_empty() && self.pdf.is_none() {
             self.welcome_ui(ui);
             return;
         }
@@ -3154,6 +3356,12 @@ impl eframe::App for ViewApp {
                 .resizable(true)
                 .default_size(260.0)
                 .show_inside(ui, |ui| match tab {
+                    // In PDF mode (#63) the Layers tab lists the document's pages
+                    // and Export offers the per-page overlay PNGs; the board-only
+                    // controls (view presets, base slider, eyes, swatches) don't
+                    // apply to raster pages, so they're not shown at all.
+                    PanelTab::Layers if self.pdf.is_some() => self.pdf_pages_panel_ui(ui),
+                    PanelTab::Export if self.pdf.is_some() => self.pdf_export_panel_ui(ui),
                     PanelTab::Layers => self.layers_panel_ui(ui),
                     PanelTab::Export => self.export_panel_ui(ui),
                     PanelTab::Settings => self.settings_panel_ui(ui),
@@ -3161,11 +3369,18 @@ impl eframe::App for ViewApp {
         }
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.draw_canvas(ui);
+            if self.pdf.is_some() {
+                self.draw_canvas_pdf(ui);
+            } else {
+                self.draw_canvas(ui);
+            }
         });
 
         // Publish "what they're looking at" for the web feedback widget.
-        let layer_name = self.diff.layers[self.selected].name().to_string();
+        let layer_name = match &self.pdf {
+            Some(pv) => format!("page {}", pv.rows[pv.selected].page),
+            None => self.diff.layers[self.selected].name().to_string(),
+        };
         let mode = match self.mode {
             Mode::Overlay => "Overlay",
             Mode::Old => "Old",
@@ -3574,7 +3789,11 @@ impl ViewApp {
                 egui::CollapsingHeader::new("Measure").show(ui, |ui| self.settings_measure(ui));
                 egui::CollapsingHeader::new("Input").show(ui, |ui| self.settings_input(ui));
                 egui::CollapsingHeader::new("Colours").show(ui, |ui| self.settings_colours(ui));
-                egui::CollapsingHeader::new("Layers").show(ui, |ui| self.settings_layers(ui));
+                // Per-layer base colours are a board concept — raster PDF pages
+                // have no layers, so the section is absent in PDF mode (#63).
+                if self.pdf.is_none() {
+                    egui::CollapsingHeader::new("Layers").show(ui, |ui| self.settings_layers(ui));
+                }
                 egui::CollapsingHeader::new("Hotkeys").show(ui, |ui| self.settings_hotkeys(ui));
             });
     }
@@ -3791,35 +4010,41 @@ impl ViewApp {
 
     /// Settings → Colours: diff colours + per-theme canvas/grid (#53/#31/#52).
     fn settings_colours(&mut self, ui: &mut egui::Ui) {
-        Self::settings_header(ui, "Diff colours");
-        // One-click palette presets (#155); the pickers below still fine-tune.
-        // Rendered as segmented chips (#205) — "selected" is derived from the
-        // current colours, so this uses the frame directly, not `segmented`.
-        ui.horizontal(|ui| {
-            ui.label("Preset");
-            segmented_frame(ui, |ui| {
-                for (pal, label) in DiffPalette::ALL {
-                    let (a, r) = pal.colors();
-                    let active = self.col_added == a && self.col_removed == r;
-                    let text = if active {
-                        egui::RichText::new(label).color(C_CANVAS).strong()
-                    } else {
-                        egui::RichText::new(label)
-                    };
-                    if ui.selectable_label(active, text).clicked() {
-                        self.col_added = a;
-                        self.col_removed = r;
+        // The added/removed diff colours only drive the vector board render —
+        // the PDF overlay bakes its colours in the engine, so showing these in
+        // PDF mode would be dead controls (#63 review). Canvas & grid below
+        // still apply everywhere.
+        if self.pdf.is_none() {
+            Self::settings_header(ui, "Diff colours");
+            // One-click palette presets (#155); the pickers below still fine-tune.
+            // Rendered as segmented chips (#205) — "selected" is derived from the
+            // current colours, so this uses the frame directly, not `segmented`.
+            ui.horizontal(|ui| {
+                ui.label("Preset");
+                segmented_frame(ui, |ui| {
+                    for (pal, label) in DiffPalette::ALL {
+                        let (a, r) = pal.colors();
+                        let active = self.col_added == a && self.col_removed == r;
+                        let text = if active {
+                            egui::RichText::new(label).color(C_CANVAS).strong()
+                        } else {
+                            egui::RichText::new(label)
+                        };
+                        if ui.selectable_label(active, text).clicked() {
+                            self.col_added = a;
+                            self.col_removed = r;
+                        }
                     }
-                }
+                });
             });
-        });
-        ui.horizontal(|ui| {
-            ui.label("added");
-            ui.color_edit_button_srgba(&mut self.col_added);
-            ui.label("removed");
-            ui.color_edit_button_srgba(&mut self.col_removed);
-        });
-        ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("added");
+                ui.color_edit_button_srgba(&mut self.col_added);
+                ui.label("removed");
+                ui.color_edit_button_srgba(&mut self.col_removed);
+            });
+            ui.add_space(6.0);
+        }
         // The pickers edit the ACTIVE theme; switch dark/light to tune the other,
         // so a charcoal canvas never bleeds into light mode.
         let theme_name = match self.theme {
@@ -3910,24 +4135,17 @@ impl ViewApp {
             .any(|b| pans_on(self.input_preset, b) && response.dragged_by(b))
     }
 
-    fn draw_canvas(&mut self, ui: &mut egui::Ui) {
-        let size = ui.available_size();
-        let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
-        let rect = response.rect;
-        // The board background uses the user-configurable canvas colour (#53),
-        // defaulting to the brand board-dark.
-        painter.rect_filled(rect, 0.0, self.canvas_color());
-
-        // Fit on first show / explicit Fit only. Fit frames the WHOLE board (#8),
-        // not the selected layer, so the view is stable no matter which layer is
-        // active — and selecting a layer never moves it (#4).
-        if !self.cam.fitted {
-            if let Some(bb) = board_bbox(&self.diff.layers) {
-                fit(&mut self.cam, bb, rect);
-            }
-            self.cam.fitted = true;
-        }
-
+    /// Camera + tool input over the canvas — the swipe divider, measure clicks,
+    /// drag panning, and wheel zoom/pan. Extracted from `draw_canvas` verbatim so
+    /// the PDF canvas (#63) shares exactly the same feel (same divider latch, same
+    /// pan buttons, same zoom anchoring). Returns whether the swipe divider is
+    /// hovered or dragged, for the highlighted handle in the draw pass (#61).
+    fn canvas_camera_input(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        rect: Rect,
+    ) -> bool {
         // Swipe/curtain divider (#61): a draggable vertical wipe line. Dragging it
         // takes priority over panning, so when the pointer grabs the divider the
         // pan logic below is skipped for this frame. The handle has a few px of
@@ -4012,7 +4230,7 @@ impl ViewApp {
                 self.cam.center[0] -= d.x as f64 / self.cam.scale;
                 self.cam.center[1] += d.y as f64 / self.cam.scale; // y flipped
             }
-        } else if self.dragging_pans(&response) {
+        } else if self.dragging_pans(response) {
             // Pan (only when not measuring), on the button(s) the input preset
             // assigns to panning (#54).
             let d = response.drag_delta();
@@ -4061,6 +4279,30 @@ impl ViewApp {
             CameraAction::PanY(dy) => self.cam.center[1] += dy / self.cam.scale,
             CameraAction::None => {}
         }
+        swipe_hot
+    }
+
+    fn draw_canvas(&mut self, ui: &mut egui::Ui) {
+        let size = ui.available_size();
+        let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+        let rect = response.rect;
+        // The board background uses the user-configurable canvas colour (#53),
+        // defaulting to the brand board-dark.
+        painter.rect_filled(rect, 0.0, self.canvas_color());
+
+        // Fit on first show / explicit Fit only. Fit frames the WHOLE board (#8),
+        // not the selected layer, so the view is stable no matter which layer is
+        // active — and selecting a layer never moves it (#4).
+        if !self.cam.fitted {
+            if let Some(bb) = board_bbox(&self.diff.layers) {
+                fit(&mut self.cam, bb, rect);
+            }
+            self.cam.fitted = true;
+        }
+
+        // Camera + tool input (swipe divider, measure clicks, panning, wheel
+        // zoom), shared with the PDF canvas (#63).
+        let swipe_hot = self.canvas_camera_input(ui, &response, rect);
 
         // Grid overlay (#51): faint world-spaced lines, drawn UNDER the geometry.
         // The drawn pitch adapts to zoom (#195) so it never fills solid or vanishes.
@@ -4212,61 +4454,7 @@ impl ViewApp {
             if !rmesh.is_empty() {
                 painter.with_clip_rect(rr).add(Shape::from(rmesh));
             }
-            // The divider: a copper wipe line. In Swipe it's the draggable handle,
-            // heavier and brighter when hovered/dragged (#61) so it reads as movable.
-            let line_col = if swipe && swipe_hot {
-                C_CREAM
-            } else {
-                C_COPPER
-            };
-            painter.line_segment(
-                [
-                    Pos2::new(div_x, rect.top()),
-                    Pos2::new(div_x, rect.bottom()),
-                ],
-                Stroke::new(if swipe { 2.5 } else { 1.5 }, line_col),
-            );
-            if swipe {
-                // A clear grab handle at mid-height: a rounded copper pill with three
-                // grip lines, so the divider is an obvious, easy target (#61). It
-                // brightens with a cream outline when hovered/dragged.
-                let mid_y = rect.center().y;
-                let handle =
-                    Rect::from_center_size(Pos2::new(div_x, mid_y), egui::vec2(12.0, 48.0));
-                painter.rect_filled(handle, 6.0, C_COPPER);
-                if swipe_hot {
-                    painter.rect_stroke(
-                        handle,
-                        6.0,
-                        Stroke::new(1.5, C_CREAM),
-                        egui::StrokeKind::Outside,
-                    );
-                }
-                // Grip lines.
-                for dy in [-8.0, 0.0, 8.0] {
-                    painter.line_segment(
-                        [
-                            Pos2::new(div_x - 3.0, mid_y + dy),
-                            Pos2::new(div_x + 3.0, mid_y + dy),
-                        ],
-                        Stroke::new(1.2, C_CANVAS),
-                    );
-                }
-            }
-            // Labels at each half's BOTTOM-left so they don't collide with the
-            // top-left per-layer caption — #48.
-            for (r, txt) in [
-                (lr, format!("{} (old)", self.old_label)),
-                (rr, format!("{} (new)", self.new_label)),
-            ] {
-                painter.text(
-                    r.left_bottom() + egui::vec2(8.0, -8.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    txt,
-                    egui::FontId::proportional(13.0),
-                    C_COPPER,
-                );
-            }
+            self.draw_split_chrome(&painter, rect, lr, rr, div_x, swipe, swipe_hot);
             self.last_hidden = 0;
             n = ln + rn;
         } else {
@@ -4361,6 +4549,113 @@ impl ViewApp {
             legend(&painter, rect, self.col_added, self.col_removed);
         }
 
+        // Board-specific chips for the bottom-left stack: the noise-filter trust
+        // count (Overlay only — Split/Swipe/Old/New show raw boards and clear
+        // `last_hidden`) and the single-of-many layer hint (#112; the board
+        // outline is orientation context, so it's left out of the "shown" tally,
+        // #157). The shared trailing pass adds the coordinate readout and the
+        // measure chip around them.
+        let mut extra_chips: Vec<String> = Vec::new();
+        if self.mode == Mode::Overlay {
+            if let Some(note) = hidden_note(self.last_hidden, self.min_area_mm2) {
+                extra_chips.push(note);
+            }
+        }
+        let shown = self
+            .visible_layers
+            .iter()
+            .enumerate()
+            .filter(|&(i, &v)| v && Some(i) != self.outline)
+            .count();
+        if let Some(hint) = single_layer_hint(shown, self.visible_layers.len()) {
+            extra_chips.push(hint);
+        }
+        self.canvas_trailing(&painter, &response, rect, extra_chips);
+    }
+
+    /// The divider + old/new identity chrome for Split and Swipe, shared by the
+    /// board and PDF canvases (#61/#63): the copper wipe line, the swipe grab
+    /// handle (heavier and brighter when hovered/dragged), and the per-half
+    /// bottom-left labels (#48).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_split_chrome(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        lr: Rect,
+        rr: Rect,
+        div_x: f32,
+        swipe: bool,
+        swipe_hot: bool,
+    ) {
+        // The divider: a copper wipe line. In Swipe it's the draggable handle,
+        // heavier and brighter when hovered/dragged (#61) so it reads as movable.
+        let line_col = if swipe && swipe_hot {
+            C_CREAM
+        } else {
+            C_COPPER
+        };
+        painter.line_segment(
+            [
+                Pos2::new(div_x, rect.top()),
+                Pos2::new(div_x, rect.bottom()),
+            ],
+            Stroke::new(if swipe { 2.5 } else { 1.5 }, line_col),
+        );
+        if swipe {
+            // A clear grab handle at mid-height: a rounded copper pill with three
+            // grip lines, so the divider is an obvious, easy target (#61). It
+            // brightens with a cream outline when hovered/dragged.
+            let mid_y = rect.center().y;
+            let handle = Rect::from_center_size(Pos2::new(div_x, mid_y), egui::vec2(12.0, 48.0));
+            painter.rect_filled(handle, 6.0, C_COPPER);
+            if swipe_hot {
+                painter.rect_stroke(
+                    handle,
+                    6.0,
+                    Stroke::new(1.5, C_CREAM),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            // Grip lines.
+            for dy in [-8.0, 0.0, 8.0] {
+                painter.line_segment(
+                    [
+                        Pos2::new(div_x - 3.0, mid_y + dy),
+                        Pos2::new(div_x + 3.0, mid_y + dy),
+                    ],
+                    Stroke::new(1.2, C_CANVAS),
+                );
+            }
+        }
+        // Labels at each half's BOTTOM-left so they don't collide with the
+        // top-left per-layer caption — #48.
+        for (r, txt) in [
+            (lr, format!("{} (old)", self.old_label)),
+            (rr, format!("{} (new)", self.new_label)),
+        ] {
+            painter.text(
+                r.left_bottom() + egui::vec2(8.0, -8.0),
+                egui::Align2::LEFT_BOTTOM,
+                txt,
+                egui::FontId::proportional(13.0),
+                C_COPPER,
+            );
+        }
+    }
+
+    /// The trailing canvas overlays shared by the board and PDF canvases (#63):
+    /// the always-on crosshair + coordinate readout (#179), the bottom-left chip
+    /// stack (#193/#194 — coordinate readout bottom-most, then the caller's
+    /// mode-specific chips, then the measure how-to while the tool is armed), the
+    /// persistent measure rulers (#22/#50), and the canvas border.
+    fn canvas_trailing(
+        &self,
+        painter: &egui::Painter,
+        response: &egui::Response,
+        rect: Rect,
+        extra_chips: Vec<String>,
+    ) {
         // Always-on crosshair + coordinate readout (#179): a snapped-cursor
         // crosshair drawn regardless of measure mode (default on). Snaps to the
         // grid when snap-to-grid is on, so what the readout shows is exactly where
@@ -4407,37 +4702,14 @@ impl ViewApp {
         // Bottom-left chip stack (#193/#194): every trust/context chip has ONE
         // fixed home, stacked up from the corner, so nothing chases the cursor and
         // nothing is scattered across four corners. Bottom-most is the live cursor
-        // readout (absent when the cursor is off-canvas — the rest slide down):
-        // - coordinate readout (#179/#193), grid-snapped when snapping is on;
-        // - TRUST — no silent misses (#178): the noise filter's hidden-region
-        //   count, the one signal that must never disappear (see MIN_AREA_MM2).
-        //   Only when something IS hidden, and Overlay-only — Split / Swipe /
-        //   Old / New show raw boards and clear `last_hidden`;
-        // - #112 context hint: when exactly one layer of several is visible, a
-        //   lone trace reads as "my traces vanished" rather than "one layer of
-        //   many". Shows only in that single-of-many case. The board outline is
-        //   orientation context, not a compared layer, so it's left out of the
-        //   "shown" tally (#157) — one real layer + the outline still reads as
-        //   "1 / N";
-        // - the measure tool's how-to hint while the tool is armed (#22).
+        // readout (absent when the cursor is off-canvas — the rest slide down);
+        // then the caller's mode-specific trust/context chips; then the measure
+        // tool's how-to hint while the tool is armed (#22).
         let mut chips: Vec<String> = Vec::new();
         if let Some(txt) = coord_txt {
             chips.push(txt);
         }
-        if self.mode == Mode::Overlay {
-            if let Some(note) = hidden_note(self.last_hidden, self.min_area_mm2) {
-                chips.push(note);
-            }
-        }
-        let shown = self
-            .visible_layers
-            .iter()
-            .enumerate()
-            .filter(|&(i, &v)| v && Some(i) != self.outline)
-            .count();
-        if let Some(hint) = single_layer_hint(shown, self.visible_layers.len()) {
-            chips.push(hint);
-        }
+        chips.extend(extra_chips);
         if self.measure_mode {
             // With the Measure panel gone (#211) this chip is the tool's whole
             // how-to. All three keys resolve from the live keymap/preset: the
@@ -4466,7 +4738,7 @@ impl ViewApp {
         };
         let mut anchor = rect.left_bottom() + egui::vec2(8.0, -8.0 - label_clear);
         for text in &chips {
-            let painted = corner_chip(&painter, anchor, egui::Align2::LEFT_BOTTOM, text);
+            let painted = corner_chip(painter, anchor, egui::Align2::LEFT_BOTTOM, text);
             anchor.y = painted.top() - 4.0;
         }
 
@@ -4486,7 +4758,7 @@ impl ViewApp {
         for m in &self.measurements {
             let (dx, dy, angle) = measure_components(m.a, m.b);
             draw_ruler(
-                &painter,
+                painter,
                 w2s(m.a),
                 w2s(m.b),
                 &format_distance(distance_mm(m.a, m.b), self.measure_unit),
@@ -4509,6 +4781,328 @@ impl ViewApp {
             Stroke::new(1.0, Color32::from_gray(60)),
             StrokeKind::Inside,
         );
+    }
+
+    /// The PDF-mode canvas (#63): one page of the pair, driven by the same mode
+    /// segment, camera, measure tool, grid, and chip stack as the board canvas.
+    /// Old/New show that side's raster; Overlay shows the engine's diff overlay
+    /// (green added / red removed / amber changed); Split shows old|new side by
+    /// side; Swipe is the curtain over one page. Pixels map to millimetres via
+    /// the rasterization DPI, so Fit, the grid, and MEASURE keep working in mm.
+    fn draw_canvas_pdf(&mut self, ui: &mut egui::Ui) {
+        let size = ui.available_size();
+        let (response, painter) = ui.allocate_painter(size, Sense::click_and_drag());
+        let rect = response.rect;
+        painter.rect_filled(rect, 0.0, self.canvas_color());
+
+        // The selected page's world bbox (nm, via DPI). Fit frames the page.
+        let (sel, bb, dpi) = {
+            let pv = self.pdf.as_ref().expect("pdf mode");
+            let row = &pv.rows[pv.selected];
+            (
+                pv.selected,
+                pdfview::page_world_bbox(row.width, row.height, pv.dpi),
+                pv.dpi,
+            )
+        };
+        let _ = dpi;
+        if !self.cam.fitted {
+            fit(&mut self.cam, bb, rect);
+            self.cam.fitted = true;
+        }
+
+        // Same camera/tool input pass as the board canvas: swipe divider latch,
+        // measure clicks, pan buttons per input preset, wheel zoom/pan.
+        let swipe_hot = self.canvas_camera_input(ui, &response, rect);
+
+        // Grid under the page chrome (#51). The opaque page raster covers it
+        // within the sheet; it still frames the page against the canvas.
+        if self.show_grid {
+            draw_grid(&painter, &self.cam, rect, self.grid_mm, self.grid_color());
+        }
+
+        // Textures for the selected page — uploaded once on first draw, cached
+        // in the row (never re-uploaded per frame).
+        let ctx = ui.ctx().clone();
+        let (old_tex, new_tex, overlay_tex, presence, page_no) = {
+            let pv = self.pdf.as_mut().expect("pdf mode");
+            let row = &mut pv.rows[sel];
+            (
+                row.old_texture(&ctx),
+                row.new_texture(&ctx),
+                row.overlay_texture(&ctx),
+                row.presence,
+                row.page,
+            )
+        };
+
+        // A page missing on one side has no raster there — say so, loudly.
+        let missing_note = |painter: &egui::Painter, target: Rect, side: &str| {
+            painter.text(
+                target.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("page {page_no} does not exist in the {side} revision"),
+                egui::FontId::proportional(15.0),
+                C_COPPER,
+            );
+        };
+        let draw_side = |painter: &egui::Painter,
+                         clip: Rect,
+                         target: Rect,
+                         tex: Option<egui::TextureId>,
+                         side: &str| match tex {
+            Some(id) => draw_page_image(painter, &self.cam, clip, target, bb, id),
+            None => missing_note(painter, target, side),
+        };
+
+        match self.mode {
+            Mode::Old => draw_side(&painter, rect, rect, old_tex, "old"),
+            Mode::New => draw_side(&painter, rect, rect, new_tex, "new"),
+            Mode::Overlay => match overlay_tex {
+                Some(id) => draw_page_image(&painter, &self.cam, rect, rect, bb, id),
+                None => {
+                    // Unpaired page: there is no diff to overlay — show the side
+                    // that exists, with the trust note carried by the chips below.
+                    let (tex, side) = if presence == pdfview::Presence::OldOnly {
+                        (old_tex, "new")
+                    } else {
+                        (new_tex, "old")
+                    };
+                    draw_side(&painter, rect, rect, tex, side);
+                }
+            },
+            Mode::Split => {
+                // Side-by-side halves, one shared camera, each projected into its
+                // own sub-rect (a full page per side) — same as the board split.
+                let (lr, rr, div_x) = split_rects(rect, 0.5, 6.0);
+                draw_side(&painter, lr, lr, old_tex, "old");
+                draw_side(&painter, rr, rr, new_tex, "new");
+                self.draw_split_chrome(&painter, rect, lr, rr, div_x, false, false);
+            }
+            Mode::Swipe => {
+                // Curtain over ONE page: both sides project through the same
+                // full-canvas rect and only the clip differs, so the divider
+                // bisects a single sheet (#61 pattern).
+                let (lr, rr, div_x) = swipe_rects(rect, self.swipe_frac);
+                draw_side(&painter, lr, rect, old_tex, "old");
+                draw_side(&painter, rr, rect, new_tex, "new");
+                self.draw_split_chrome(&painter, rect, lr, rr, div_x, true, swipe_hot);
+            }
+        }
+
+        // Mode note (top-right), matching the board canvas' language: Old/New and
+        // the raw Split/Swipe views are NOT the computed diff — say so (#91).
+        let mode_note = match self.mode {
+            Mode::Old => Some("showing OLD page"),
+            Mode::New => Some("showing NEW page"),
+            Mode::Split => Some("raw pages: OLD (left) | NEW (right) — diff applies in Overlay"),
+            Mode::Swipe => Some("raw pages, swipe OLD / NEW — diff applies in Overlay"),
+            Mode::Overlay => None,
+        };
+        if let Some(note) = mode_note {
+            painter.text(
+                rect.right_top() + egui::vec2(-8.0, 8.0),
+                egui::Align2::RIGHT_TOP,
+                note,
+                egui::FontId::proportional(13.0),
+                C_COPPER,
+            );
+        }
+        if self.mode == Mode::Overlay {
+            // The overlay raster's colours are baked by the engine (brand green /
+            // red / amber) — legend those, not the user's board diff colours.
+            pdf_legend(&painter, rect);
+        }
+
+        // PDF-specific chips: the page summary (trust — a page-count mismatch is
+        // always visible) and the selected page's own presence tag.
+        let mut extra_chips: Vec<String> = Vec::new();
+        {
+            let pv = self.pdf.as_ref().expect("pdf mode");
+            extra_chips.push(format!(
+                "page {page_no} · {summary}",
+                summary = pv.summary()
+            ));
+        }
+        if let Some(tag) = presence.tag() {
+            extra_chips.push(format!("page {page_no} is {tag}"));
+        }
+        self.canvas_trailing(&painter, &response, rect, extra_chips);
+    }
+
+    /// The Pages panel (#63): PDF mode's stand-in for the Layers panel. One row
+    /// per page, changed-first, selectable like layers; pages that exist on only
+    /// one side are tagged explicitly (trust). The board-only controls (view
+    /// presets, base slider, eyes, colour swatches) don't apply to raster pages
+    /// and are absent, not disabled.
+    fn pdf_pages_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Pages");
+        let Some(pv) = &self.pdf else { return };
+        ui.label(
+            egui::RichText::new(format!("{} · rendered at {} DPI", pv.summary(), pv.dpi))
+                .weak()
+                .small(),
+        );
+        ui.separator();
+        let order = pv.order.clone();
+        let mut select: Option<usize> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let pv = self.pdf.as_ref().expect("pdf mode");
+            for idx in order {
+                let row = &pv.rows[idx];
+                let name = format!("page {}", row.page);
+                let label = if row.changed {
+                    egui::RichText::new(&name).strong()
+                } else {
+                    egui::RichText::new(&name)
+                };
+                let resp = ui
+                    .horizontal(|ui| {
+                        let r = ui.selectable_label(pv.selected == idx, label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            match row.presence.tag() {
+                                // Old-only = a removed sheet, new-only = an added
+                                // one — colour them like the diff itself.
+                                Some(tag) => {
+                                    let col = if row.presence == pdfview::Presence::OldOnly {
+                                        C_REMOVED
+                                    } else {
+                                        C_ADDED
+                                    };
+                                    ui.label(egui::RichText::new(tag).small().color(col));
+                                }
+                                None if row.changed => {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Δ {:.2}%",
+                                            row.changed_fraction * 100.0
+                                        ))
+                                        .small()
+                                        .color(C_COPPER),
+                                    );
+                                }
+                                None => {}
+                            }
+                        });
+                        r
+                    })
+                    .inner;
+                if resp.clicked() {
+                    select = Some(idx);
+                }
+            }
+        });
+        if let Some(idx) = select {
+            // Route through select_pdf_page so page switches clear the rulers.
+            self.select_pdf_page(idx);
+        }
+    }
+
+    /// The Export tab in PDF mode (#63): per-page diff-overlay PNGs through the
+    /// same exportio download/save path as the board exports. Only paired pages
+    /// have an overlay; unpaired pages are named so their absence is explicit.
+    fn pdf_export_panel_ui(&mut self, ui: &mut egui::Ui) {
+        let (names, unpaired, dpi) = match &self.pdf {
+            Some(pv) => (
+                pv.rows
+                    .iter()
+                    .filter(|r| r.overlay_img.is_some() && r.changed)
+                    .map(|r| format!("page-{}.png", r.page))
+                    .collect::<Vec<_>>(),
+                pv.rows
+                    .iter()
+                    .filter(|r| r.presence != pdfview::Presence::Both)
+                    .map(|r| format!("page {} ({})", r.page, r.presence.tag().unwrap_or("")))
+                    .collect::<Vec<_>>(),
+                pv.dpi,
+            ),
+            None => return,
+        };
+        let status = self.export_msg.clone();
+        let mut export = false;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Export");
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Write each changed page's diff overlay as a PNG ({dpi} DPI raster)."
+                ))
+                .weak()
+                .small(),
+            );
+            ui.add_space(12.0);
+            ui.label(
+                egui::RichText::new(format!("Changed pages ({})", names.len()))
+                    .color(C_COPPER)
+                    .strong(),
+            );
+            ui.add_space(2.0);
+            if names.is_empty() {
+                ui.label(
+                    egui::RichText::new("No changed pages — nothing to export.")
+                        .weak()
+                        .small(),
+                );
+            }
+            Self::export_file_list(ui, &names);
+            if !unpaired.is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "No overlay for unpaired {}: a sheet that exists on one side \
+                         only has nothing to diff against.",
+                        unpaired.join(", ")
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
+            ui.add_space(6.0);
+            if ui
+                .add_enabled(!names.is_empty(), egui::Button::new("Export overlay PNGs"))
+                .on_hover_text("Write a diff-overlay PNG for every changed page.")
+                .clicked()
+            {
+                export = true;
+            }
+            if let Some(msg) = status {
+                ui.add_space(10.0);
+                ui.separator();
+                ui.label(egui::RichText::new(msg).weak().small());
+            }
+        });
+        if export {
+            self.do_export_pdf();
+        }
+    }
+
+    /// Encode + save the changed pages' overlay PNGs (#63), stashing the result
+    /// message for the Export tab's status line (same flow as `do_export`).
+    fn do_export_pdf(&mut self) {
+        let Some(pv) = &self.pdf else { return };
+        let mut files = Vec::new();
+        for row in &pv.rows {
+            let Some(img) = &row.overlay_img else {
+                continue;
+            };
+            if !row.changed {
+                continue;
+            }
+            match pdfview::overlay_png(img) {
+                Ok(png) => files.push(exportio::ExportFile {
+                    name: format!("page-{}.png", row.page),
+                    content: png,
+                }),
+                Err(e) => {
+                    self.export_msg = Some(format!("export failed: {e}"));
+                    return;
+                }
+            }
+        }
+        self.export_msg = Some(match exportio::save(&files) {
+            Ok(msg) => msg,
+            Err(e) => format!("export failed: {e}"),
+        });
     }
 }
 
@@ -5212,6 +5806,56 @@ fn push_screen_quad(mesh: &mut egui::epaint::Mesh, at: Pos2, px: f32, color: Col
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
+/// Draw one PDF page raster (#63): project its world bbox through the camera
+/// into `target` (the same centre-based transform as `world_to_screen`) and blit
+/// the texture, clipped to `clip`. Split projects each side into its own half;
+/// Swipe projects both through the full canvas and differs only in clip.
+fn draw_page_image(
+    painter: &egui::Painter,
+    cam: &Camera,
+    clip: Rect,
+    target: Rect,
+    bb: [i64; 4],
+    tex: egui::TextureId,
+) {
+    let sx = |wx: f64| (target.center().x as f64 + (wx - cam.center[0]) * cam.scale) as f32;
+    let sy = |wy: f64| (target.center().y as f64 - (wy - cam.center[1]) * cam.scale) as f32;
+    // World y-up: the page's top edge is max-y, so it maps to the smaller screen y.
+    let screen = Rect::from_min_max(
+        Pos2::new(sx(bb[0] as f64), sy(bb[3] as f64)),
+        Pos2::new(sx(bb[2] as f64), sy(bb[1] as f64)),
+    );
+    painter.with_clip_rect(clip).image(
+        tex,
+        screen,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+/// The Overlay legend in PDF mode (#63): the engine bakes the overlay's colours
+/// (brand green/red/amber), so the legend names those three — including "changed"
+/// (recoloured ink), which the geometry diff doesn't have.
+fn pdf_legend(painter: &egui::Painter, rect: Rect) {
+    let mut y = rect.right_top() + egui::vec2(-150.0, 8.0);
+    let rows = [
+        (C_ADDED, "added"),
+        (C_REMOVED, "removed"),
+        (C_COPPER, "changed"),
+    ];
+    for (c, txt) in rows {
+        painter.rect_filled(Rect::from_min_size(y, egui::vec2(12.0, 12.0)), 2.0, c);
+        painter.text(
+            y + egui::vec2(18.0, 6.0),
+            egui::Align2::LEFT_CENTER,
+            txt,
+            egui::FontId::proportional(13.0),
+            Color32::from_gray(200),
+        );
+        y.y += 18.0;
+    }
+}
+
 fn legend(painter: &egui::Painter, rect: Rect, added: Color32, removed: Color32) {
     let mut y = rect.right_top() + egui::vec2(-150.0, 8.0);
     let rows = [(added, "added"), (removed, "removed")];
@@ -5639,6 +6283,95 @@ mod tests {
         RailSide, Theme, WarningPhase, BASE_OPACITY_FAINT, BASE_OPACITY_STRONG,
     };
     use etchy_core::LayerKind;
+
+    // Minimal valid RS-274X: one 1mm circular flash at the origin (same fixture
+    // as the loader tests).
+    const MIN_GERBER: &[u8] = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
+
+    #[test]
+    fn files_to_source_routes_a_single_pdf_to_pdf_mode() {
+        use super::{files_to_source, LoadedSource};
+        let src =
+            files_to_source(vec![("sch.pdf".into(), b"%PDF-1.7 junk".to_vec())], "up").unwrap();
+        match src {
+            LoadedSource::Pdf(p) => {
+                assert_eq!(p.label, "sch.pdf", "PDF keeps its file name as label");
+                assert!(p.bytes.starts_with(b"%PDF"));
+            }
+            LoadedSource::Board(_) => panic!("a PDF must enter PDF mode, not the board path"),
+        }
+    }
+
+    #[test]
+    fn files_to_source_rejects_pdf_mixed_with_layers() {
+        // Trust: a PDF among Gerber layers is a loud error, never a guess.
+        use super::files_to_source;
+        let err = match files_to_source(
+            vec![
+                ("sch.pdf".into(), b"%PDF-1.7".to_vec()),
+                ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
+            ],
+            "up",
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a PDF among layers must fail loud"),
+        };
+        assert!(err.contains("one schematic PDF per side"), "got: {err}");
+    }
+
+    #[test]
+    fn files_to_source_rejects_a_pdf_named_file_without_pdf_content() {
+        use super::files_to_source;
+        let err = match files_to_source(vec![("sch.pdf".into(), b"not a pdf".to_vec())], "up") {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a mislabelled .pdf must fail loud"),
+        };
+        assert!(err.contains("no PDF content"), "got: {err}");
+    }
+
+    #[test]
+    fn files_to_source_still_loads_gerber_layers() {
+        use super::{files_to_source, LoadedSource};
+        let src = files_to_source(
+            vec![("board-F_Cu.gtl".into(), MIN_GERBER.to_vec())],
+            "uploaded",
+        )
+        .unwrap();
+        match src {
+            LoadedSource::Board(b) => {
+                assert_eq!(b.label, "uploaded");
+                assert_eq!(b.board.layers.len(), 1);
+            }
+            LoadedSource::Pdf(_) => panic!("gerber layers must stay on the board path"),
+        }
+    }
+
+    #[test]
+    fn compute_diff_refuses_a_mixed_pair() {
+        use super::{compute_diff, LoadedBoard, LoadedPdf, LoadedSource};
+        let (board, fmt) = crate::loader::board_from_bytes(vec![(
+            "board-F_Cu.gtl".to_string(),
+            MIN_GERBER.to_vec(),
+        )])
+        .unwrap();
+        let gerber = LoadedSource::Board(LoadedBoard {
+            label: "a".into(),
+            board,
+            fmt,
+        });
+        let pdf = LoadedSource::Pdf(LoadedPdf {
+            label: "b.pdf".into(),
+            bytes: b"%PDF-1.7".to_vec(),
+        });
+        let err = match compute_diff(&gerber, &pdf) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a mixed PDF/Gerber pair must fail loud"),
+        };
+        assert!(
+            err.contains("cannot compare a PDF with Gerber"),
+            "got: {err}"
+        );
+    }
 
     #[test]
     fn gear_tooth_quad_is_a_radial_rectangle() {
