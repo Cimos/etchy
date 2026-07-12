@@ -1,26 +1,28 @@
-# Example: gate a PR on a PCB diff with etchy. Copy into a consuming repo's
-# .github/workflows/. Least-privilege; pin third-party actions to a commit SHA.
+# Gate a PR on a PCB diff with etchy and post the layer-by-layer table as a
+# sticky comment. Copy this into a consuming repo's .github/workflows/.
+#
+# The five lines that add etchy are the `- uses: Cimos/etchy` step and its
+# inputs — everything else is the standard workflow scaffold. GitHub-hosted
+# runners ship Rust, so no toolchain step is needed. (Self-hosted runners:
+# add `- uses: dtolnay/rust-toolchain@stable` before the etchy step.)
 name: PCB diff
 on:
   pull_request:
-    paths: ["fab/**"] # adjust to where the board's Gerber/Excellon output lives
+    paths: ["fab/**"] # where the board's Gerber/Excellon output lives
 
 permissions:
   contents: read
-  pull-requests: write # only needed when `comment: true`
+  pull-requests: write # lets etchy post the diff comment
 
 jobs:
   diff:
     runs-on: ubuntu-latest
     steps:
-      # SHA-pin in real use (see the audit-third-party-CI rule): actions/checkout@<sha> # v4
+      # SHA-pin third-party actions in real use: actions/checkout@<sha> # v4
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Cimos/etchy@main # the composite action at the repo root (pin to a tag/SHA on release)
+      # --- the five lines that add etchy ---
+      - uses: Cimos/etchy@main # pin to a tag/SHA on release
         with:
           old: fab/rev-a
           new: fab/rev-b
-          fail-on-diff: true
           comment: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
