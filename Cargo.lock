@@ -929,6 +929,7 @@ dependencies = [
  "eframe",
  "egui",
  "etchy-core",
+ "etchy-pdf",
  "image",
  "include_dir",
  "js-sys",
