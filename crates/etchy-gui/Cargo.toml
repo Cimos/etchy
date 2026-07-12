@@ -3,7 +3,10 @@ name = "etchy-gui"
 description = "etchy native desktop viewer (egui) — secondary surface."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# The default `pdf` feature pulls etchy-pdf/hayro, which needs 1.85 (see that
+# crate's manifest). A --no-default-features build still compiles on the
+# workspace MSRV, but the shipped default is pdf-on so the floor is declared here.
+rust-version = "1.85"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -13,6 +16,12 @@ name = "etchy-gui"
 path = "src/main.rs"
 
 [features]
+# Schematic-PDF diff view (#63) — ON by default: the release ships PDF support in
+# BOTH the native and web viewer (locked decision, docs/design/pdf-diff-plan.md
+# §7). hayro is pure Rust and compiles on wasm32, so the web build carries it too.
+# Build lean without it: --no-default-features.
+default = ["pdf"]
+pdf = ["dep:etchy-pdf", "etchy-pdf/pdf"]
 # GPU world->screen transform for the base mesh (#106). Off by default; when on,
 # it is still gated behind a runtime toggle with the CPU path as the fallback, so
 # it ships safe and is trivial to pull. Build with: --features gpu-transform.
@@ -20,6 +29,9 @@ gpu-transform = []
 
 [dependencies]
 etchy-core = { path = "../etchy-core" }
+# Schematic-PDF rasterize + pixel diff (#63); optional but in the default set
+# (feature `pdf` above) so both shipped surfaces can open PDF pairs.
+etchy-pdf = { path = "../etchy-pdf", optional = true }
 # default-features=false drops eframe's wgpu backend + naga (~half the wasm
 # bundle, #86); we render through glow (WebGL2 on web, OpenGL on native), which
 # also makes the future GPU base-transform path verifiable headless. We re-add
