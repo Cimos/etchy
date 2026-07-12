@@ -5604,9 +5604,12 @@ fn eye_toggle(ui: &mut egui::Ui, visible: bool) -> egui::Response {
         C_COPPER.gamma_multiply(0.35)
     };
     let p = ui.painter();
-    p.circle_stroke(c, 5.0, Stroke::new(1.4, ring));
+    // V1 (owner pick 2026-07-12): a THIN ring with a BIG dot — the original
+    // wireframe glyph. The dot fills most of the ring when on, and vanishes
+    // when off (the thin ring stays, dimmed, as the click target).
+    p.circle_stroke(c, 6.0, Stroke::new(1.1, ring));
     if visible {
-        p.circle_filled(c, 2.4, C_COPPER);
+        p.circle_filled(c, 3.6, C_COPPER);
     }
     resp
 }
@@ -5628,6 +5631,40 @@ fn square_color_swatch(ui: &mut egui::Ui, color: &mut Color32) -> egui::Response
     .inner
 }
 
+/// Points tracing a rounded rectangle with `seg` segments per corner, clockwise
+/// in screen space (y-down). egui's own rounded-rect tessellation is too coarse
+/// at small sizes (the jagged rail-highlight corners, #230); feeding these to a
+/// `convex_polygon` gives smooth corners at any size. `r` is clamped to half the
+/// shorter side. Pure → unit-testable.
+fn smooth_rounded_rect(rect: Rect, r: f32, seg: usize) -> Vec<Pos2> {
+    let r = r.min(rect.width() * 0.5).min(rect.height() * 0.5).max(0.0);
+    let seg = seg.max(1);
+    // (corner-arc centre, start angle, end angle) clockwise from the top-right.
+    let q = std::f32::consts::FRAC_PI_2;
+    let corners = [
+        (egui::pos2(rect.max.x - r, rect.min.y + r), -q, 0.0),
+        (egui::pos2(rect.max.x - r, rect.max.y - r), 0.0, q),
+        (
+            egui::pos2(rect.min.x + r, rect.max.y - r),
+            q,
+            std::f32::consts::PI,
+        ),
+        (
+            egui::pos2(rect.min.x + r, rect.min.y + r),
+            std::f32::consts::PI,
+            3.0 * q,
+        ),
+    ];
+    let mut pts = Vec::with_capacity(4 * (seg + 1));
+    for (centre, a0, a1) in corners {
+        for i in 0..=seg {
+            let t = a0 + (a1 - a0) * (i as f32 / seg as f32);
+            pts.push(egui::pos2(centre.x + r * t.cos(), centre.y + r * t.sin()));
+        }
+    }
+    pts
+}
+
 /// One activity-rail cell (Feature 1): a fixed-size button that paints a
 /// hover/active background (copper accent when active, matching the app's selection
 /// accent) then draws its glyph via the painter — never a font symbol (the bundled
@@ -5639,15 +5676,24 @@ fn rail_button(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(40.0, 34.0), Sense::click());
     let hovered = resp.hovered();
-    // Apple-style rounding on the highlight (#230): a generous radius (~a third
-    // of the button height) so the pill reads soft, not boxy.
-    let rounding = rect.height() * 0.34;
-    if active {
-        ui.painter()
-            .rect_filled(rect, rounding, C_COPPER.gamma_multiply(0.30));
+    // Rounded-rect highlight (#230, owner pick H1): the shape is right, but
+    // egui tessellates rounded-rect corners with too few segments at rail size
+    // and they read jagged. Draw it as our own many-point polygon so the
+    // corners are smooth regardless of the tessellator.
+    let rounding = rect.height() * 0.32;
+    let fill = if active {
+        Some(C_COPPER.gamma_multiply(0.30))
     } else if hovered {
-        ui.painter()
-            .rect_filled(rect, rounding, C_COPPER.gamma_multiply(0.12));
+        Some(C_COPPER.gamma_multiply(0.12))
+    } else {
+        None
+    };
+    if let Some(col) = fill {
+        ui.painter().add(Shape::convex_polygon(
+            smooth_rounded_rect(rect, rounding, 8),
+            col,
+            Stroke::NONE,
+        ));
     }
     let col = if active {
         C_COPPER
@@ -6569,6 +6615,40 @@ mod tests {
         assert_eq!(single_layer_hint(13, 13), None); // all shown
         assert_eq!(single_layer_hint(1, 1), None); // only one layer exists
         assert_eq!(single_layer_hint(0, 5), None); // none shown
+    }
+
+    #[test]
+    fn smooth_rounded_rect_is_a_dense_polygon_inside_the_rect() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(40.0, 34.0));
+        let pts = super::smooth_rounded_rect(rect, 11.0, 8);
+        // Four corners, seg+1 points each → dense enough to read smooth.
+        assert_eq!(pts.len(), 4 * (8 + 1));
+        // Every point stays within the rectangle bounds (no overshoot).
+        for p in &pts {
+            assert!(p.x >= rect.min.x - 1e-3 && p.x <= rect.max.x + 1e-3);
+            assert!(p.y >= rect.min.y - 1e-3 && p.y <= rect.max.y + 1e-3);
+        }
+        // The true rect corner is empty — even the CLOSEST polygon point keeps a
+        // clear gap from it (proving the corner is rounded, not square). For a
+        // radius-r quarter circle the nearest point sits at the 45° midpoint, a
+        // gap of r·(√2−1) ≈ 4.6 px at r=11.
+        let near_tl = pts
+            .iter()
+            .min_by(|a, b| {
+                let da = (a.x - rect.min.x).hypot(a.y - rect.min.y);
+                let db = (b.x - rect.min.x).hypot(b.y - rect.min.y);
+                da.partial_cmp(&db).unwrap()
+            })
+            .unwrap();
+        let gap = (near_tl.x - rect.min.x).hypot(near_tl.y - rect.min.y);
+        assert!(gap > 3.0, "corner not rounded: gap {gap}");
+        assert!(near_tl.x > rect.min.x + 1.0 && near_tl.y > rect.min.y + 1.0);
+        // Radius is clamped to half the shorter side (no self-crossing).
+        let clamped = super::smooth_rounded_rect(rect, 1000.0, 4);
+        for p in &clamped {
+            assert!(p.x >= rect.min.x - 1e-3 && p.x <= rect.max.x + 1e-3);
+            assert!(p.y >= rect.min.y - 1e-3 && p.y <= rect.max.y + 1e-3);
+        }
     }
 
     #[test]
