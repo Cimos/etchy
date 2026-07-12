@@ -16,7 +16,9 @@ FROM rust:1-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p etchy-cli
+# --features pdf so the container carries the schematic-PDF diff too (CLI-6);
+# hayro is pure-Rust and builds static on musl.
+RUN cargo build --release -p etchy-cli --features pdf
 
 # --- runtime: distroless static, nonroot. Just the binary. ---
 FROM gcr.io/distroless/static:nonroot
