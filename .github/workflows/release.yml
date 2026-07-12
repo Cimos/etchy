@@ -40,7 +40,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build the etchy CLI
-        run: cargo build --release -p etchy-cli --target ${{ matrix.target }}
+        # --features pdf so release binaries carry the schematic-PDF diff (CLI-6),
+        # as the README/REQUIREMENTS promise. hayro is pure-Rust and builds static
+        # on musl; verified locally on host, musl-static, and wasm32.
+        run: cargo build --release -p etchy-cli --features pdf --target ${{ matrix.target }}
 
       - name: Package (unix)
         if: matrix.ext == 'tar.gz'
