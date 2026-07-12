@@ -11,7 +11,7 @@ use etchy_core::{Board, GerberFormat, Layer};
 /// Reject any single layer file larger than this before reading it into RAM. The
 /// loaders copy the bytes a few times (read → utf8 → normalized), so an oversized
 /// or junk file is a quick OOM (#82). 100 MiB is far above any real fab layer.
-const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
+pub(crate) const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Reject a `.zip` fab pack larger than this before reading it into RAM. A pack of
 /// Gerber text is small even zipped; 500 MiB is a generous ceiling that still
