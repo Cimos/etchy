@@ -3379,7 +3379,9 @@ impl eframe::App for ViewApp {
                             if rail_button(
                                 ui,
                                 self.active_panel == Some(PanelTab::Settings),
-                                draw_cog_icon,
+                                // The cog is ALWAYS the distinct etchy copper,
+                                // whatever the hover/active state (#228).
+                                |p, r, _state_col| draw_cog_icon(p, r, C_COPPER),
                             )
                             .on_hover_text("Settings")
                             .clicked()
@@ -3505,10 +3507,34 @@ impl ViewApp {
         // The base-opacity slider moved to Settings > Diff (`S` still cycles it).
         // "Show changed" stays hidden per feedback #8 — the capability lives on in
         // `visible_from_changed` (still unit-tested) so it can be re-surfaced later.
+        // Label + right-aligned copper % on one line, full-width slider below —
+        // the presentation from the approved wireframe (#227). The % is a
+        // DragValue so click-to-type/drag still round-trips.
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("focus").weak().small());
+            ui.label(egui::RichText::new("Focus on selected").weak().small());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.visuals_mut().override_text_color = Some(C_COPPER);
+                ui.add(
+                    egui::DragValue::new(&mut self.focus)
+                        .speed(0.01)
+                        .range(0.0..=1.0)
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                        .custom_parser(|s| {
+                            s.trim()
+                                .trim_end_matches('%')
+                                .trim()
+                                .parse::<f64>()
+                                .ok()
+                                .map(|p| p / 100.0)
+                        }),
+                );
+            });
+        });
+        ui.spacing_mut().slider_width = (ui.available_width() - 12.0).max(60.0);
+        ui.horizontal(|ui| {
             ui.add(
                 egui::Slider::new(&mut self.focus, 0.0..=1.0)
+                    .show_value(false)
                     .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                     // Parse the "%"-formatted text back so click-to-type round-trips
                     // (without a matching parser egui's default numeric parse rejects
@@ -3531,7 +3557,11 @@ impl ViewApp {
         // Panel rows ghost to mirror the canvas (#224): a visible non-selected
         // row's name and Δ% fade with the same focus dim (floored so rows stay
         // legible and clickable); the selected row keeps its full highlight.
-        let row_ghost = focus_alpha(self.focus, false).max(ROW_GHOST_FLOOR);
+        // Steeper than the canvas dim so the ghosting is legible at gentle focus
+        // values — the wireframe's look (#227): 25% focus reads clearly ghosted.
+        let row_ghost = focus_alpha(self.focus, false)
+            .powf(1.7)
+            .max(ROW_GHOST_FLOOR);
         // Actions deferred so the per-frame group iteration doesn't borrow
         // self mutably while it's borrowed for the group list.
         let mut select: Option<usize> = None;
@@ -5711,42 +5741,26 @@ fn draw_export_icon(p: &egui::Painter, r: Rect, col: Color32) {
 /// The four corners of one rectangular gear tooth (#192): a radial quad spanning
 /// radius `r0`..`r1` with half-width `half_w`, rotated to `angle` around `c`.
 /// Pure geometry so it's unit-testable; `draw_cog_icon` maps it to screen points.
-fn gear_tooth_quad(c: [f32; 2], angle: f32, r0: f32, r1: f32, half_w: f32) -> [[f32; 2]; 4] {
-    let (s, cs) = angle.sin_cos();
-    let corner = |radius: f32, side: f32| {
-        [
-            c[0] + cs * radius - s * side * half_w,
-            c[1] + s * radius + cs * side * half_w,
-        ]
-    };
-    [
-        corner(r0, -1.0),
-        corner(r1, -1.0),
-        corner(r1, 1.0),
-        corner(r0, 1.0),
-    ]
-}
-
-/// Settings gear icon (#192): a solid annulus (a circle stroked thick enough to
-/// leave the hub hole open) with eight rectangular teeth around the rim — a
-/// proper gear silhouette, painter-drawn like every rail icon (font symbol
-/// glyphs are tofu, #16/#30).
+/// Settings gear icon (#192/#228): eight CHUNKY ROUNDED teeth — circles rooted
+/// on the body rim so only their rounded outer caps stand proud (the owner's
+/// reference silhouette) — over a thick annulus with an open hub. Painter-drawn
+/// like every rail icon (font symbol glyphs are tofu, #16/#30). The rail passes
+/// copper unconditionally — the cog is always the distinct etchy copper (#228).
 fn draw_cog_icon(p: &egui::Painter, r: Rect, col: Color32) {
     let c = r.center();
     let half = r.width().min(r.height()) * 0.5;
-    // Ring: stroke centred at 0.52 of the radius, 0.42 thick → body 0.31..0.73
-    // with an open hub hole inside.
-    p.circle_stroke(c, half * 0.52, Stroke::new(half * 0.42, col));
-    // Teeth: rectangular, rooted inside the ring body so they merge with it.
+    // Rounded teeth: smaller circles pushed further out so the GAPS between
+    // teeth stay visible at rail-icon size — without gaps the silhouette reads
+    // as a plain ring, not a gear.
     for i in 0..8 {
         let a = i as f32 / 8.0 * std::f32::consts::TAU;
-        let quad = gear_tooth_quad([c.x, c.y], a, half * 0.60, half, half * 0.17);
-        p.add(Shape::convex_polygon(
-            quad.iter().map(|&[x, y]| egui::pos2(x, y)).collect(),
-            col,
-            Stroke::NONE,
-        ));
+        let (s, cs) = a.sin_cos();
+        let centre = egui::pos2(c.x + cs * half * 0.70, c.y + s * half * 0.70);
+        p.circle_filled(centre, half * 0.20, col);
     }
+    // Body: a thick ring (~0.26..0.62 of the radius) the teeth root into, with
+    // the hub hole open inside.
+    p.circle_stroke(c, half * 0.44, Stroke::new(half * 0.36, col));
 }
 
 /// Per-frame: transform cached world items to screen meshes, applying colour, the
@@ -6529,27 +6543,6 @@ mod tests {
             err.contains("cannot compare a PDF with Gerber"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn gear_tooth_quad_is_a_radial_rectangle() {
-        use super::gear_tooth_quad;
-        // Angle 0 points along +x: the tooth is an axis-aligned rectangle spanning
-        // x in [r0, r1], y in [-half_w, +half_w] around the centre.
-        let q = gear_tooth_quad([0.0, 0.0], 0.0, 2.0, 4.0, 1.0);
-        assert_eq!(q, [[2.0, -1.0], [4.0, -1.0], [4.0, 1.0], [2.0, 1.0]]);
-        // Angle PI/2 points along +y: the same rectangle rotated a quarter turn.
-        let q = gear_tooth_quad([0.0, 0.0], std::f32::consts::FRAC_PI_2, 2.0, 4.0, 1.0);
-        for (got, want) in q
-            .iter()
-            .flatten()
-            .zip([1.0, 2.0, 1.0, 4.0, -1.0, 4.0, -1.0, 2.0])
-        {
-            assert!((got - want).abs() < 1e-5, "{q:?}");
-        }
-        // A non-zero centre translates every corner.
-        let q = gear_tooth_quad([10.0, 20.0], 0.0, 2.0, 4.0, 1.0);
-        assert_eq!(q, [[12.0, 19.0], [14.0, 19.0], [14.0, 21.0], [12.0, 21.0]]);
     }
 
     #[test]
