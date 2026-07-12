@@ -72,9 +72,9 @@ numbered requirements with their source and current status.
 | CLI-3 | Threshold gates: `--fail-on-area`, `--fail-on-regions`, `--gate-layers` (validated tokens; misnamed layers must not silently skip the gate). | #137, #144 | ✅ |
 | CLI-4 | **Git-refs invocation**: `etchy refA refB [subdir]` diffs committed fab packs without a checkout; ref names are never guessed from typos. | #138, #144 | ✅ |
 | CLI-5 | GitHub Action (composite) posts the Markdown summary on PRs; runs fully offline/self-hosted. | M2 | ✅ |
-| CLI-6 | PDF inputs: `.pdf` old/new → page-by-page pixel diff summary + overlay PNGs (`--out`), same exit-code contract. Behind the `pdf` feature; `--dpi` sets resolution. | #63 | ✅ built, in PR (engine #150/#151, CLI wiring feat/pdf-cli) |
+| CLI-6 | PDF inputs: `.pdf` old/new → page-by-page pixel diff summary + overlay PNGs (`--out`), same exit-code contract. Behind the `pdf` feature; `--dpi` sets resolution. | #63 | ✅ (verified end-to-end on the corpus pair; release binaries ship the feature on) |
 | CLI-7 | **Report generation** is first-class: one run produces a shareable, self-contained **HTML report** plus SVG overlays, JSON v1, and a Markdown summary — no separate tooling. | owner 2026-07-07, #139 | ✅ |
-| CLI-8 | **Five-line CI adoption:** adding the GitHub Action to a repo takes ≤ 5 workflow lines, and every PR that touches Gerbers gets a **layer-by-layer diff posted in its comments**. | owner 2026-07-07 | 🔜 validate the 5-line bar + comment format against the shipped Action |
+| CLI-8 | **Five-line CI adoption:** adding the GitHub Action to a repo takes ≤ 5 workflow lines, and every PR that touches Gerbers gets a **layer-by-layer diff posted in its comments**. | owner 2026-07-07 | ✅ 5-line `uses:` block (recipe in `docs/ci-recipes/`); the Action supplies its own token and posts a sticky per-layer `--format md` table. Runs from source until release binaries are published (blocked on Actions billing). |
 
 ## 6. GUI — shell (the locked 2026-07 redesign)
 
