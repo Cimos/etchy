@@ -28,15 +28,15 @@ etchy/
 │   ├── etchy-core/     # the engine: parse → resolve → polygonize → diff → measure → render. No I/O policy, no CLI.
 │   ├── etchy-cli/      # binary `etchy`: arg parsing, orchestration, exit codes, terminal + file output.
 │   ├── etchy-gui/      # binary `etchy-gui` (or `etchy gui`): egui viewer; depends on etchy-core only.
-│   └── etchy-pdf/      # schematic-PDF pixel-diff; feature-gated (pulls the heavy pdfium dep) so the core stays tiny.
+│   └── etchy-pdf/      # schematic-PDF pixel-diff; feature-gated (pulls the pure-Rust hayro PDF stack) so the core stays tiny.
 ├── corpus/             # golden test corpus (synthesized + real board pairs) + expected outputs.
 ├── fuzz/               # cargo-fuzz targets for the parsers.
 └── .github/workflows/  # CI: fmt/clippy/nextest/fuzz-smoke + cargo-dist release.
 ```
 
-Rationale: the **PDF path is a separate, feature-gated crate** because `pdfium`
-adds a multi-MB C++ dependency — keep it out of the default geometric-diff binary
-so the common case stays small. The **GUI is a separate binary** depending only on
+Rationale: the **PDF path is a separate, feature-gated crate** because the
+`hayro` PDF stack adds a sizeable dep tree (and a higher MSRV) — keep it out of
+the default geometric-diff binary so the common case stays small. The **GUI is a separate binary** depending only on
 `etchy-core`, so headless/CI builds never compile egui/winit/wgpu.
 
 ## The core data model (IR)
@@ -113,7 +113,7 @@ also makes diffs **deterministic** (stable CI output), which the trust bar requi
 | CLI | `clap` (derive) + `anstream`/`owo-colors` + `indicatif` | 4.x | MIT/Apache | Progress → **stderr**, suppressed when `--format json` / non-TTY. Hand-roll exit codes (avoid abandoned `exitcode`). |
 | Errors | `anyhow` (CLI) + `thiserror` (core) | 1.x / 2.x | MIT/Apache | Typed errors in core; context-wrapped at the binary boundary → exit-code enum. |
 | GUI | `eframe`/`egui` (+`egui_extras`, `egui-wgpu`) | 0.34 | MIT/Apache | Immediate-mode `Painter` ideal for the canvas; `load_texture` for GPU; wgpu paint-callback for huge boards; `egui_extras::Table` for the layer list. Pre-1.0 — pin. Tile/downsample layers over the GPU max texture size. (iced rejected: MIT-only, heavier for a one-canvas app.) |
-| PDF raster | `pdfium-render` (`static` feature), `etchy-pdf` crate | 0.9 | MIT/Apache (engine Apache/BSD) | Chrome-grade fidelity (trust). Static-link `libpdfium.a` per target → no runtime file. Ship PDFium NOTICE. **Watch `hayro`** (pure-Rust, dual, experimental) behind `--pure-rust-pdf` to one day drop the C++ dep. **Reject** `mupdf` (AGPL), `pdfium` crate (GPL), `pdf2image` (Poppler GPL). |
+| PDF raster | `hayro` (pure-Rust), `etchy-pdf` crate | 0.6 | MIT/Apache | **What shipped**: pure-Rust, no C++ toolchain or runtime file, wasm-viable. Needs rustc 1.85 (the crate carries its own MSRV; the workspace default stays 1.75). Superseded the original `pdfium-render` plan — fidelity proved out on real KiCad exports. **Reject** `mupdf` (AGPL), `pdfium` crate (GPL), `pdf2image` (Poppler GPL). |
 | HTML report | `askama` (or `maud`) | 0.16 | MIT/Apache | Compile-time templates baked into the binary (self-contained). **Mark base64/SVG `\|safe`** or auto-escaping corrupts the payload. |
 | JSON | `serde_json` + `schemars` | 1.x | MIT/Apache | Top-level `schema_version`; emit a committed JSON Schema for CI validation by consumers. |
 | Clustering (heatmap) | `rstar` + `petgraph` (+`geo`) | 0.13 / 0.8 | MIT/Apache | R-tree proximity → connected-components/UnionFind; rank regions by `geo` area/centroid. Avoid the `linfa` ML stack (weight). |
@@ -192,5 +192,5 @@ so HTML/SVG/JSON cannot disagree.
 3. **SVG-canonical + `resvg`-derived PNG** (single source of truth) vs direct
    `tiny-skia` raster (speed) — pick after measuring.
 4. **`askama` vs `maud`** for the report (template files vs templates-as-Rust).
-5. **`hayro` watch** — revisit pure-Rust PDF when its fidelity is proven, to drop
-   the pdfium C++ dependency.
+5. **`hayro` watch** — resolved: `hayro` proved out and shipped in `etchy-pdf`,
+   so the pdfium C++ dependency was never taken.
