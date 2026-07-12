@@ -123,14 +123,23 @@ mod native {
     fn load_seed(
         old_path: &Path,
         new_path: &Path,
-    ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff)> {
+    ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff, f32)> {
         let old = load_source_any(old_path, label(old_path))?;
         let new = load_source_any(new_path, label(new_path))?;
         // Persisted settings aren't restored yet at this point — seed a PDF pair
         // at the default DPI; `build_app` re-rasterizes if the restored setting
-        // differs (#223).
-        let diff = compute_diff(&old, &new, PDF_DPI_DEFAULT)?;
-        Ok((old, new, diff))
+        // differs (#223). The raster caps scale with DPI, so a pair that only
+        // fits at a lower DPI falls back to the CLI default rather than
+        // refusing to open at all (#223 review) — the DPI actually used is
+        // returned so build_app can keep the setting honest.
+        let (diff, dpi) = match compute_diff(&old, &new, PDF_DPI_DEFAULT) {
+            Ok(d) => (d, PDF_DPI_DEFAULT),
+            Err(first) => match compute_diff(&old, &new, PDF_DPI_FALLBACK) {
+                Ok(d) => (d, PDF_DPI_FALLBACK),
+                Err(_) => return Err(first),
+            },
+        };
+        Ok((old, new, diff, dpi))
     }
 
     /// Construct the app, restoring persisted settings. With a seed, both sources
@@ -138,10 +147,10 @@ mod native {
     /// (empty diff).
     fn build_app(
         cc: &eframe::CreationContext<'_>,
-        seed: Option<(LoadedSource, LoadedSource, ComputedDiff)>,
+        seed: Option<(LoadedSource, LoadedSource, ComputedDiff, f32)>,
     ) -> ViewApp {
         match seed {
-            Some((old, new, computed)) => {
+            Some((old, new, computed, seed_dpi)) => {
                 let (ol, nl) = (old.label().to_string(), new.label().to_string());
                 let mut app = match computed {
                     ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
@@ -153,10 +162,16 @@ mod native {
                 };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
-                // The seed was rasterized at the default DPI before settings
-                // restore; honour a different persisted DPI now (#223).
-                if app.pdf.is_some() && app.pdf_dpi != PDF_DPI_DEFAULT {
+                // The seed was rasterized before settings restore; honour a
+                // different persisted DPI now (#223). If that re-rasterize
+                // fails (caps), the setting must fall back to the DPI the
+                // on-screen view was actually built at — the chip may never
+                // claim a DPI the view isn't (#223 review).
+                if app.pdf.is_some() && app.pdf_dpi != seed_dpi {
                     app.rebuild_diff();
+                    if app.load_error.is_some() {
+                        app.pdf_dpi = seed_dpi;
+                    }
                 }
                 app
             }
@@ -1181,6 +1196,11 @@ const FOCUS_DEFAULT: f32 = 0.25;
 /// their `--dpi` flag for anything else.
 const PDF_DPI_DEFAULT: f32 = 200.0;
 
+/// Fallback for the CLI-args seed (#223 review): the raster caps scale with
+/// DPI, so a pair that fit at the old 150 default must still open — it seeds at
+/// 150 when 200 breaches a cap, and the Settings chip reflects the DPI used.
+const PDF_DPI_FALLBACK: f32 = 150.0;
+
 /// The Settings > Diff DPI chips (#223). Bounded choices, not a free slider —
 /// each step is checked against the raster caps at load, and a chip that
 /// breaches them fails loud and reverts.
@@ -2151,6 +2171,9 @@ impl ViewApp {
         let mut out = Vec::new();
         for item in &cache.items {
             let dim = layer_focus_alpha(item.layer_index, self.selected, self.focus);
+            if dim == 0.0 {
+                continue; // fully focus-dimmed — same skip as the CPU path (#224)
+            }
             let mut color = match item.role {
                 Role::Base => {
                     let base = if item.layer_index == NO_LAYER {
@@ -4688,6 +4711,12 @@ impl ViewApp {
         if let Some(hint) = single_layer_hint(shown, self.visible_layers.len()) {
             extra_chips.push(hint);
         }
+        // Focus at 100% hides every non-selected layer — that suppression must
+        // be accounted for on-canvas, like the old single-mode hint (#224
+        // review: no silent misses, TRUST-1).
+        if let Some(note) = focus_note(self.focus, shown) {
+            extra_chips.push(note);
+        }
         self.canvas_trailing(&painter, &response, rect, extra_chips);
     }
 
@@ -5781,6 +5810,14 @@ fn transform_cache(
         // The Focus dim (#224): the selected layer at full opacity, the other
         // visible layers at 1 - focus; layer-less items (outline) never dim.
         let dim = layer_focus_alpha(item.layer_index, selected, focus);
+        if dim == 0.0 {
+            // Focus at 100%: non-selected layers are fully invisible — skip
+            // them outright instead of drawing alpha-0 vertices, so an
+            // all-dimmed canvas honestly reports "no geometry in this view"
+            // (n == 0) and no invisible work is transformed (#224 review).
+            // User-chosen, like an eye off — NOT counted in `hidden`.
+            continue;
+        }
         let (mut color, is_diff) = match item.role {
             Role::Base => (
                 base_display_color(base_of(item.layer_index), canvas, base_opacity),
@@ -6117,6 +6154,21 @@ fn hidden_note(hidden: usize, min_area_mm2: f64) -> Option<String> {
 fn single_layer_hint(shown: usize, total: usize) -> Option<String> {
     if shown == 1 && total > 1 {
         Some(format!("{shown} / {total} layers"))
+    } else {
+        None
+    }
+}
+
+/// The Focus-suppression chip (#224): at focus 100% every non-selected visible
+/// layer is fully hidden — that must be accounted for on-canvas (TRUST-1), the
+/// way the old single-mode "1 / N" hint accounted for its hiding. Below 100%
+/// the layers are still (faintly) visible, so no chip. Pure → unit-testable.
+fn focus_note(focus: f32, shown: usize) -> Option<String> {
+    if focus >= 1.0 && shown > 1 {
+        Some(format!(
+            "focus 100% — {} other layer(s) hidden",
+            shown.saturating_sub(1)
+        ))
     } else {
         None
     }
@@ -6522,6 +6574,15 @@ mod tests {
         // #112: a lone visible layer of several reads as "traces vanished" without
         // a hint. Show it only when exactly one of two-or-more layers is visible.
         assert_eq!(single_layer_hint(1, 13).as_deref(), Some("1 / 13 layers"));
+        // Focus 100% must announce its hiding (#224 review, TRUST-1)…
+        assert_eq!(
+            super::focus_note(1.0, 13).as_deref(),
+            Some("focus 100% — 12 other layer(s) hidden")
+        );
+        // …but below 100% the others are still faintly visible (no chip), and a
+        // single visible layer has nothing focus-hidden.
+        assert_eq!(super::focus_note(0.99, 13), None);
+        assert_eq!(super::focus_note(1.0, 1), None);
         assert_eq!(single_layer_hint(1, 2).as_deref(), Some("1 / 2 layers"));
         // Not a single-of-many situation → no hint (no clutter).
         assert_eq!(single_layer_hint(2, 13), None); // more than one shown
