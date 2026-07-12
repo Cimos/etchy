@@ -900,6 +900,9 @@ dependencies = [
  "anyhow",
  "clap",
  "etchy-core",
+ "etchy-pdf",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

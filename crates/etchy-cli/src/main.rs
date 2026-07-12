@@ -15,6 +15,9 @@ use etchy_core::{
     Layer, LayerStatus,
 };
 
+#[cfg(feature = "pdf")]
+mod pdf;
+
 /// etchy's CI exit-code contract.
 #[repr(i32)]
 enum Exit {
@@ -82,6 +85,17 @@ struct Cli {
     /// E.g. `--gate-layers copper` fails on copper changes and ignores silkscreen.
     #[arg(long, value_name = "SPEC", default_value = "all")]
     gate_layers: String,
+
+    /// PDF inputs only: rasterization resolution in DPI (default 150). One DPI
+    /// for all sheet sizes — larger sheets produce more pixels, text stays
+    /// equally crisp. Higher DPI = crisper diff but more memory/time (per-page
+    /// pixel area is capped; see the error if you hit it).
+    #[arg(long, value_name = "DPI")]
+    dpi: Option<f32>,
+    /// PDF inputs only: write one overlay PNG per diffed page (`page-<n>.png`)
+    /// into this directory (created if it does not exist).
+    #[arg(long, value_name = "DIR")]
+    out: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -238,7 +252,7 @@ fn main() -> ExitCode {
         }
     };
     match run(&cli) {
-        Ok(report) => {
+        Ok(RunOutcome::Board(report)) => {
             // The CI gate decides the exit code (#M2). Default (no thresholds,
             // all layers) = any change fails, preserving the 0/1 contract.
             let fails = gate.fails(&report);
@@ -251,6 +265,9 @@ fn main() -> ExitCode {
                 Exit::NoDiff.into()
             }
         }
+        // The PDF path owns its change verdict (no layer gate; any change = 1).
+        Ok(RunOutcome::Pdf { any_changes: true }) => Exit::DiffFound.into(),
+        Ok(RunOutcome::Pdf { any_changes: false }) => Exit::NoDiff.into(),
         Err(e) => {
             // Print the full error chain to stderr; map any failure to exit 2.
             eprintln!("etchy: error: {e:#}");
@@ -259,12 +276,80 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli) -> Result<DiffReport> {
+/// What a run produced: a Gerber board diff (gated by [`Gate`]) or a PDF pixel
+/// diff (which has no layers/mm², so it carries only its change verdict).
+enum RunOutcome {
+    Board(DiffReport),
+    Pdf { any_changes: bool },
+}
+
+/// Is this input a PDF file? Both signals must agree — `.pdf` extension AND the
+/// `%PDF` magic in the first bytes — so a stray directory named `x.pdf` or a
+/// mislabelled Gerber never silently reroutes into the pixel-diff path.
+fn is_pdf_input(path: &Path) -> bool {
+    let ext_is_pdf = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    if !ext_is_pdf || !path.is_file() {
+        return false;
+    }
+    let mut magic = [0u8; 4];
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            use std::io::Read;
+            f.read_exact(&mut magic).is_ok() && &magic == b"%PDF"
+        }
+        Err(_) => false,
+    }
+}
+
+/// The PDF branch, when this build carries it.
+#[cfg(feature = "pdf")]
+fn run_pdf(cli: &Cli) -> Result<bool> {
+    pdf::run_pdf(cli)
+}
+
+/// Without the `pdf` feature a PDF input must be a loud, actionable error — not
+/// a confusing "not a directory" or a silent skip.
+#[cfg(not(feature = "pdf"))]
+fn run_pdf(_cli: &Cli) -> Result<bool> {
+    anyhow::bail!("this build lacks PDF support — rebuild with --features pdf")
+}
+
+fn run(cli: &Cli) -> Result<RunOutcome> {
     // Git mode is EXPLICIT: --git, or a [SUBDIR] argument. It must never be
     // inferred from "OLD isn't a directory" — a mistyped folder name that happens
     // to resolve as a ref would silently diff committed revisions the user never
     // asked about (review finding). A typo stays a loud "not a directory" error.
     let git_mode = cli.git || cli.subdir.is_some();
+
+    // PDF inputs dispatch to the parallel pixel-diff path (CLI-6) before any
+    // board loading. Both inputs must be PDFs — mixing a PDF with a Gerber
+    // directory is a loud error, never a guess. (Git refs are not paths, so the
+    // sniff only applies outside git mode.)
+    if !git_mode {
+        let (old_pdf, new_pdf) = (is_pdf_input(&cli.old), is_pdf_input(&cli.new));
+        if old_pdf != new_pdf {
+            let (pdf, other) = if old_pdf {
+                (&cli.old, &cli.new)
+            } else {
+                (&cli.new, &cli.old)
+            };
+            anyhow::bail!(
+                "both inputs must be PDFs to run a PDF diff — {} is a PDF but {} is not",
+                pdf.display(),
+                other.display()
+            );
+        }
+        if old_pdf && new_pdf {
+            return run_pdf(cli).map(|any_changes| RunOutcome::Pdf { any_changes });
+        }
+    }
+    // The PDF-only flags must not be silently ignored on the geometry path.
+    if cli.dpi.is_some() || cli.out.is_some() {
+        anyhow::bail!("--dpi / --out apply to PDF inputs only");
+    }
+
     let (old, of, new, nf) = if git_mode {
         let subdir = cli
             .subdir
@@ -326,7 +411,7 @@ fn run(cli: &Cli) -> Result<DiffReport> {
         Format::Md => println!("{}", report.to_markdown_summary()),
         Format::Summary => print_summary(&report),
     }
-    Ok(report)
+    Ok(RunOutcome::Board(report))
 }
 
 /// Reject any single layer file larger than this before reading it into RAM. The

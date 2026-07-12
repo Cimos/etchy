@@ -41,6 +41,14 @@ Gate CI on the **magnitude** and **location** of change:
 etchy old/ new/ --gate-layers copper --fail-on-area 0.5
 ```
 
+**PDF diff** — schematic PDFs get a page-by-page pixel diff (builds with
+`--features pdf`; release binaries ship it on):
+
+```sh
+etchy old.pdf new.pdf --out overlays/   # per-page table + one overlay PNG per page
+etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI)
+```
+
 ## Install
 
 - **Prebuilt binaries** — download the archive for your OS from
@@ -101,7 +109,7 @@ ingestion is an accepted post-1.0 goal ([#122](../../issues/122)); KiCad
 | `etchy-core` | the engine: parse → resolve → polygonize → diff → measure → render |
 | `etchy-cli` | binary `etchy` — the primary CLI/CI surface |
 | `etchy-gui` | native egui viewer (separate binary; never compiled in headless builds) |
-| `etchy-pdf` | schematic-PDF pixel diff (feature-gated; keeps the heavy PDFium dep out of the core) |
+| `etchy-pdf` | schematic-PDF pixel diff (feature-gated; keeps the pure-Rust hayro PDF stack out of the core) |
 
 ## License
 
