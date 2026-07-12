@@ -5593,36 +5593,20 @@ fn eye_toggle(ui: &mut egui::Ui, visible: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let hovered = resp.hovered();
     let c = rect.center();
-    let col = if visible {
-        if hovered {
-            C_CREAM
-        } else {
-            Color32::from_rgb(0xcd, 0xd6, 0xe4)
-        }
+    // The wireframe's toggle (#231): a copper ring with a copper dot in the
+    // middle while the layer is ON; the dot disappears when it's off (the ring
+    // stays, dimmed, so the click target is always visible).
+    let ring = if visible {
+        C_COPPER
+    } else if hovered {
+        C_COPPER.gamma_multiply(0.65)
     } else {
-        Color32::from_gray(if hovered { 130 } else { 90 })
+        C_COPPER.gamma_multiply(0.35)
     };
     let p = ui.painter();
-    // Almond outline (a wide ellipse) reads as an eye; a pupil dot when open.
-    let (rx, ry) = (6.5_f32, 3.6_f32);
-    let pts: Vec<Pos2> = (0..=18)
-        .map(|i| {
-            let t = i as f32 / 18.0 * std::f32::consts::TAU;
-            egui::pos2(c.x + rx * t.cos(), c.y + ry * t.sin())
-        })
-        .collect();
-    p.add(Shape::closed_line(pts, Stroke::new(1.3, col)));
+    p.circle_stroke(c, 5.0, Stroke::new(1.4, ring));
     if visible {
-        p.circle_filled(c, 2.1, col);
-    } else {
-        // Hidden: a diagonal slash across the eye.
-        p.line_segment(
-            [
-                egui::pos2(c.x - rx - 1.0, c.y + ry + 1.0),
-                egui::pos2(c.x + rx + 1.0, c.y - ry - 1.0),
-            ],
-            Stroke::new(1.3, col),
-        );
+        p.circle_filled(c, 2.4, C_COPPER);
     }
     resp
 }
@@ -5655,12 +5639,15 @@ fn rail_button(
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(40.0, 34.0), Sense::click());
     let hovered = resp.hovered();
+    // Apple-style rounding on the highlight (#230): a generous radius (~a third
+    // of the button height) so the pill reads soft, not boxy.
+    let rounding = rect.height() * 0.34;
     if active {
         ui.painter()
-            .rect_filled(rect, 5.0, C_COPPER.gamma_multiply(0.30));
+            .rect_filled(rect, rounding, C_COPPER.gamma_multiply(0.30));
     } else if hovered {
         ui.painter()
-            .rect_filled(rect, 5.0, C_COPPER.gamma_multiply(0.12));
+            .rect_filled(rect, rounding, C_COPPER.gamma_multiply(0.12));
     }
     let col = if active {
         C_COPPER
