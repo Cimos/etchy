@@ -48,22 +48,27 @@ a different tool.
 Time estimates are deliberately omitted (solo, open-source cadence); milestones
 are ordered by dependency and each is independently shippable.
 
-### Where we are — 2026-07-07
+### Where we are — 2026-07-13
 
-Phase 0, M1, and the M2 CI surface are done; M3 is done except the PDF CLI
-wiring; M4 blocks only on restoring GitHub Actions billing to cut the release.
-The big open workstream is the **GUI shell redesign** (requirements in
-[`REQUIREMENTS.md`](REQUIREMENTS.md) §6–§9, spec in
-[`design/GUI_SPEC.md`](design/GUI_SPEC.md)), fully built and awaiting review as
-the PR chain #167 → #175 → #182 → #202.
+Phase 0, M1, M2, and **M3 are all done**, and the **GUI shell redesign has
+merged** (requirements in [`REQUIREMENTS.md`](REQUIREMENTS.md) §6–§9, spec in
+[`design/GUI_SPEC.md`](design/GUI_SPEC.md)) — the VS Code-style shell, the
+eyes-only Focus visibility model (#224), the PDF diff end-to-end (CLI + GUI,
+#63), and the five-line CI Action (CLI-8) are on `main`; release binaries and
+the container now build with the `pdf` feature on. **M4 is the only thing left,
+and it blocks solely on restoring GitHub Actions billing** to cut v0.1.0 and
+publish the container to ghcr. The remaining tracked non-blockers are the WSLg
+native-click defect (#203, a fractional-scale pointer offset — the Windows
+cross-build sidesteps it) and post-1.0 "accepted future" work (more EDA
+filename schemes, KiCad ingestion, the perf design tasks).
 
 | Milestone | Status | Notes |
 |---|---|---|
 | Phase 0 — foundations | ✅ done | Cargo workspace + fmt/clippy/test/build matrix (fmt+clippy gate); engine + Gerber/Excellon parse spikes; golden-corpus + property + fuzz tests wired into CI |
 | M1 — MVP (engine / CLI / GUI) | ✅ done | Gerber, Excellon **and pick-and-place** parse → per-layer boolean diff → magnitudes → SVG/JSON/Markdown **and self-contained HTML** (`--html`); native + web egui viewer |
 | M2 — CI surface | ✅ done | Composite GitHub Action, Markdown PR summary, versioned JSON v1, exit codes 0/1/2, input caps, **threshold gates** (`--fail-on-area/-regions`, `--gate-layers`) and **git-refs invocation** (`etchy refA refB [subdir]`) |
-| M3 — PDF + dense-board hardening | ⏳ nearly | Shipped: rayon per-layer diff, per-layer DoS ceilings, robust region counts, **pure-Rust PDF page-diff engine** (`etchy_core::imagediff` + `etchy-pdf`/hayro). The `.pdf` **CLI wiring** (#63) is built and in PR: `etchy old.pdf new.pdf` behind `--features pdf` (summary/JSON/md, `--dpi`, `--out` overlay PNGs, per-page pixel cap). Left: merge + ship `pdf` on in release binaries |
-| GUI shell redesign | 🔶 in review | VS Code-style shell (activity rail, Layers/Measure/Export/Settings tabs, hotkey editor, measure list, trust chips) — built + adversarially reviewed, awaiting merge as #167→#175→#182→#202 |
+| M3 — PDF + dense-board hardening | ✅ done | rayon per-layer diff, per-layer DoS ceilings, robust region counts, **pure-Rust PDF page-diff engine** (`etchy_core::imagediff` + `etchy-pdf`/hayro), and the `.pdf` **CLI + GUI** paths (#63): `etchy old.pdf new.pdf` behind `--features pdf` (summary/JSON/md, `--dpi`, `--out` overlay PNGs, per-page pixel cap); release binaries + container ship `pdf` on |
+| GUI shell redesign | ✅ done | VS Code-style shell (activity rail, Layers + Export tabs, Measure as a plain tool toggle with no panel, Settings rail panel, hotkey editor, trust chips) and the eyes-only **Focus** visibility model (#224) — merged via #167→#175→#182→#202 plus the follow-up polish (#226/#229/#232/#233) |
 | M4 — 1.0 (distribution / docs) | ⏸ blocked | Release pipeline proven end-to-end (v0.1.0-rc1, 4 platforms); Dockerfile done; landing/docs site + TRUST.md live. Blocked on **GitHub Actions billing**; then cut v0.1.0 + publish the container to ghcr |
 
 ### Phase 0 — Foundations & de-risking ✅
@@ -107,7 +112,7 @@ and *see* + *export* the result.
 **Exit:** "drop two fab packs, see and export the diff" works on real boards,
 trustworthy on the corpus.
 
-### Milestone 2 — CI surface ⏳
+### Milestone 2 — CI surface ✅
 Make etchy a first-class pipeline gate (the primary surface).
 
 - **Thresholds + exit codes:** gate on changed-area / region-count, **scopable per
@@ -121,7 +126,7 @@ Make etchy a first-class pipeline gate (the primary surface).
 **Exit:** a PR that changes a board shows an inline visual diff and can fail CI on
 a threshold.
 
-### Milestone 3 — Schematic PDF + dense-board hardening ⏳
+### Milestone 3 — Schematic PDF + dense-board hardening ✅
 - **Schematic-PDF pixel diff** ported (page-by-page), as a supported secondary mode.
 - **Performance pass** for dense/many-layer boards: parallelism across layers,
   memory ceilings, adaptive work; benchmarked against targets.

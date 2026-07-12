@@ -86,14 +86,14 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 |---|---|---|---|
 | GUI-1 | **VS Code-style shell**: a slim activity rail of painter-drawn icons opens docked side panels (tabs); clicking the active tab collapses its panel. | #11/#57, owner | ✅ |
 | GUI-2 | Rail side is **flippable left/right** in Settings; the choice persists. | owner | ✅ |
-| GUI-3 | Rail: **Layers and Export tabs** with the **Measure ruler as a plain tool toggle between them** (arms/disarms, no panel — see MEAS-1) and **Settings as a gear pinned at the bottom**. No monogram on the rail. | owner, #190, #211 | 🔶 |
+| GUI-3 | Rail: **Layers and Export tabs** with the **Measure ruler as a plain tool toggle between them** (arms/disarms, no panel — see MEAS-1) and **Settings as a gear pinned at the bottom**. No monogram on the rail. | owner, #190, #211 | ✅ |
 | GUI-4 | The top bar holds only: brand icon + board label, the **mode segment** (Overlay/Old/New/Split/Swipe), and segmented **Help/Fit/Open**. Everything else lives in the rail. | #6/#200 | ✅ |
 | GUI-5 | Branding uses the real **etchy pad-built E** (`assets/brand/etchy-icon`) — never a hand-drawn substitute. Rail/panel icons are painter-drawn, never font glyphs. | #191, #16/#30 | ✅ |
-| GUI-6 | **Settings is a rail panel** (not a floating window) with stacked collapsible sections: Display, Diff, Grid, Measure, Input, Colours, Layers, Hotkeys. **Resizable like the other panels, and its width holds steady** when sections open/close. | #199, #212, owner | 🔶 |
+| GUI-6 | **Settings is a rail panel** (not a floating window) with stacked collapsible sections: Display, Diff, Grid, Measure, Input, Colours, Layers, Hotkeys. **Resizable like the other panels, and its width holds steady** when sections open/close. | #199, #212, owner | ✅ |
 | GUI-7 | Web and native present the **same old→new labels**, derived consistently from meaningful path parts. | #177 | ✅ |
 | GUI-8 | Old/new naming everywhere (never A/B or before/after). | #160, owner | ✅ |
 | GUI-9 | Settings rows make the selectable value chips visually distinct from the setting label. | #205, #210 | ✅ |
-| GUI-10 | The build's **git short sha is baked in at compile time** and shown subtly — a `build <sha>` line in the Help menu and the brand icon's hover tooltip — identically on native and wasm, so a user can prove which build a browser tab runs. | #213 | 🔶 |
+| GUI-10 | The build's **git short sha is baked in at compile time** and shown subtly — a `build <sha>` line in the Help menu and the brand icon's hover tooltip — identically on native and wasm, so a user can prove which build a browser tab runs. | #213 | ✅ |
 
 ## 7. GUI — viewer behaviour
 
@@ -103,8 +103,8 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | VIEW-2 | **Fit frames the whole board** (union of every layer's extent), not the changed region or one layer. | #170 | ✅ |
 | VIEW-3 | **Left-drag pans** in every input preset (right/middle per preset still work). | #172/#18 | ✅ |
 | VIEW-4 | **Swipe is a curtain over one board**: the divider bisects a single board (left = old, right = new), travels the full canvas width, and dragging it never pans the board. | #171/#183, owner | ✅ |
-| VIEW-5 | Base copper (unchanged geometry) renders at a user-set **opacity slider** (0–100% with typed entry), in **Settings › Diff** (moved out of the Layers panel — the Focus slider took its spot, #224); the S key cycles the familiar off/faint/strong stops. | #12, owner; #224 | 🔶 |
-| VIEW-6 | **Eyes are the only visibility control** (per-row + group-header toggles); selection stays separate from visibility. The view segment (single/highlight/all/none) is **deleted**. A **Focus slider** (0–100%, top of the Layers panel, persisted, default 25%) renders every non-selected VISIBLE layer at `1 − focus` — base and diff geometry alike; 100% shows only the selected layer. Panel rows ghost to mirror the canvas. Hiding every eye leaves a **truly blank canvas**; Split/Swipe still force the selected layer visible. | #224 owner-locked (variant B); supersedes #59/#173/#207/#210 | 🔶 |
+| VIEW-5 | Base copper (unchanged geometry) renders at a user-set **opacity slider** (0–100% with typed entry), in **Settings › Diff** (moved out of the Layers panel — the Focus slider took its spot, #224); the S key cycles the familiar off/faint/strong stops. | #12, owner; #224 | ✅ |
+| VIEW-6 | **Eyes are the only visibility control** (per-row + group-header toggles); selection stays separate from visibility. The view segment (single/highlight/all/none) is **deleted**. A **Focus slider** (0–100%, top of the Layers panel, persisted, default 25%) renders every non-selected VISIBLE layer at `1 − focus` — base and diff geometry alike; 100% shows only the selected layer. Panel rows ghost to mirror the canvas. Hiding every eye leaves a **truly blank canvas**; Split/Swipe still force the selected layer visible. | #224 owner-locked (variant B); supersedes #59/#173/#207/#210 | ✅ |
 | VIEW-7 | The **board edge is a normal layer** (Mechanical › outline): plain eye toggle, visible by default; no special row, control, or legend entry. | #3/#157, owner clarified | ✅ |
 | VIEW-8 | **Always-on crosshair + grid-snapped cursor** with a live coordinate readout, independent of measure mode (toggles live in Settings › Measure; snap defaults on and the readout says "· grid" so precision is honest). | #16/#17/#179, owner | ✅ |
 | VIEW-9 | The **drawn grid adapts to zoom** (1-2-5 pitch selection) so a grid is visible at any zoom; **snapping stays at the configured pitch** — the display never changes what snap does. | #195 | ✅ |
@@ -113,16 +113,16 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | VIEW-12 | Colour/theme presets selectable in Settings; per-layer colours editable; dark/light themes with readable contrast in both. | #155, 2026-06-21 feedback | ✅ |
 | VIEW-13 | Wheel semantics: plain wheel zooms at the cursor; Ctrl+wheel pans Y; Shift+wheel pans X; a physical notch feels the same on web and native. | 2026-06-20 feedback, #56 | ✅ |
 | VIEW-14 | Warnings are named, concise, auto-fade to an icon, and never shift the layout on hover. | 2026-06-21 feedback | ✅ |
-| VIEW-15 | **PDF rasterization DPI is user-settable** in Settings › Diff (chips 150/200/300, default **200** — deliberately higher than the CLI's 150 default, which keeps its `--dpi` flag). Changing it **re-rasterizes the loaded pair** from the retained source bytes; a DPI that breaches the raster caps (50 MP/page, 8192 px/side, 250 MP/doc) fails loud and the setting reverts. Persisted. | #223 | 🔶 |
-| VIEW-16 | **Export always produces findable output**: native writes `etchy-export/` next to the last opened input (absolute path in the toast); web downloads a single file directly and bundles a multi-file set into one zip (browsers block the 2nd+ automatic download). PDF mode exports the changed pages' overlay PNGs. | #222 | 🔶 |
+| VIEW-15 | **PDF rasterization DPI is user-settable** in Settings › Diff (chips 150/200/300, default **200** — deliberately higher than the CLI's 150 default, which keeps its `--dpi` flag). Changing it **re-rasterizes the loaded pair** from the retained source bytes; a DPI that breaches the raster caps (50 MP/page, 8192 px/side, 250 MP/doc) fails loud and the setting reverts. Persisted. | #223 | ✅ |
+| VIEW-16 | **Export always produces findable output**: native writes `etchy-export/` next to the last opened input (absolute path in the toast); web downloads a single file directly and bundles a multi-file set into one zip (browsers block the 2nd+ automatic download). PDF mode exports the changed pages' overlay PNGs. | #222 | ✅ |
 
 ## 8. Measure system
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| MEAS-1 | The rail's ruler icon is a **plain tool toggle**: click arms measure mode (icon highlighted while armed), click again disarms — it opens **no panel**. **Ctrl+M** toggles it too. No "Armed" widget — the bottom-left measure chip names the keys while armed. | #197, #211, owner | 🔶 |
-| MEAS-2 | Two clicks make a measurement; completed measurements **persist drawn on the board** (ruler + labels) until cleared by key per MEAS-4. **No measurements list UI** — the canvas is their only home. | owner spitball, #211 | 🔶 |
-| MEAS-3 | Units **mm / mil / inch** ("keep what we have"), selectable in **Settings › Measure** (with snap and crosshair — the tool's one home). The **units-cycle hotkey is preset-aware**: Altium **Q**, KiCad **Ctrl+U** (each tool's own units key); an explicit rebind overrides. | owner, #211 | 🔶 |
+| MEAS-1 | The rail's ruler icon is a **plain tool toggle**: click arms measure mode (icon highlighted while armed), click again disarms — it opens **no panel**. **Ctrl+M** toggles it too. No "Armed" widget — the bottom-left measure chip names the keys while armed. | #197, #211, owner | ✅ |
+| MEAS-2 | Two clicks make a measurement; completed measurements **persist drawn on the board** (ruler + labels) until cleared by key per MEAS-4. **No measurements list UI** — the canvas is their only home. | owner spitball, #211 | ✅ |
+| MEAS-3 | Units **mm / mil / inch** ("keep what we have"), selectable in **Settings › Measure** (with snap and crosshair — the tool's one home). The **units-cycle hotkey is preset-aware**: Altium **Q**, KiCad **Ctrl+U** (each tool's own units key); an explicit rebind overrides. | owner, #211 | ✅ |
 | MEAS-4 | **Clear-measurements follows the input preset**: Altium → exact **Shift+C**, KiCad → **Esc** (after the in-progress point clears). A custom rebind stands the preset defaults down. Esc aimed at an open popup never clears the rulers. | #198, owner | ✅ |
 | MEAS-5 | Measure clicks snap to the grid when snap is on; placement follows the visible snapped cursor. | #51 | ✅ |
 | MEAS-6 | A measurement reports **ΔX, ΔY, and its angle** as well as the straight-line distance. | #208, #210 | ✅ |
@@ -134,7 +134,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | KEY-1 | A **Settings › Hotkeys editor** lists every rebindable action with its binding; rebinding is press-to-capture, Esc cancels, with **reset to defaults**. Bindings persist. | #201, owner | ✅ |
 | KEY-2 | A capture **refuses a key another action owns** (including fixed aliases and the preset clear/units keys) — one press must never dispatch two actions. Bindings match their **exact modifier set**. | #201 review | ✅ |
 | KEY-3 | A capture armed while its editor is hidden cancels; a focused text field keeps its keystrokes. | #201 review | ✅ |
-| KEY-4 | Defaults: Ctrl+M measure · F fit · S base cycle · preset units per MEAS-3 (Altium Q / KiCad Ctrl+U) · G grid · 1–5 modes (O/B/A legacy aliases) · J/K/arrows step layers · preset clear per MEAS-4. | as built, #211 | 🔶 |
+| KEY-4 | Defaults: Ctrl+M measure · F fit · S base cycle · preset units per MEAS-3 (Altium Q / KiCad Ctrl+U) · G grid · 1–5 modes (O/B/A legacy aliases) · J/K/arrows step layers · preset clear per MEAS-4. | as built, #211 | ✅ |
 
 ## 10. Rendering & performance
 
