@@ -46,7 +46,7 @@ merged (CLI wiring #63 open); the GUI shell redesign is built and in review
 - `etchy-core` stays pure: no `println!`, no `process::exit`, no path policy.
 - Geometry is fixed-point (deterministic diffs).
 - Permissive deps only — `deny.toml` blocks copyleft; `cargo deny check` before adding one.
-- The verified crate stack (i_overlay, gerber-parser, eframe, pdfium-render,
+- The verified crate stack (i_overlay, gerber-parser, eframe, hayro,
   askama, serde_json, rstar/petgraph, tiny-skia, cargo-dist/zigbuild, proptest/
   insta/cargo-fuzz) is in `docs/DEVELOPER_GUIDE.md` — use those, don't reinvent.
 - Build/test/run + WSL setup: `CONTRIBUTING.md`.

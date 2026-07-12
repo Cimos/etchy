@@ -89,6 +89,26 @@ mod imp {
         Ok(out)
     }
 
+    /// Pixel dimensions each page would rasterize to at `dpi`, **without rendering**.
+    /// Lets the caller enforce a per-page memory ceiling before committing to a big
+    /// raster (a large sheet at high DPI is a DoS-sized allocation otherwise).
+    /// Mirrors the sizing in [`rasterize`] (`render_dimensions` × scale, floored).
+    pub fn page_pixel_dims(bytes: &[u8], dpi: f32) -> Result<Vec<(u32, u32)>, PdfError> {
+        let pdf = Pdf::new(bytes.to_vec()).map_err(|e| PdfError::Load(format!("{e:?}")))?;
+        let scale = dpi / PDF_POINTS_PER_INCH;
+        let pages = pdf.pages();
+        if pages.is_empty() {
+            return Err(PdfError::NoPages);
+        }
+        Ok(pages
+            .iter()
+            .map(|p| {
+                let (w, h) = p.render_dimensions();
+                ((w * scale).floor() as u32, (h * scale).floor() as u32)
+            })
+            .collect())
+    }
+
     /// One page-pair's diff, tagged with its 1-based page number.
     pub struct PageDiff {
         pub page: usize,
@@ -157,7 +177,9 @@ mod imp {
 }
 
 #[cfg(feature = "pdf")]
-pub use imp::{diff_pdfs, encode_png, rasterize, PageDiff, PdfDiff, PdfError, DEFAULT_DPI};
+pub use imp::{
+    diff_pdfs, encode_png, page_pixel_dims, rasterize, PageDiff, PdfDiff, PdfError, DEFAULT_DPI,
+};
 
 #[cfg(test)]
 mod tests {
@@ -238,6 +260,18 @@ mod pdf_tests {
         assert!(s.added_px > 100, "new square painted, got {}", s.added_px);
         assert!(s.removed_px > 100, "old square gone, got {}", s.removed_px);
         assert!(s.regions >= 2, "two disjoint squares, got {}", s.regions);
+    }
+
+    #[test]
+    fn page_pixel_dims_match_rasterized_size_without_rendering() {
+        let pdf = one_square_pdf(10, 10);
+        // 100 pt MediaBox: 72 DPI → 100×100 px; 144 DPI → 200×200 px.
+        assert_eq!(page_pixel_dims(&pdf, 72.0).unwrap(), vec![(100, 100)]);
+        assert_eq!(page_pixel_dims(&pdf, 144.0).unwrap(), vec![(200, 200)]);
+        let imgs = rasterize(&pdf, 144.0).unwrap();
+        assert_eq!((imgs[0].width, imgs[0].height), (200, 200));
+        // Junk bytes fail loud, same as rasterize.
+        assert!(page_pixel_dims(b"not a pdf", 72.0).is_err());
     }
 
     #[test]
