@@ -153,6 +153,14 @@ done backlog (#105 waiver).
 | Settings panel: others resize, it doesn't — and it re-sizes itself when sections open/close (23:09) | #212 → GUI-6 refinement (resizable, stable width) | 🔶 |
 | Swipe still pans (web, 100%, post-merge) — fixes verified on main, so likely a stale wasm tab; the running build must be provable (23:10) | #213 → GUI-10 build stamp (git sha in Help + brand tooltip) | 🔶 stamp · 🔜 re-test |
 
+## 7b · 2026-07-12 — PDF-diff review round
+
+| Feedback | Became | Outcome |
+|---|---|---|
+| Export does nothing on the PDF diff (17:16) | #222 | 🔜 |
+| PDF render resolution needs to be higher (17:16) | #223 → CLI-6/GUI DPI setting | 🔜 |
+| Layers visibility model (segment + eyes) feels off — deep-dive + quiz wanted (17:17) | #224 → VIEW-6 redesign discussion | 🔜 |
+
 ## 8 · Decision record (owner quiz answers, dated)
 
 | Date | Decision |
