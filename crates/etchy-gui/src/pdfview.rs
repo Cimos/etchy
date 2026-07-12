@@ -264,8 +264,8 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
             if *w > MAX_TEXTURE_SIDE || *h > MAX_TEXTURE_SIDE {
                 anyhow::bail!(
                     "{label} PDF page {} would rasterize to {w}x{h} px at {dpi} DPI — a side \
-                     over the {MAX_TEXTURE_SIDE} px GPU texture limit; diff this pair with \
-                     the CLI at a lower --dpi",
+                     over the {MAX_TEXTURE_SIDE} px GPU texture limit — lower the PDF \
+                     resolution in Settings > Diff (or use the CLI's --dpi)",
                     i + 1
                 );
             }
@@ -284,7 +284,7 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
     if doc_px > MAX_DOC_PIXELS {
         anyhow::bail!(
             "this PDF pair would rasterize to ~{} MP in total, over the viewer's ~{} MP \
-             budget — diff it with the CLI (per-page overlay PNGs) instead",
+             budget — lower the PDF resolution in Settings > Diff, or diff it with the CLI",
             doc_px / 1_000_000,
             MAX_DOC_PIXELS / 1_000_000
         );
