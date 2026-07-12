@@ -88,11 +88,17 @@ container. Options:
 - **Same-size requirement.** `diff_images` fails on size mismatch; two PDFs whose same-index pages differ in point-size (e.g. a page resized A4→A3) would error. Decide: fail loud (trust) vs letterbox/scale to match. Recommend **fail loud** for v0.1.0 with a clear message (a resized sheet is itself a meaningful change to flag).
 - **Memory at high DPI** — the cap in §3.5.
 
-## 7. Open decisions (for the review)
-1. **Q1 Release packaging** — ship pdf on in the release (MSRV 1.85), or a separate artifact? *(rec: A, on)*
-2. **Q2 Gate semantics** — for v0.1.0, PDF gate = any-change→exit 1 only; add `--fail-on-changed-fraction` now or later? *(rec: any-change now, fraction flag later)*
-3. **Q3 Overlay output flag** — a new `--out DIR` for the per-page PNGs, or overload the existing `--svg DIR`? *(rec: new `--out`, keep SVG/PNG semantics distinct)*
-4. **Q4 Test fixture** — which schematic PDF pair to commit (must be non-confidential)? A KiCad demo schematic export is the safe choice.
-5. **Q5 DPI/size cap** — the max rendered pixel area before fail-loud. *(rec: a generous cap, e.g. ~50 MP/page)*
-6. **Q6 GUI** — confirm PDF viewing stays post-1.0 (CLI-only for v0.1.0)? *(rec: yes, defer)*
-7. **Q7 Same-index page-size mismatch** — fail loud vs scale-to-match? *(rec: fail loud)*
+## 7. Decisions — LOCKED (owner, 2026-07-12)
+1. **Release packaging:** ship `pdf` **ON** in the release binaries + container (release build MSRV becomes 1.85; library default stays 1.75).
+2. **Gate semantics:** any-change → exit 1. The deliverable is the **viewable diff file** — the tool's job is surfacing that a change exists and making it easy to see. A `--fail-on-changed-fraction` flag can come later.
+3. **Overlay output:** new **`--out DIR`** for the per-page PNGs.
+4. **Fixture:** a **KiCad demo schematic** exported to PDF twice (one small edit) via the installed KiCad — public-safe, reproducible.
+5. **DPI:** **one DPI for all sheet sizes** ("same detail everywhere") — text renders equally crisp; larger sheets naturally produce more pixels. Default 150; `--dpi` overrides; ~50 MP/page hard cap fails loud.
+6. **GUI:** **full modes** (Old/New/Overlay/Split/Swipe on raster pages), **native AND wasm from day one**. This makes a **hayro-on-wasm spike a prerequisite** — prove `etchy-pdf` compiles + renders on wasm32 before the GUI build; if wasm is blocked, come back with findings before descoping.
+7. **Page-size mismatch:** fail loud — a resized sheet is itself a change to flag.
+
+## 8. Execution order
+1. **Spike (prerequisite):** hayro on wasm32 + a real KiCad schematic PDF render (the two flagged risks) + generate the fixture pair.
+2. **CLI wiring** per §4 (its own PR).
+3. **GUI full modes** (its own PR, on the CLI one): PDF pair loads into the viewer; pages listed in the Layers panel (one row per page); the mode segment drives Old/New/Overlay/Split/Swipe over the rasterized pages; measure/grid disabled or adapted for raster space (pixels→mm via DPI is known, so measuring can stay in mm).
+
