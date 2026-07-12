@@ -154,6 +154,30 @@ mod with_pdf {
             "the error mentions --dpi: {stderr}"
         );
     }
+
+    #[test]
+    fn zero_pixel_dpi_fails_loud_not_no_change() {
+        // A tiny positive DPI floors the page to 0x0 px. Diffing zero pixels
+        // would read as "no differences" — a silent false negative — so it must
+        // fail loud (exit 2), never exit 0.
+        let out = etchy()
+            .arg("--dpi")
+            .arg("0.05")
+            .arg(fixture("old.pdf"))
+            .arg(fixture("new.pdf"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "a 0x0-px page must not report no-change"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("raise --dpi"),
+            "the error tells the user to raise --dpi: {stderr}"
+        );
+    }
 }
 
 #[cfg(not(feature = "pdf"))]

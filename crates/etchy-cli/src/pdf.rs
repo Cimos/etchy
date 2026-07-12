@@ -285,6 +285,15 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
             .with_context(|| format!("reading {label} PDF {}", path.display()))?;
         for (i, (w, h)) in dims.iter().enumerate() {
             let px = u64::from(*w) * u64::from(*h);
+            // A page that floors to zero pixels would "diff" nothing at all and
+            // read as no-change — a silent false negative. Fail loud instead.
+            if px == 0 {
+                anyhow::bail!(
+                    "{label} PDF page {} would rasterize to {w}×{h} px at {dpi} DPI — \
+                     nothing to compare; raise --dpi",
+                    i + 1
+                );
+            }
             if px > MAX_PAGE_PIXELS {
                 anyhow::bail!(
                     "{label} PDF page {} would rasterize to {w}×{h} px (~{} MP) at {dpi} DPI, \
