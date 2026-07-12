@@ -126,7 +126,10 @@ mod native {
     ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff)> {
         let old = load_source_any(old_path, label(old_path))?;
         let new = load_source_any(new_path, label(new_path))?;
-        let diff = compute_diff(&old, &new)?;
+        // Persisted settings aren't restored yet at this point — seed a PDF pair
+        // at the default DPI; `build_app` re-rasterizes if the restored setting
+        // differs (#223).
+        let diff = compute_diff(&old, &new, PDF_DPI_DEFAULT)?;
         Ok((old, new, diff))
     }
 
@@ -150,6 +153,11 @@ mod native {
                 };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
+                // The seed was rasterized at the default DPI before settings
+                // restore; honour a different persisted DPI now (#223).
+                if app.pdf.is_some() && app.pdf_dpi != PDF_DPI_DEFAULT {
+                    app.rebuild_diff();
+                }
                 app
             }
             None => ViewApp::from_cc(cc, empty_diff(), String::new(), String::new()),
@@ -1126,15 +1134,19 @@ enum ComputedDiff {
 }
 
 /// Diff two loaded sources. Both Gerber → the geometry diff; both PDF → the
-/// per-page pixel diff (a loud error when this build lacks the `pdf` feature);
-/// mixed → a loud error, never a guess.
-fn compute_diff(old: &LoadedSource, new: &LoadedSource) -> anyhow::Result<ComputedDiff> {
+/// per-page pixel diff at `pdf_dpi` (a loud error when this build lacks the
+/// `pdf` feature); mixed → a loud error, never a guess.
+fn compute_diff(
+    old: &LoadedSource,
+    new: &LoadedSource,
+    pdf_dpi: f32,
+) -> anyhow::Result<ComputedDiff> {
     match (old, new) {
         (LoadedSource::Board(o), LoadedSource::Board(n)) => {
             Ok(ComputedDiff::Board(diff_from_sources(o, n)?))
         }
         (LoadedSource::Pdf(o), LoadedSource::Pdf(n)) => Ok(ComputedDiff::Pdf(
-            pdfview::build_pdf_view(&o.bytes, &n.bytes)?,
+            pdfview::build_pdf_view(&o.bytes, &n.bytes, pdf_dpi)?,
         )),
         _ => anyhow::bail!(
             "cannot compare a PDF with Gerber input — load two schematic PDFs \
@@ -1159,60 +1171,46 @@ struct FilePick {
     result: anyhow::Result<LoadedSource>,
 }
 
-/// How many layers the canvas shows at once (#59/#207). A quick preset over the
-/// per-layer visibility checkboxes: Single = only the active layer (the fast
-/// default on dense boards); Highlight = every layer, active at full strength and
-/// the rest dimmed (the Altium/KiCad way of reading a stack); All = every layer at
-/// equal strength; None = every layer hidden. All and None replace the old
-/// Show all / Hide all buttons (#207) — one control group instead of two.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum ViewMode {
-    #[default]
-    Single,
-    Highlight,
-    All,
-    None,
-}
+/// Default Focus (#224): a gentle highlight — non-selected layers at 75% so the
+/// stack reads as context behind the selected layer without hiding anything.
+const FOCUS_DEFAULT: f32 = 0.25;
 
-impl ViewMode {
-    const ALL: [(ViewMode, &'static str); 4] = [
-        (ViewMode::Single, "single"),
-        (ViewMode::Highlight, "highlight"),
-        (ViewMode::All, "all"),
-        (ViewMode::None, "none"),
-    ];
-    /// Non-selected layers are dimmed only in Highlight (Single shows one layer;
-    /// All shows every layer at equal strength).
-    fn dims_others(self) -> bool {
-        matches!(self, ViewMode::Highlight)
-    }
+/// The GUI's default PDF rasterization DPI (#223). Deliberately HIGHER than the
+/// CLI's `etchy_pdf::DEFAULT_DPI` (150): 150 reads soft when zooming a schematic
+/// on screen, while the CLI's overlay PNGs are usually consumed at 1:1 and keep
+/// their `--dpi` flag for anything else.
+const PDF_DPI_DEFAULT: f32 = 200.0;
 
-    /// In All view, non-selected layers draw DIFF-ONLY — their faint base copper
-    /// (the bulk of the per-frame vertices, ~70% on a 13-layer board) is dropped so
-    /// panning stays smooth on dense boards (#158). The selected layer keeps its
-    /// base for context, and Highlight keeps every layer's dimmed base as context;
-    /// only All trades the non-selected base away.
-    fn hides_unselected_base(self) -> bool {
-        matches!(self, ViewMode::All)
+/// The Settings > Diff DPI chips (#223). Bounded choices, not a free slider —
+/// each step is checked against the raster caps at load, and a chip that
+/// breaches them fails loud and reverts.
+const PDF_DPI_CHOICES: [f32; 3] = [150.0, 200.0, 300.0];
+
+/// Floor for the Layers-panel row ghosting (#224): rows mirror the canvas focus
+/// dim but never fade below this — a control you need to click back must stay
+/// legible even at focus 100%.
+const ROW_GHOST_FLOOR: f32 = 0.35;
+
+/// The Focus dim (#224, owner-locked): the alpha multiplier for a VISIBLE layer
+/// under the Focus slider. The selected layer always draws at full strength;
+/// every other visible layer's whole render — base AND diff geometry — scales by
+/// `1 - focus`. Focus 0 = all visible layers equal; focus 1 = only the selected
+/// layer visible. Pure → unit-testable. Replaces the deleted view segment
+/// (single/highlight/all/none): the per-row eyes are the ONLY visibility
+/// control, and this one slider is the only emphasis control.
+fn focus_alpha(focus: f32, is_selected: bool) -> f32 {
+    if is_selected {
+        1.0
+    } else {
+        1.0 - focus.clamp(0.0, 1.0)
     }
 }
 
-/// The per-layer visibility a view mode selects (#59): Single shows the active layer
-/// (plus the board outline for orientation, #157); Highlight and All show every layer
-/// (they differ only in dimming, handled by [`ViewMode::dims_others`]); None hides
-/// every layer — including the outline — like the old Hide all button (#173/#207).
-/// Pure, so the preset is unit-testable.
-fn visibility_for_mode(
-    mode: ViewMode,
-    n: usize,
-    selected: usize,
-    outline: Option<usize>,
-) -> Vec<bool> {
-    match mode {
-        ViewMode::Single => default_visible(n, selected, outline),
-        ViewMode::Highlight | ViewMode::All => vec![true; n],
-        ViewMode::None => vec![false; n],
-    }
+/// [`focus_alpha`] keyed by layer index: layer-less items (the outline
+/// orientation reference, `NO_LAYER`) never dim — they are context, not a layer
+/// competing for attention.
+fn layer_focus_alpha(layer_index: usize, selected: usize, focus: f32) -> f32 {
+    focus_alpha(focus, layer_index == selected || layer_index == NO_LAYER)
 }
 
 struct ViewApp {
@@ -1261,9 +1259,16 @@ struct ViewApp {
     /// editor is off-screen (rail tab switched, panel collapsed) cancels
     /// instead of silently eating — and rebinding on — the next key press.
     hotkeys_drawn: bool,
-    /// How many layers the canvas shows at once (#59; runtime-only). Changing it
-    /// resets the per-layer visibility to the mode's preset.
-    view_mode: ViewMode,
+    /// Focus 0..=1 (#224): how strongly the selected layer stands out — every
+    /// other VISIBLE layer renders at `1 - focus` (base and diff alike). The
+    /// slider at the top of the Layers panel drives it; persisted via #52.
+    focus: f32,
+    /// Rasterization DPI for schematic-PDF pairs (#223), set in Settings > Diff
+    /// (150/200/300 chips). Changing it re-rasterizes a loaded PDF pair from the
+    /// retained source bytes; a DPI that breaches the pixel caps fails loud into
+    /// `load_error` and the setting reverts. Persisted via #52. The CLI default
+    /// stays 150 (its --dpi flag covers it).
+    pdf_dpi: f32,
     /// Min-area noise threshold in mm² (G9): diff regions smaller than this are
     /// dropped. 0 disables it. Always surfaced — the caption reports how many were
     /// hidden. Driven by a slider in the top bar.
@@ -1405,7 +1410,8 @@ impl ViewApp {
             capture_action: None,
             capture_conflict: None,
             hotkeys_drawn: false,
-            view_mode: ViewMode::default(),
+            focus: FOCUS_DEFAULT,
+            pdf_dpi: PDF_DPI_DEFAULT,
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
@@ -1487,13 +1493,29 @@ impl ViewApp {
         files
     }
 
+    /// Where the native export folder is rooted (#222): next to the last opened
+    /// input when known, so the output lands where the user is already looking.
+    /// Web has no directory concept — downloads go wherever the browser puts them.
+    fn export_dir_hint(&self) -> Option<std::path::PathBuf> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.last_dir.clone()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+    }
+
     /// Run an export and stash the result message for the toast.
     fn do_export(&mut self, all_layers: bool) {
         let files = self.build_export(all_layers);
-        self.export_msg = Some(match exportio::save(&files) {
-            Ok(msg) => msg,
-            Err(e) => format!("export failed: {e}"),
-        });
+        self.export_msg = Some(
+            match exportio::save(&files, self.export_dir_hint().as_deref()) {
+                Ok(msg) => msg,
+                Err(e) => format!("export failed: {e}"),
+            },
+        );
     }
 
     /// Trust-warning affordance (G1b): a fixed-height copper chip. While expanded
@@ -2035,6 +2057,13 @@ struct Settings {
     /// round-trip always sees `None` here.
     #[serde(default, skip_serializing)]
     base_level: Option<String>,
+    /// Focus 0..=1 (#224): non-selected visible layers render at `1 - focus`.
+    /// Missing in pre-#224 configs → the default (serde(default) on the struct).
+    /// A pre-#224 persisted `view_mode` string, if one ever existed, is simply
+    /// an unknown field to serde and is ignored.
+    focus: f32,
+    /// PDF rasterization DPI (#223). Missing in pre-#223 configs → the default.
+    pdf_dpi: f32,
     /// Per-layer base-colour overrides, keyed by layer index (#21).
     base_overrides: Vec<(usize, [u8; 4])>,
     min_area_mm2: f64,
@@ -2064,6 +2093,8 @@ impl Default for Settings {
             theme: Theme::Dark,
             base_opacity: BASE_OPACITY_FAINT,
             base_level: None,
+            focus: FOCUS_DEFAULT,
+            pdf_dpi: PDF_DPI_DEFAULT,
             base_overrides: Vec::new(),
             min_area_mm2: MIN_AREA_MM2,
             col_added: color_to_rgba(C_ADDED),
@@ -2119,11 +2150,7 @@ impl ViewApp {
         let canvas = self.canvas_color();
         let mut out = Vec::new();
         for item in &cache.items {
-            let dim = dim_factor(
-                item.layer_index,
-                self.selected,
-                self.view_mode.dims_others(),
-            );
+            let dim = layer_focus_alpha(item.layer_index, self.selected, self.focus);
             let mut color = match item.role {
                 Role::Base => {
                     let base = if item.layer_index == NO_LAYER {
@@ -2173,6 +2200,8 @@ impl ViewApp {
         cache.key.outline_effective.hash(&mut h);
         self.selected.hash(&mut h);
         self.base_opacity.to_bits().hash(&mut h);
+        // The Focus dim is baked into the uploaded vertex colours (#224).
+        self.focus.to_bits().hash(&mut h);
         (self.theme as u8).hash(&mut h);
         self.canvas_color().to_array().hash(&mut h);
         self.col_added.to_array().hash(&mut h);
@@ -2190,6 +2219,8 @@ impl ViewApp {
             theme: self.theme,
             base_opacity: self.base_opacity,
             base_level: None, // legacy field is read-only; new configs store base_opacity
+            focus: self.focus,
+            pdf_dpi: self.pdf_dpi,
             base_overrides: self
                 .base_overrides
                 .iter()
@@ -2221,6 +2252,10 @@ impl ViewApp {
             Some(level) => legacy_base_opacity(level),
             None => s.base_opacity.clamp(0.0, 1.0),
         };
+        self.focus = s.focus.clamp(0.0, 1.0);
+        // Any persisted DPI is honoured within sane raster bounds; the chips
+        // only ever write PDF_DPI_CHOICES values.
+        self.pdf_dpi = s.pdf_dpi.clamp(72.0, 600.0);
         self.base_overrides = s
             .base_overrides
             .into_iter()
@@ -2237,12 +2272,9 @@ impl ViewApp {
         // Restore the visible set (#58/#59) over the current layer count, dropping
         // stale indices. An empty saved set keeps the on-load default.
         if !s.visible_layers.is_empty() {
+            // Selection is separate from visibility (#224): the restored eye
+            // state is honoured as-is, even if it hides the selected layer.
             self.visible_layers = restore_visibility(&s.visible_layers, self.visible_layers.len());
-            // The selected layer must stay visible so its highlight has something
-            // to draw.
-            if let Some(v) = self.visible_layers.get_mut(self.selected) {
-                *v = true;
-            }
         }
         self.swipe_frac = clamp_swipe_frac(s.swipe_frac);
         self.rail_side = s.rail_side;
@@ -2310,10 +2342,36 @@ impl ViewApp {
             return;
         };
         let (ol, nl) = (o.label().to_string(), n.label().to_string());
-        match compute_diff(o, n) {
+        match compute_diff(o, n, self.pdf_dpi) {
             Ok(ComputedDiff::Board(diff)) => self.adopt_diff(diff, ol, nl),
             Ok(ComputedDiff::Pdf(view)) => self.adopt_pdf(view, ol, nl),
             Err(e) => self.load_error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Change the PDF rasterization DPI (#223). With a PDF pair loaded, the pair
+    /// is re-rasterized from the retained source bytes at the new DPI; a DPI
+    /// that breaches the pixel caps fails loud (`load_error`) and the setting
+    /// reverts, leaving the previous view — still built at the previous DPI —
+    /// on screen. Without a PDF pair it simply takes effect on the next load.
+    fn set_pdf_dpi(&mut self, dpi: f32) {
+        let prev = self.pdf_dpi;
+        if dpi == prev {
+            return;
+        }
+        self.pdf_dpi = dpi;
+        let pdf_pair = matches!(
+            (&self.src_old, &self.src_new),
+            (Some(LoadedSource::Pdf(_)), Some(LoadedSource::Pdf(_)))
+        );
+        if pdf_pair {
+            self.load_error = None;
+            self.rebuild_diff();
+            if self.load_error.is_some() {
+                // Fail loud AND revert: the error stays visible, the setting
+                // goes back to the DPI the on-screen view was built at.
+                self.pdf_dpi = prev;
+            }
         }
     }
 
@@ -3416,45 +3474,18 @@ impl ViewApp {
     /// per-layer colour. The board outline is a normal layer row here now (#157).
     fn layers_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Layers");
-        // View mode (#59/#207): ONE visibility control group — a quick preset over
-        // the per-layer eyes. single = active layer only; highlight = active over
-        // dimmed rest; all = every layer equal (the old Show all); none = every
-        // layer hidden (the old Hide all — clears EVERY layer, #173, including the
-        // selected one; Split/Swipe still force the active layer visible in those
-        // modes so their view is never blank). Selecting one — including the
-        // already-active one — resets visibility to the preset; per-row eyes still
-        // fine-tune afterwards.
+        // Focus (#224, owner-locked): the ONE emphasis control, replacing the
+        // deleted view segment (single/highlight/all/none). Non-selected VISIBLE
+        // layers render at 1 - focus — base and diff alike; 0% = all layers
+        // equal, 100% = only the selected layer visible. The per-row/group eyes
+        // are the ONLY visibility control; selection stays separate from both.
+        // The base-opacity slider moved to Settings > Diff (`S` still cycles it).
         // "Show changed" stays hidden per feedback #8 — the capability lives on in
         // `visible_from_changed` (still unit-tested) so it can be re-surfaced later.
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("view").weak().small());
-            segmented_frame(ui, |ui| {
-                for (mode, label) in ViewMode::ALL {
-                    let on = self.view_mode == mode;
-                    let text = if on {
-                        egui::RichText::new(label).color(C_CANVAS).strong()
-                    } else {
-                        egui::RichText::new(label)
-                    };
-                    if ui.selectable_label(on, text).clicked() {
-                        self.view_mode = mode;
-                        self.visible_layers = visibility_for_mode(
-                            mode,
-                            self.diff.layers.len(),
-                            self.selected,
-                            self.outline,
-                        );
-                    }
-                }
-            });
-        });
-        // Base opacity (#12/#6): the unchanged base copper's strength, moved here
-        // from the top bar and made continuous. 0 hides the base; the old off/faint/
-        // strong stops are 0%/40%/80%. `S` still steps those three stops.
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("base").weak().small());
+            ui.label(egui::RichText::new("focus").weak().small());
             ui.add(
-                egui::Slider::new(&mut self.base_opacity, 0.0..=1.0)
+                egui::Slider::new(&mut self.focus, 0.0..=1.0)
                     .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
                     // Parse the "%"-formatted text back so click-to-type round-trips
                     // (without a matching parser egui's default numeric parse rejects
@@ -3468,9 +3499,16 @@ impl ViewApp {
                             .map(|p| p / 100.0)
                     }),
             )
-            .on_hover_text("Opacity of the unchanged base copper behind the diff (0 hides it).");
+            .on_hover_text(
+                "How strongly the selected layer stands out: other visible layers \
+                 fade by this amount (100% shows only the selected layer).",
+            );
         });
         ui.separator();
+        // Panel rows ghost to mirror the canvas (#224): a visible non-selected
+        // row's name and Δ% fade with the same focus dim (floored so rows stay
+        // legible and clickable); the selected row keeps its full highlight.
+        let row_ghost = focus_alpha(self.focus, false).max(ROW_GHOST_FLOOR);
         // Actions deferred so the per-frame group iteration doesn't borrow
         // self mutably while it's borrowed for the group list.
         let mut select: Option<usize> = None;
@@ -3557,7 +3595,22 @@ impl ViewApp {
                                         set_color = Some((idx, sw));
                                     }
                                     // Visible layers read brighter; hidden grey.
+                                    // Visible non-selected rows GHOST with the
+                                    // canvas focus dim (#224) so the panel
+                                    // mirrors what's drawn.
+                                    let ghosted = visible && idx != self.selected;
                                     let label = match (visible, changed) {
+                                        (true, true) if ghosted => {
+                                            egui::RichText::new(&name).strong().color(
+                                                ui.visuals()
+                                                    .strong_text_color()
+                                                    .gamma_multiply(row_ghost),
+                                            )
+                                        }
+                                        (true, false) if ghosted => egui::RichText::new(&name)
+                                            .color(
+                                                ui.visuals().text_color().gamma_multiply(row_ghost),
+                                            ),
                                         (true, true) => egui::RichText::new(&name).strong(),
                                         (true, false) => egui::RichText::new(&name),
                                         (false, _) => {
@@ -3584,11 +3637,18 @@ impl ViewApp {
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
                                                 // Δ% in copper so the change
-                                                // magnitude reads at a glance (#20).
+                                                // magnitude reads at a glance
+                                                // (#20); ghosted with the row
+                                                // under focus (#224).
+                                                let delta_col = if ghosted {
+                                                    C_COPPER.gamma_multiply(row_ghost)
+                                                } else {
+                                                    C_COPPER
+                                                };
                                                 ui.label(
                                                     egui::RichText::new(txt)
                                                         .small()
-                                                        .color(C_COPPER),
+                                                        .color(delta_col),
                                                 )
                                                 .on_hover_text(format!(
                                                     "+{added:.4} mm² added · \
@@ -3937,8 +3997,39 @@ impl ViewApp {
         }
     }
 
-    /// Settings → Diff: the noise-filter threshold (moved off the top bar, #154).
+    /// Settings → Diff: the base-copper opacity (moved here from the Layers
+    /// panel, #224 — the Focus slider took its spot), the noise-filter threshold
+    /// (moved off the top bar, #154), and the PDF rasterization DPI (#223).
     fn settings_diff(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Base opacity")
+                .small()
+                .color(Color32::from_gray(150)),
+        );
+        // Base opacity (#12/#6): the unchanged base copper's strength, continuous
+        // 0..=1. 0 hides the base; the old off/faint/strong stops are 0%/40%/80%.
+        // `S` still steps those three stops.
+        ui.add(
+            egui::Slider::new(&mut self.base_opacity, 0.0..=1.0)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                // Parse the "%"-formatted text back so click-to-type round-trips
+                // (without a matching parser egui's default numeric parse rejects
+                // the "%" suffix and the typed value is silently dropped).
+                .custom_parser(|s| {
+                    s.trim()
+                        .trim_end_matches('%')
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .map(|p| p / 100.0)
+                }),
+        )
+        .on_hover_text(format!(
+            "Opacity of the unchanged base copper behind the diff (0 hides it); \
+             {} cycles off/faint/strong.",
+            format_binding(self.keymap.cycle_base)
+        ));
+        ui.add_space(6.0);
         ui.label(
             egui::RichText::new("Noise filter")
                 .small()
@@ -3961,6 +4052,41 @@ impl ViewApp {
         .on_hover_text(
             "Type or drag to set the noise filter exactly (mm²), beyond the slider's range.",
         );
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("PDF resolution")
+                .small()
+                .color(Color32::from_gray(150)),
+        );
+        // Rasterization DPI for schematic-PDF pairs (#223). A click with a PDF
+        // pair loaded re-rasterizes from the retained bytes; over-cap fails loud
+        // and reverts (see `set_pdf_dpi`). The CLI default stays 150 (--dpi).
+        let mut pick: Option<f32> = None;
+        ui.horizontal(|ui| {
+            ui.label("DPI");
+            segmented_frame(ui, |ui| {
+                for dpi in PDF_DPI_CHOICES {
+                    let on = self.pdf_dpi == dpi;
+                    let label = format!("{dpi:.0}");
+                    let text = if on {
+                        egui::RichText::new(label).color(C_CANVAS).strong()
+                    } else {
+                        egui::RichText::new(label)
+                    };
+                    if ui.selectable_label(on, text).clicked() && !on {
+                        pick = Some(dpi);
+                    }
+                }
+            });
+        })
+        .response
+        .on_hover_text(
+            "Rasterization DPI for schematic-PDF diffs. Changing it re-renders \
+             the loaded pair; a DPI over the raster caps fails loud and reverts.",
+        );
+        if let Some(dpi) = pick {
+            self.set_pdf_dpi(dpi);
+        }
     }
 
     /// Settings → Grid: the reference grid overlay. Snap + crosshair moved to
@@ -4328,25 +4454,18 @@ impl ViewApp {
         // old|new of many layers reads as mud), so it keys off just the selected layer
         // and falls back to it when nothing is on.
         let visible = if self.mode == Mode::Split || self.mode == Mode::Swipe {
+            // Split/Swipe still force the selected layer visible (a stacked
+            // old|new of many layers reads as mud, and a blank half is useless).
             vec![self.selected]
         } else {
-            let v: Vec<usize> = visible_indices(&self.visible_layers)
+            // The eyes rule absolutely (#224): hiding every layer leaves a truly
+            // blank canvas (the "no geometry in this view" hint says so) — no
+            // forced fallback. Outline-only is content: the faint reference
+            // draws via `outline_effective` above.
+            visible_indices(&self.visible_layers)
                 .into_iter()
                 .filter(|&i| Some(i) != self.outline)
-                .collect();
-            // Anti-blank fallback: if nothing is on, show the selected layer so the
-            // canvas isn't empty. But the outline is a normal layer now (PR B) — if
-            // the user hid everything and toggled ONLY the outline on, that IS
-            // content, so don't force the (hidden) selected layer back on.
-            let outline_visible = self
-                .outline
-                .and_then(|o| self.visible_layers.get(o).copied())
-                .unwrap_or(false);
-            if v.is_empty() && !outline_visible {
-                vec![self.selected]
-            } else {
-                v
-            }
+                .collect()
         };
         let key = build_geom_key(
             &visible,
@@ -4494,8 +4613,7 @@ impl ViewApp {
                     self.col_removed,
                     min_area_nm2,
                     false,
-                    self.view_mode.dims_others(),
-                    self.view_mode.hides_unselected_base(),
+                    self.focus,
                 );
                 self.last_hidden = hidden;
                 n = shapes.len();
@@ -5080,30 +5198,40 @@ impl ViewApp {
     /// message for the Export tab's status line (same flow as `do_export`).
     fn do_export_pdf(&mut self) {
         let Some(pv) = &self.pdf else { return };
-        let mut files = Vec::new();
-        for row in &pv.rows {
-            let Some(img) = &row.overlay_img else {
-                continue;
-            };
-            if !row.changed {
-                continue;
+        let files = match build_pdf_export(pv) {
+            Ok(files) => files,
+            Err(e) => {
+                self.export_msg = Some(format!("export failed: {e}"));
+                return;
             }
-            match pdfview::overlay_png(img) {
-                Ok(png) => files.push(exportio::ExportFile {
-                    name: format!("page-{}.png", row.page),
-                    content: png,
-                }),
-                Err(e) => {
-                    self.export_msg = Some(format!("export failed: {e}"));
-                    return;
-                }
-            }
+        };
+        self.export_msg = Some(
+            match exportio::save(&files, self.export_dir_hint().as_deref()) {
+                Ok(msg) => msg,
+                Err(e) => format!("export failed: {e}"),
+            },
+        );
+    }
+}
+
+/// The PDF-mode export file set (#222 regression seam): one `page-N.png` per
+/// CHANGED paired page — the exact list the Export tab previews. Pure over the
+/// view, so a changed pair provably yields a non-empty set in tests.
+fn build_pdf_export(pv: &PdfView) -> anyhow::Result<Vec<exportio::ExportFile>> {
+    let mut files = Vec::new();
+    for row in &pv.rows {
+        let Some(img) = &row.overlay_img else {
+            continue; // unpaired page: nothing to diff against, named in the UI
+        };
+        if !row.changed {
+            continue;
         }
-        self.export_msg = Some(match exportio::save(&files) {
-            Ok(msg) => msg,
-            Err(e) => format!("export failed: {e}"),
+        files.push(exportio::ExportFile {
+            name: format!("page-{}.png", row.page),
+            content: pdfview::overlay_png(img)?,
         });
     }
+    Ok(files)
 }
 
 /// What a cached item is, so the per-frame pass knows how to colour it (G6).
@@ -5283,10 +5411,6 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
     }
 }
 
-/// Alpha multiplier for visible-but-not-selected layers (#59, Altium "dim"
-/// default). The selected (active) layer stays full opacity so it reads on top.
-const DIM_ALPHA: f32 = 0.4;
-
 /// The shared segmented-group chrome (#57/#200): the outlined rounded frame with
 /// zero gap between the widgets inside, and the widgets restyled flat — no
 /// per-button fill or stroke at rest, the usual soft fill on hover, and copper
@@ -5399,17 +5523,6 @@ fn help_links(ui: &mut egui::Ui) {
             .small(),
     )
     .on_hover_text("The git commit this build was made from.");
-}
-
-/// Opacity multiplier for an item from `layer_index` given the active `selected`
-/// layer: 1.0 for the selected layer (and for layer-less items like the outline),
-/// `DIM_ALPHA` for the other visible layers (#59).
-fn dim_factor(layer_index: usize, selected: usize, dim_others: bool) -> f32 {
-    if !dim_others || layer_index == NO_LAYER || layer_index == selected {
-        1.0
-    } else {
-        DIM_ALPHA
-    }
 }
 
 /// An Altium-style eye toggle for layer visibility (#4): an open eye when shown, a
@@ -5608,7 +5721,7 @@ fn draw_cog_icon(p: &egui::Painter, r: Rect, col: Color32) {
 }
 
 /// Per-frame: transform cached world items to screen meshes, applying colour, the
-/// highlight/dim (#59), the LOD fade (diff only), and the min-area cull (returns the
+/// Focus dim (#224), the LOD fade (diff only), and the min-area cull (returns the
 /// hidden count). No triangulation here — this is the cheap part that runs every
 /// frame. `base_of` resolves each layer's base/context colour by its index, so
 /// stacked layers read by their own colour.
@@ -5627,11 +5740,10 @@ fn transform_cache(
     // When true, Role::Base items are skipped here because the GPU path is drawing
     // them this frame (#106). Always false without the `gpu-transform` feature.
     skip_base: bool,
-    // Whether non-selected layers are dimmed (#59 Highlight mode).
-    dim_others: bool,
-    // Whether non-selected layers' base copper is dropped (#158 All view) — the
-    // selected layer keeps its base; others draw diff-only, cutting ~70% of verts.
-    hide_unselected_base: bool,
+    // The Focus slider (#224): non-selected visible layers render at 1 - focus,
+    // base AND diff geometry alike. Replaces the old Highlight dim and the #158
+    // diff-only "All view" trick (retired — GPU surfaces carry the cost).
+    focus: f32,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
     // instead of one Mesh+Shape per region — the real-board top-copper layer was ~5.5k
@@ -5661,20 +5773,14 @@ fn transform_cache(
             if skip_base {
                 continue; // base drawn on the GPU this frame (#106)
             }
-            // All view (#158): drop non-selected layers' base copper (diff-only for
-            // them) — it's ~70% of the verts and just dimmed context. The selected
-            // layer keeps its base.
-            if hide_unselected_base && item.layer_index != selected {
-                continue;
-            }
             let thickness = feature_thickness_nm(item.area_nm2, item.extent_nm);
             if region_screen_px(thickness, cam.scale) < LOD_LO_PX {
                 continue;
             }
         }
-        // Highlight/dim (#59): the active layer at full opacity, the other visible
-        // layers dimmed; layer-less items (outline) never dim.
-        let dim = dim_factor(item.layer_index, selected, dim_others);
+        // The Focus dim (#224): the selected layer at full opacity, the other
+        // visible layers at 1 - focus; layer-less items (outline) never dim.
+        let dim = layer_focus_alpha(item.layer_index, selected, focus);
         let (mut color, is_diff) = match item.role {
             Role::Base => (
                 base_display_color(base_of(item.layer_index), canvas, base_opacity),
@@ -6363,7 +6469,7 @@ mod tests {
             label: "b.pdf".into(),
             bytes: b"%PDF-1.7".to_vec(),
         });
-        let err = match compute_diff(&gerber, &pdf) {
+        let err = match compute_diff(&gerber, &pdf, super::PDF_DPI_DEFAULT) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a mixed PDF/Gerber pair must fail loud"),
         };
@@ -6617,8 +6723,7 @@ mod tests {
                     super::C_REMOVED,
                     0.0,
                     false, // skip_base: CPU path draws everything in this bench
-                    true,  // dim_others
-                    false, // hide_unselected_base
+                    0.25,  // focus (#224)
                 );
                 sink += shapes.len();
             }
@@ -7014,6 +7119,49 @@ mod tests {
         let mut app2 = ViewApp::new(empty_diff(), "x".into(), "y".into());
         app2.apply_settings(bare);
         assert_eq!(app2.base_opacity, BASE_OPACITY_FAINT);
+    }
+
+    #[test]
+    fn settings_without_focus_or_dpi_take_the_defaults_and_ignore_view_mode() {
+        use super::{Settings, ViewApp, FOCUS_DEFAULT, PDF_DPI_DEFAULT};
+        // A pre-#223/#224 blob has neither field — and may carry a stale
+        // view-segment remnant. Both new fields default; the unknown key is
+        // ignored, never an error (missing-field-safe migration).
+        let old = r#"{"theme":"dark","view_mode":"highlight"}"#;
+        let s: Settings = serde_json::from_str(old).expect("old blob with view_mode");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.apply_settings(s);
+        assert_eq!(app.focus, FOCUS_DEFAULT);
+        assert_eq!(app.pdf_dpi, PDF_DPI_DEFAULT);
+        // Persisted values round-trip, clamped to sane bounds.
+        let s2: Settings =
+            serde_json::from_str(r#"{"focus":0.6,"pdf_dpi":300.0}"#).expect("new blob");
+        let mut app2 = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app2.apply_settings(s2);
+        assert_eq!(app2.focus, 0.6);
+        assert_eq!(app2.pdf_dpi, 300.0);
+        let wild: Settings =
+            serde_json::from_str(r#"{"focus":7.0,"pdf_dpi":100000.0}"#).expect("wild blob");
+        let mut app3 = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app3.apply_settings(wild);
+        assert_eq!(app3.focus, 1.0);
+        assert_eq!(app3.pdf_dpi, 600.0);
+    }
+
+    /// #222 regression: a changed PDF pair yields a non-empty export set — the
+    /// page overlay PNGs the Export tab writes. An unchanged pair yields none.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn pdf_export_file_list_is_the_changed_page_pngs() {
+        let old = crate::pdfview::one_square_pdf(10, 10);
+        let new = crate::pdfview::one_square_pdf(60, 60);
+        let pv = crate::pdfview::build_pdf_view(&old, &new, 150.0).expect("view");
+        let files = super::build_pdf_export(&pv).expect("export list");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "page-1.png");
+        assert!(files[0].content.starts_with(&[0x89, b'P', b'N', b'G']));
+        let same = crate::pdfview::build_pdf_view(&old, &old, 150.0).expect("view");
+        assert!(super::build_pdf_export(&same).expect("list").is_empty());
     }
 
     #[test]
@@ -7605,6 +7753,8 @@ mod tests {
             theme: Theme::Light,
             base_opacity: BASE_OPACITY_STRONG,
             base_level: None, // legacy migration field; never written, always None after a round trip
+            focus: 0.65,
+            pdf_dpi: 300.0,
             base_overrides: vec![(0, [1, 2, 3, 4]), (3, [255, 0, 128, 255])],
             min_area_mm2: 0.0123,
             col_added: [10, 20, 30, 255],
@@ -7994,60 +8144,25 @@ mod tests {
     }
 
     #[test]
-    fn view_mode_visibility_presets() {
-        use super::{visibility_for_mode, ViewMode};
-        // Single: the active layer plus the board outline are on (#157).
-        assert_eq!(
-            visibility_for_mode(ViewMode::Single, 4, 2, Some(0)),
-            vec![true, false, true, false]
-        );
-        // No outline layer: Single is just the active layer.
-        assert_eq!(
-            visibility_for_mode(ViewMode::Single, 4, 2, None),
-            vec![false, false, true, false]
-        );
-        // Highlight and All: every layer on (they differ only in dimming); the
-        // outline is already covered by the all-on set.
-        assert_eq!(
-            visibility_for_mode(ViewMode::Highlight, 3, 0, Some(2)),
-            vec![true, true, true]
-        );
-        assert_eq!(
-            visibility_for_mode(ViewMode::All, 3, 0, None),
-            vec![true, true, true]
-        );
-        // None: every layer hidden — including the outline (#173/#207, the old
-        // Hide all).
-        assert_eq!(
-            visibility_for_mode(ViewMode::None, 3, 0, Some(2)),
-            vec![false, false, false]
-        );
-        assert_eq!(
-            visibility_for_mode(ViewMode::None, 0, 0, None),
-            Vec::<bool>::new()
-        );
-    }
-
-    #[test]
-    fn dim_factor_dims_only_in_highlight() {
-        use super::{dim_factor, ViewMode, DIM_ALPHA, NO_LAYER};
-        // Highlight (dim_others=true): non-selected dim, selected/outline full.
-        assert_eq!(dim_factor(1, 0, true), DIM_ALPHA);
-        assert_eq!(dim_factor(0, 0, true), 1.0);
-        assert_eq!(dim_factor(NO_LAYER, 0, true), 1.0);
-        // All (dim_others=false): every layer at full strength.
-        assert_eq!(dim_factor(1, 0, false), 1.0);
-        // The mode's own flag: only Highlight dims.
-        assert!(ViewMode::Highlight.dims_others());
-        assert!(!ViewMode::All.dims_others());
-        assert!(!ViewMode::Single.dims_others());
-        assert!(!ViewMode::None.dims_others());
-        // Only All drops non-selected base copper (#158); Single/Highlight keep it
-        // (None draws nothing, so the flag is moot there).
-        assert!(ViewMode::All.hides_unselected_base());
-        assert!(!ViewMode::Highlight.hides_unselected_base());
-        assert!(!ViewMode::Single.hides_unselected_base());
-        assert!(!ViewMode::None.hides_unselected_base());
+    fn focus_alpha_scales_non_selected_layers_only() {
+        use super::{focus_alpha, layer_focus_alpha, NO_LAYER};
+        // The selected layer always draws at full strength.
+        assert_eq!(focus_alpha(0.0, true), 1.0);
+        assert_eq!(focus_alpha(0.7, true), 1.0);
+        assert_eq!(focus_alpha(1.0, true), 1.0);
+        // Non-selected layers render at 1 - focus: 0 = all equal, 1 = only the
+        // selected layer visible (#224).
+        assert_eq!(focus_alpha(0.0, false), 1.0);
+        assert!((focus_alpha(0.25, false) - 0.75).abs() < 1e-6);
+        assert_eq!(focus_alpha(1.0, false), 0.0);
+        // Out-of-range focus values clamp instead of inverting the effect.
+        assert_eq!(focus_alpha(2.0, false), 0.0);
+        assert_eq!(focus_alpha(-1.0, false), 1.0);
+        // By layer index: the selected index and layer-less items (the outline
+        // reference, NO_LAYER) never dim; every other layer follows the focus.
+        assert_eq!(layer_focus_alpha(0, 0, 0.8), 1.0);
+        assert_eq!(layer_focus_alpha(NO_LAYER, 0, 0.8), 1.0);
+        assert!((layer_focus_alpha(1, 0, 0.8) - 0.2).abs() < 1e-6);
     }
 
     #[test]

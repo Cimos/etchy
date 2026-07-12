@@ -236,14 +236,13 @@ impl PdfView {
     }
 }
 
-/// Rasterize both PDFs at the default DPI, diff paired pages, and assemble the
-/// view. Fails loud on: unparseable PDF, a page over the pixel cap (before any
-/// rendering), a paired page whose size changed between revisions, or a page that
-/// would rasterize to zero pixels.
+/// Rasterize both PDFs at `dpi` (#223: user-settable in Settings > Diff), diff
+/// paired pages, and assemble the view. Fails loud on: unparseable PDF, a page
+/// over the pixel caps at that DPI (before any rendering), a paired page whose
+/// size changed between revisions, or a page that would rasterize to zero pixels.
 #[cfg(feature = "pdf")]
-pub fn build_pdf_view(old: &[u8], new: &[u8]) -> anyhow::Result<PdfView> {
+pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfView> {
     use anyhow::Context as _;
-    let dpi = etchy_pdf::DEFAULT_DPI;
     // Enforce the pixel ceilings BEFORE rasterizing anything (the CLI's
     // pre-flight plus the GUI-specific per-dimension and whole-document caps —
     // an over-limit texture PANICS in egui_glow and a many-page pair OOMs, so
@@ -351,7 +350,7 @@ pub fn build_pdf_view(old: &[u8], new: &[u8]) -> anyhow::Result<PdfView> {
 /// Without the `pdf` feature a PDF input is a loud, actionable error — not a
 /// confusing "not a gerber" skip (mirrors the CLI's no-feature path).
 #[cfg(not(feature = "pdf"))]
-pub fn build_pdf_view(_old: &[u8], _new: &[u8]) -> anyhow::Result<PdfView> {
+pub fn build_pdf_view(_old: &[u8], _new: &[u8], _dpi: f32) -> anyhow::Result<PdfView> {
     anyhow::bail!("this build lacks PDF support — rebuild etchy-gui with --features pdf")
 }
 
@@ -453,50 +452,52 @@ mod tests {
     }
 }
 
+/// Test-support (shared with main.rs's export regression test): a minimal
+/// well-formed single-page PDF (100x100 pt MediaBox) with one filled black
+/// square at (`x`,`y`), size 20 — same synthesis as etchy-pdf's tests.
+#[cfg(all(test, feature = "pdf"))]
+pub(crate) fn one_square_pdf(x: i32, y: i32) -> Vec<u8> {
+    let content = format!("0 0 0 rg\n{x} {y} 20 20 re\nf\n");
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+              /Contents 4 0 R /Resources << >> >>"
+            .into(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        ),
+    ];
+    let mut pdf = String::from("%PDF-1.7\n");
+    let mut offsets = Vec::with_capacity(objs.len());
+    for (i, body) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
+    }
+    let xref_pos = pdf.len();
+    pdf.push_str(&format!("xref\n0 {}\n", objs.len() + 1));
+    pdf.push_str("0000000000 65535 f \n");
+    for off in &offsets {
+        pdf.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF",
+        objs.len() + 1
+    ));
+    pdf.into_bytes()
+}
+
 // End-to-end over the real engine (hayro rasterize + pixel diff) — needs the
 // feature; runs in the default test config since `pdf` is a default feature.
 #[cfg(all(test, feature = "pdf"))]
 mod pdf_tests {
     use super::*;
 
-    /// Minimal well-formed single-page PDF (100x100 pt MediaBox) with one filled
-    /// black square at (`x`,`y`), size 20 — same synthesis as etchy-pdf's tests.
-    fn one_square_pdf(x: i32, y: i32) -> Vec<u8> {
-        let content = format!("0 0 0 rg\n{x} {y} 20 20 re\nf\n");
-        let objs: Vec<String> = vec![
-            "<< /Type /Catalog /Pages 2 0 R >>".into(),
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
-              /Contents 4 0 R /Resources << >> >>"
-                .into(),
-            format!(
-                "<< /Length {} >>\nstream\n{content}endstream",
-                content.len()
-            ),
-        ];
-        let mut pdf = String::from("%PDF-1.7\n");
-        let mut offsets = Vec::with_capacity(objs.len());
-        for (i, body) in objs.iter().enumerate() {
-            offsets.push(pdf.len());
-            pdf.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
-        }
-        let xref_pos = pdf.len();
-        pdf.push_str(&format!("xref\n0 {}\n", objs.len() + 1));
-        pdf.push_str("0000000000 65535 f \n");
-        for off in &offsets {
-            pdf.push_str(&format!("{off:010} 00000 n \n"));
-        }
-        pdf.push_str(&format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF",
-            objs.len() + 1
-        ));
-        pdf.into_bytes()
-    }
-
     #[test]
     fn identical_pdfs_build_an_unchanged_view() {
         let pdf = one_square_pdf(10, 10);
-        let v = build_pdf_view(&pdf, &pdf).expect("build");
+        let v = build_pdf_view(&pdf, &pdf, 150.0).expect("build");
         assert_eq!((v.old_pages, v.new_pages), (1, 1));
         assert_eq!(v.rows.len(), 1);
         assert_eq!(v.changed_count(), 0);
@@ -505,13 +506,40 @@ mod pdf_tests {
         assert!(!row.changed);
         assert!(row.old_img.is_some() && row.new_img.is_some());
         assert!(row.overlay_img.is_some(), "paired pages carry an overlay");
-        // 100 pt MediaBox at the default 150 DPI → 100/72*150 = 208 px.
+        // 100 pt MediaBox at 150 DPI → 100/72*150 = 208 px.
         assert_eq!((row.width, row.height), (208, 208));
     }
 
     #[test]
+    fn dpi_scales_the_raster() {
+        // The same page rendered at a higher DPI produces a proportionally
+        // larger raster (#223: the Settings > Diff DPI chips re-rasterize).
+        let pdf = one_square_pdf(10, 10);
+        let lo = build_pdf_view(&pdf, &pdf, 150.0).expect("150 dpi");
+        let hi = build_pdf_view(&pdf, &pdf, 300.0).expect("300 dpi");
+        assert_eq!(hi.dpi, 300.0);
+        assert!(hi.rows[0].width > lo.rows[0].width);
+        // 2x the DPI is 2x the pixels (within a rounding pixel).
+        assert!((hi.rows[0].width as i64 - 2 * lo.rows[0].width as i64).abs() <= 2);
+    }
+
+    #[test]
+    fn a_dpi_over_the_caps_fails_loud() {
+        // 100 pt at 6000 DPI → 8333 px a side: over both the 8192 px texture
+        // side cap and the 50 MP page cap. Must fail loud before rasterizing,
+        // so the GUI can revert the DPI setting (#223).
+        let pdf = one_square_pdf(10, 10);
+        let err = match build_pdf_view(&pdf, &pdf, 6000.0) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an over-cap DPI must fail loud"),
+        };
+        assert!(err.contains("DPI"), "error names the DPI: {err}");
+    }
+
+    #[test]
     fn a_moved_square_marks_the_page_changed() {
-        let v = build_pdf_view(&one_square_pdf(10, 10), &one_square_pdf(60, 60)).expect("build");
+        let v =
+            build_pdf_view(&one_square_pdf(10, 10), &one_square_pdf(60, 60), 150.0).expect("build");
         assert_eq!(v.changed_count(), 1);
         let row = &v.rows[0];
         assert!(row.changed);
@@ -524,6 +552,6 @@ mod pdf_tests {
 
     #[test]
     fn junk_bytes_fail_loud() {
-        assert!(build_pdf_view(b"not a pdf", b"also not").is_err());
+        assert!(build_pdf_view(b"not a pdf", b"also not", 150.0).is_err());
     }
 }
