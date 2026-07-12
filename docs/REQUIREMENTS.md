@@ -21,7 +21,7 @@ numbered requirements with their source and current status.
 | ID | Requirement | Source | Status |
 |---|---|---|---|
 | SCOPE-1 | etchy compares two revisions of the **same board's** fab output and shows + measures exactly what changed. | discovery | ✅ |
-| SCOPE-2 | Inputs are **Gerber RS-274X/X2**, **Excellon** drill, **pick-and-place** centroid files, and **schematic PDF** (pixel page-diff). | discovery, #115, #63 | ✅ (PDF CLI wiring 🔜 #63) |
+| SCOPE-2 | Inputs are **Gerber RS-274X/X2**, **Excellon** drill, **pick-and-place** centroid files, and **schematic PDF** (pixel page-diff, CLI + GUI on both platforms). | discovery, #115, #63 | ✅ |
 | SCOPE-3 | Surfaces are **CLI/CI first**, native **egui** GUI second; both ship. The GUI also builds to wasm for the web demo. | discovery | ✅ |
 | SCOPE-4 | **Non-goals** (hold the line): native CAD ingestion (Altium/IPC-2581/ODB++), net/connectivity diff, BOM/component diff, DRC. | discovery | standing |
 | SCOPE-5 | Native KiCad `.kicad_pcb` ingestion is an **accepted future goal**, post-1.0. | #122 | 📋 |
