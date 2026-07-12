@@ -1574,11 +1574,29 @@ impl ViewApp {
     /// order — the keyboard equivalent of clicking the next/previous layer. In
     /// PDF mode the same keys step through the pages instead (#63).
     fn step_layer(&mut self, delta: i32) {
-        if let Some(pv) = &mut self.pdf {
-            pv.selected = step_in_order(&pv.order, pv.selected, delta);
+        if self.pdf.is_some() {
+            let next = {
+                let pv = self.pdf.as_ref().unwrap();
+                step_in_order(&pv.order, pv.selected, delta)
+            };
+            self.select_pdf_page(next);
             return;
         }
         self.select(step_in_order(&self.order, self.selected, delta));
+    }
+
+    /// Select a PDF page. Unlike board layers — which share one physical world —
+    /// each sheet is its own drawing at origin [0,0], so rulers measured on one
+    /// page would render as stale, misleading annotations on another (#63
+    /// review). Switching pages clears the measurements.
+    fn select_pdf_page(&mut self, idx: usize) {
+        if let Some(pv) = &mut self.pdf {
+            if pv.selected != idx {
+                pv.selected = idx;
+                self.measurements.clear();
+                self.measure_pts.clear();
+            }
+        }
     }
 }
 
@@ -3992,35 +4010,41 @@ impl ViewApp {
 
     /// Settings → Colours: diff colours + per-theme canvas/grid (#53/#31/#52).
     fn settings_colours(&mut self, ui: &mut egui::Ui) {
-        Self::settings_header(ui, "Diff colours");
-        // One-click palette presets (#155); the pickers below still fine-tune.
-        // Rendered as segmented chips (#205) — "selected" is derived from the
-        // current colours, so this uses the frame directly, not `segmented`.
-        ui.horizontal(|ui| {
-            ui.label("Preset");
-            segmented_frame(ui, |ui| {
-                for (pal, label) in DiffPalette::ALL {
-                    let (a, r) = pal.colors();
-                    let active = self.col_added == a && self.col_removed == r;
-                    let text = if active {
-                        egui::RichText::new(label).color(C_CANVAS).strong()
-                    } else {
-                        egui::RichText::new(label)
-                    };
-                    if ui.selectable_label(active, text).clicked() {
-                        self.col_added = a;
-                        self.col_removed = r;
+        // The added/removed diff colours only drive the vector board render —
+        // the PDF overlay bakes its colours in the engine, so showing these in
+        // PDF mode would be dead controls (#63 review). Canvas & grid below
+        // still apply everywhere.
+        if self.pdf.is_none() {
+            Self::settings_header(ui, "Diff colours");
+            // One-click palette presets (#155); the pickers below still fine-tune.
+            // Rendered as segmented chips (#205) — "selected" is derived from the
+            // current colours, so this uses the frame directly, not `segmented`.
+            ui.horizontal(|ui| {
+                ui.label("Preset");
+                segmented_frame(ui, |ui| {
+                    for (pal, label) in DiffPalette::ALL {
+                        let (a, r) = pal.colors();
+                        let active = self.col_added == a && self.col_removed == r;
+                        let text = if active {
+                            egui::RichText::new(label).color(C_CANVAS).strong()
+                        } else {
+                            egui::RichText::new(label)
+                        };
+                        if ui.selectable_label(active, text).clicked() {
+                            self.col_added = a;
+                            self.col_removed = r;
+                        }
                     }
-                }
+                });
             });
-        });
-        ui.horizontal(|ui| {
-            ui.label("added");
-            ui.color_edit_button_srgba(&mut self.col_added);
-            ui.label("removed");
-            ui.color_edit_button_srgba(&mut self.col_removed);
-        });
-        ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("added");
+                ui.color_edit_button_srgba(&mut self.col_added);
+                ui.label("removed");
+                ui.color_edit_button_srgba(&mut self.col_removed);
+            });
+            ui.add_space(6.0);
+        }
         // The pickers edit the ACTIVE theme; switch dark/light to tune the other,
         // so a charcoal canvas never bleeds into light mode.
         let theme_name = match self.theme {
@@ -4969,9 +4993,8 @@ impl ViewApp {
             }
         });
         if let Some(idx) = select {
-            if let Some(pv) = &mut self.pdf {
-                pv.selected = idx;
-            }
+            // Route through select_pdf_page so page switches clear the rulers.
+            self.select_pdf_page(idx);
         }
     }
 

@@ -24,6 +24,20 @@ pub fn looks_like_pdf(bytes: &[u8]) -> bool {
 #[cfg(feature = "pdf")]
 pub const MAX_PAGE_PIXELS: u64 = 50_000_000;
 
+/// Per-DIMENSION ceiling: egui/egui_glow assert a texture side fits the GPU's
+/// `max_texture_side` and PANIC past it (native aborts, a wasm tab dies), and
+/// the area cap alone would pass a long thin sheet. 8192 is safe on the desktop
+/// GL / WebGL2 stacks etchy targets.
+#[cfg(feature = "pdf")]
+pub const MAX_TEXTURE_SIDE: u32 = 8192;
+
+/// Whole-document raster budget across BOTH PDFs. Every paired page retains
+/// old + new + overlay RGBA plus GPU textures (~4x total page bytes), so a
+/// many-page pair must fail loud up front rather than OOM mid-load. 250 MP
+/// ≈ 1 GB of page rasters (~55 A4 sheets per side at 150 DPI).
+#[cfg(feature = "pdf")]
+pub const MAX_DOC_PIXELS: u64 = 250_000_000;
+
 /// Whether a page exists in both revisions or only one. A sheet appearing or
 /// disappearing IS a change and must stay legible (trust: no silent misses).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,8 +244,11 @@ impl PdfView {
 pub fn build_pdf_view(old: &[u8], new: &[u8]) -> anyhow::Result<PdfView> {
     use anyhow::Context as _;
     let dpi = etchy_pdf::DEFAULT_DPI;
-    // Enforce the per-page pixel ceiling BEFORE rasterizing anything (same
-    // pre-flight the CLI runs).
+    // Enforce the pixel ceilings BEFORE rasterizing anything (the CLI's
+    // pre-flight plus the GUI-specific per-dimension and whole-document caps —
+    // an over-limit texture PANICS in egui_glow and a many-page pair OOMs, so
+    // both must fail loud here instead).
+    let mut doc_px: u64 = 0;
     for (label, bytes) in [("old", old), ("new", new)] {
         let dims = etchy_pdf::page_pixel_dims(bytes, dpi)
             .map_err(|e| anyhow::anyhow!("{e}"))
@@ -245,6 +262,14 @@ pub fn build_pdf_view(old: &[u8], new: &[u8]) -> anyhow::Result<PdfView> {
                     i + 1
                 );
             }
+            if *w > MAX_TEXTURE_SIDE || *h > MAX_TEXTURE_SIDE {
+                anyhow::bail!(
+                    "{label} PDF page {} would rasterize to {w}x{h} px at {dpi} DPI — a side \
+                     over the {MAX_TEXTURE_SIDE} px GPU texture limit; diff this pair with \
+                     the CLI at a lower --dpi",
+                    i + 1
+                );
+            }
             if px > MAX_PAGE_PIXELS {
                 anyhow::bail!(
                     "{label} PDF page {} would rasterize to {w}x{h} px (~{} MP) at {dpi} DPI, \
@@ -254,7 +279,16 @@ pub fn build_pdf_view(old: &[u8], new: &[u8]) -> anyhow::Result<PdfView> {
                     MAX_PAGE_PIXELS / 1_000_000
                 );
             }
+            doc_px += px;
         }
+    }
+    if doc_px > MAX_DOC_PIXELS {
+        anyhow::bail!(
+            "this PDF pair would rasterize to ~{} MP in total, over the viewer's ~{} MP \
+             budget — diff it with the CLI (per-page overlay PNGs) instead",
+            doc_px / 1_000_000,
+            MAX_DOC_PIXELS / 1_000_000
+        );
     }
     let old_imgs = etchy_pdf::rasterize(old, dpi)
         .map_err(|e| anyhow::anyhow!("{e}"))
