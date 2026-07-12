@@ -20,7 +20,7 @@ inputs:
     required: false
     default: "true"
   comment:
-    description: Post the Markdown summary as a sticky PR comment (needs pull-requests:write + GITHUB_TOKEN).
+    description: Post the layer-by-layer diff as a sticky PR comment. Only needs the consumer's job to grant pull-requests:write — the token is supplied automatically.
     required: false
     default: "false"
 
@@ -48,6 +48,10 @@ runs:
         DO_COMMENT: ${{ inputs.comment }}
         FAIL_ON_DIFF: ${{ inputs.fail-on-diff }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        # The workflow's own token, supplied by the action so the consumer wires
+        # nothing but `permissions: pull-requests: write`. github.token is not
+        # user-controlled, so it's safe to expand here.
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         # Reject dash-leading paths so a value can't be smuggled in as an etchy flag.
@@ -61,8 +65,16 @@ runs:
         printf '%s\n' "$md" >> "$GITHUB_STEP_SUMMARY"
         [ "$code" -eq 2 ] && { echo "etchy errored" >&2; exit 2; }
         echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-        if [ "$DO_COMMENT" = "true" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
-          printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --edit-last --body-file - \
-            || printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --body-file -
+        # Post/refresh the sticky PR comment with the layer-by-layer table. A
+        # comment failure (missing permission, not a PR event) is a warning, not
+        # a pipeline failure — never let reporting break the gate.
+        if [ "$DO_COMMENT" = "true" ] && [ -n "$PR_NUMBER" ]; then
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::comment:true but no token available — skipping PR comment"
+          else
+            printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --edit-last --body-file - \
+              || printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --body-file - \
+              || echo "::warning::could not post PR comment — grant the job pull-requests:write"
+          fi
         fi
         [ "$FAIL_ON_DIFF" = "true" ] && [ "$code" -eq 1 ] && exit 1 || true

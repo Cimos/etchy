@@ -41,6 +41,21 @@ Gate CI on the **magnitude** and **location** of change:
 etchy old/ new/ --gate-layers copper --fail-on-area 0.5
 ```
 
+**Every PR that touches Gerbers gets a layer-by-layer diff comment** — five lines
+add the Action to a repo (full recipe in
+[`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
+
+```yaml
+      - uses: Cimos/etchy@main
+        with:
+          old: fab/rev-a
+          new: fab/rev-b
+          comment: true
+```
+
+The job grants `pull-requests: write`; etchy supplies its own token and posts a
+sticky per-layer table (added / removed mm² and region counts).
+
 **PDF diff** — schematic PDFs get a page-by-page pixel diff (builds with
 `--features pdf`; release binaries ship it on):
 
