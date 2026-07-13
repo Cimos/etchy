@@ -136,6 +136,8 @@ const KIND_TAGS: &[&str] = &[
     "top-paste",
     "bottom-paste",
     "drill",
+    "drill-pth",
+    "drill-npth",
     "outline",
     "documentation",
     "placement",
@@ -461,8 +463,10 @@ fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<Gerb
         } else if etchy_core::looks_like_excellon(&bytes) {
             // Content wins over the filename: an Excellon file named e.g.
             // Board.TXT must land on the Drill layer, not "other" — otherwise
-            // `--gate-layers drill` would exclude a real drill change.
-            kind = etchy_core::LayerKind::Drill;
+            // `--gate-layers drill` would exclude a real drill change. Plating
+            // (PTH/NPTH) still comes from the filename so a misnamed-but-marked
+            // file (e.g. `board-NPTH.txt`) keeps its plating (#237).
+            kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
             std::sync::Arc::new(
                 etchy_core::resolve_excellon(&bytes)
                     .with_context(|| format!("processing drill layer {name}"))?,
@@ -704,7 +708,10 @@ mod tests {
         let drl = b"M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX10.0Y10.0\nM30\n".to_vec();
         let (board, _) = board_from_files(vec![("Board.TXT".to_string(), drl)]).unwrap();
         assert_eq!(board.layers.len(), 1);
-        assert_eq!(board.layers[0].kind, etchy_core::LayerKind::Drill);
+        assert_eq!(
+            board.layers[0].kind,
+            etchy_core::LayerKind::Drill(etchy_core::DrillKind::Unspecified)
+        );
     }
 
     #[test]
