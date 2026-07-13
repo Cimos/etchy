@@ -14,6 +14,7 @@ use etchy_core::{
     compare_detailed, coordinate_mismatch_warning, layer_svg, Board, DiffReport, GerberFormat,
     Layer, LayerStatus,
 };
+use serde::Serialize;
 
 #[cfg(feature = "pdf")]
 mod pdf;
@@ -248,6 +249,87 @@ impl Gate {
     fn tokens_desc(&self) -> String {
         self.filter.tokens.join(",")
     }
+
+    /// Resolve this gate against a report into the verdict that drives both the
+    /// exit code and the printed output — computed once so they cannot disagree.
+    fn verdict(&self, report: &DiffReport) -> GateVerdict {
+        let (area, regions) = self.totals(report);
+        GateVerdict {
+            configured: self.configured(),
+            passed: !self.fails(report),
+            differs: report.any_changes(),
+            scope: if self.filter.all {
+                "all layers".to_string()
+            } else {
+                self.tokens_desc()
+            },
+            changed_area_mm2: area,
+            changed_regions: regions,
+            fail_on_area: self.fail_on_area,
+            fail_on_regions: self.fail_on_regions,
+        }
+    }
+}
+
+/// The gate outcome, resolved against a report: the single source both the exit
+/// code and every output format read from (#258). Serializes as the `gate`
+/// object in JSON; `differs` is skipped there (it duplicates `any_changes`).
+#[derive(Serialize)]
+struct GateVerdict {
+    /// True when the gate is non-default (a threshold or a layer scope).
+    configured: bool,
+    /// True ⇔ the process exits 0. With a configured gate this can be true even
+    /// when geometry differs (the change was within the gate).
+    passed: bool,
+    /// Whether any geometry changed at all, regardless of the gate.
+    #[serde(skip)]
+    differs: bool,
+    /// Human description of the gated layer scope (`all layers`, `copper`, …).
+    scope: String,
+    /// Changed area / region count summed over the gated layers.
+    changed_area_mm2: f64,
+    changed_regions: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fail_on_area: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fail_on_regions: Option<u32>,
+}
+
+impl GateVerdict {
+    /// The `result:` line for the terminal summary, reconciled with the exit code
+    /// (#258). The confusing case is a *configured* gate that passes while
+    /// geometry differs: say so plainly rather than a bare "differences found"
+    /// next to an exit 0. Never hides that geometry differs.
+    fn summary_result_line(&self) -> String {
+        if !self.differs {
+            "result: no differences".to_string()
+        } else if self.passed {
+            // Geometry differs, but the gate downgraded the exit code to 0.
+            format!(
+                "result: differences found, but within the CI gate — gate PASS, exit 0 \
+                 ({}: {:.5} mm², {} regions)",
+                self.scope, self.changed_area_mm2, self.changed_regions
+            )
+        } else {
+            "result: differences found".to_string()
+        }
+    }
+
+    /// Append a one-line gate verdict to the Markdown summary when a gate is
+    /// configured, so a CI step-summary shows why the exit code is what it is.
+    fn append_markdown_note(&self, s: &mut String) {
+        if !self.configured {
+            return;
+        }
+        s.push_str(&format!(
+            "\n> **Gate {}** (exit {}) — {}: {:.4} mm², {} regions.\n",
+            if self.passed { "PASS" } else { "FAIL" },
+            if self.passed { 0 } else { 1 },
+            self.scope,
+            self.changed_area_mm2,
+            self.changed_regions,
+        ));
+    }
 }
 
 fn main() -> ExitCode {
@@ -261,20 +343,13 @@ fn main() -> ExitCode {
             return Exit::Error.into();
         }
     };
-    match run(&cli) {
-        Ok(RunOutcome::Board(report)) => {
-            // The CI gate decides the exit code (#M2). Default (no thresholds,
-            // all layers) = any change fails, preserving the 0/1 contract.
-            let fails = gate.fails(&report);
-            if gate.configured() {
-                eprintln!("{}", gate.describe(&report, fails));
-            }
-            if fails {
-                Exit::DiffFound.into()
-            } else {
-                Exit::NoDiff.into()
-            }
-        }
+    match run(&cli, &gate) {
+        // The CI gate decides the exit code (#M2). Default (no thresholds, all
+        // layers) = any change fails, preserving the 0/1 contract. `run` already
+        // computed the same verdict for the output, so the message and the exit
+        // code can never disagree (#258).
+        Ok(RunOutcome::Board { passed: true }) => Exit::NoDiff.into(),
+        Ok(RunOutcome::Board { passed: false }) => Exit::DiffFound.into(),
         // The PDF path owns its change verdict (no layer gate; any change = 1).
         Ok(RunOutcome::Pdf { any_changes: true }) => Exit::DiffFound.into(),
         Ok(RunOutcome::Pdf { any_changes: false }) => Exit::NoDiff.into(),
@@ -286,10 +361,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// What a run produced: a Gerber board diff (gated by [`Gate`]) or a PDF pixel
-/// diff (which has no layers/mm², so it carries only its change verdict).
+/// What a run produced: a Gerber board diff (with its gate verdict already
+/// applied — `passed` is the 0/1 outcome) or a PDF pixel diff (which has no
+/// layers/mm², so it carries only its change verdict).
 enum RunOutcome {
-    Board(DiffReport),
+    Board { passed: bool },
     Pdf { any_changes: bool },
 }
 
@@ -313,6 +389,20 @@ fn is_pdf_input(path: &Path) -> bool {
     }
 }
 
+/// Why the non-PDF side of a mismatched pair isn't a PDF. `is_pdf_input` folds
+/// "missing", "a directory" and "present but not a PDF" into one `false`, which
+/// made `etchy real.pdf missing.pdf` claim the missing file "is not a PDF" (#263).
+/// Split them so the message names the actual problem.
+fn describe_non_pdf(path: &Path) -> &'static str {
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "does not exist",
+        Err(_) => "is not readable",
+        Ok(m) if m.is_dir() => "is a directory, not a PDF",
+        // A real, readable file that lacks the `.pdf` extension or the %PDF magic.
+        Ok(_) => "is not a PDF",
+    }
+}
+
 /// The PDF branch, when this build carries it.
 #[cfg(feature = "pdf")]
 fn run_pdf(cli: &Cli) -> Result<bool> {
@@ -326,7 +416,7 @@ fn run_pdf(_cli: &Cli) -> Result<bool> {
     anyhow::bail!("this build lacks PDF support — rebuild with --features pdf")
 }
 
-fn run(cli: &Cli) -> Result<RunOutcome> {
+fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     // Git mode is EXPLICIT: --git, or a [SUBDIR] argument. It must never be
     // inferred from "OLD isn't a directory" — a mistyped folder name that happens
     // to resolve as a ref would silently diff committed revisions the user never
@@ -346,9 +436,10 @@ fn run(cli: &Cli) -> Result<RunOutcome> {
                 (&cli.new, &cli.old)
             };
             anyhow::bail!(
-                "both inputs must be PDFs to run a PDF diff — {} is a PDF but {} is not",
+                "both inputs must be PDFs to run a PDF diff — {} is a PDF but {} {}",
                 pdf.display(),
-                other.display()
+                other.display(),
+                describe_non_pdf(other),
             );
         }
         if old_pdf && new_pdf {
@@ -414,14 +505,81 @@ fn run(cli: &Cli) -> Result<RunOutcome> {
             .with_context(|| format!("writing HTML report to {}", path.display()))?;
     }
 
+    // Apply the CI gate once, here, so the printed verdict and the exit code are
+    // derived from the same computation (#258): stdout can no longer say
+    // "differences found" while the process exits 0 unqualified.
+    let verdict = gate.verdict(&report);
+    if verdict.configured {
+        eprintln!("{}", gate.describe(&report, !verdict.passed));
+    }
+
     // `--json` is the deprecated alias for `--format json`.
     let format = if cli.json { Format::Json } else { cli.format };
-    match format {
-        Format::Json => println!("{}", report.to_json_pretty()),
-        Format::Md => println!("{}", report.to_markdown_summary()),
-        Format::Summary => print_summary(&report),
+    let out = match format {
+        Format::Json => board_json(&report, &verdict),
+        Format::Md => {
+            let mut s = report.to_markdown_summary();
+            verdict.append_markdown_note(&mut s);
+            s
+        }
+        Format::Summary => {
+            // Warnings go to stderr (as before); the table + result to stdout.
+            if !report.warnings.is_empty() {
+                eprintln!("\nwarnings:");
+                for w in &report.warnings {
+                    eprintln!("  - {w}");
+                }
+            }
+            format_summary(&report, &verdict)
+        }
+    };
+    write_stdout(&out)?;
+    Ok(RunOutcome::Board {
+        passed: verdict.passed,
+    })
+}
+
+/// Write a finished report to stdout, treating a downstream pipe that closed
+/// early (`etchy … | head`) as a clean exit instead of the panic `println!`
+/// raises on a broken pipe (which escaped the 0/1/2 contract as exit 101 — #261).
+/// Any other write failure is a real error and propagates (exit 2), so a genuine
+/// I/O problem is never masked. Appends the trailing newline `println!` would.
+fn write_stdout(s: &str) -> Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    match lock
+        .write_all(s.as_bytes())
+        .and_then(|()| lock.write_all(b"\n"))
+        .and_then(|()| lock.flush())
+    {
+        Ok(()) => Ok(()),
+        // The consumer went away — there is nothing left to report to. Exit
+        // quietly with success, the conventional CLI behaviour for SIGPIPE.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+            std::process::exit(Exit::NoDiff as i32);
+        }
+        Err(e) => Err(e).context("writing to stdout"),
     }
-    Ok(RunOutcome::Board(report))
+}
+
+/// The Gerber JSON output with the CI-gate verdict attached (#258). The report's
+/// own fields are flattened in unchanged (schema unaffected for existing
+/// consumers); the added `gate` object lets a JSON consumer read the exit
+/// outcome directly — `gate.passed == true` ⇔ exit 0 — instead of inferring it
+/// from `any_changes`, which ignores the gate.
+fn board_json(report: &DiffReport, verdict: &GateVerdict) -> String {
+    #[derive(Serialize)]
+    struct BoardJson<'a> {
+        #[serde(flatten)]
+        report: &'a DiffReport,
+        gate: &'a GateVerdict,
+    }
+    serde_json::to_string_pretty(&BoardJson {
+        report,
+        gate: verdict,
+    })
+    .expect("BoardJson serializes")
 }
 
 /// Reject any single layer file larger than this before reading it into RAM. The
@@ -588,9 +746,15 @@ fn write_svgs(diff: &etchy_core::BoardDiff, dir: &Path) -> Result<usize> {
     Ok(written)
 }
 
-/// Human-readable summary table to stdout (changed layers first).
-fn print_summary(report: &DiffReport) {
-    println!(
+/// Human-readable summary table (changed layers first), returned as a string so
+/// it can flow through the broken-pipe-safe `write_stdout` (#261). Warnings are
+/// printed to stderr by the caller. The final `result:` line is reconciled with
+/// the gate/exit outcome (#258).
+fn format_summary(report: &DiffReport, verdict: &GateVerdict) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
         "{:<16} {:<13} {:>12} {:>12} {:>9} {:>9}",
         "layer", "status", "added_mm2", "removed_mm2", "+regions", "-regions"
     );
@@ -599,7 +763,8 @@ fn print_summary(report: &DiffReport) {
             Some(n) => format!("{}{}", l.kind, n),
             None => l.kind.to_string(),
         };
-        println!(
+        let _ = writeln!(
+            s,
             "{:<16} {:<13} {:>12.5} {:>12.5} {:>9} {:>9}",
             name,
             status_str(l.status),
@@ -610,7 +775,8 @@ fn print_summary(report: &DiffReport) {
         );
     }
     let t = &report.totals;
-    println!(
+    let _ = writeln!(
+        s,
         "\n{} of {} layer(s) changed; total +{:.5} mm² / -{:.5} mm² ({}+/{}- regions)",
         t.layers_changed,
         t.layers_total,
@@ -619,20 +785,8 @@ fn print_summary(report: &DiffReport) {
         t.added_regions,
         t.removed_regions
     );
-    if !report.warnings.is_empty() {
-        eprintln!("\nwarnings:");
-        for w in &report.warnings {
-            eprintln!("  - {w}");
-        }
-    }
-    println!(
-        "{}",
-        if report.any_changes() {
-            "result: differences found"
-        } else {
-            "result: no differences"
-        }
-    );
+    s.push_str(&verdict.summary_result_line());
+    s
 }
 
 fn status_str(s: etchy_core::LayerStatus) -> &'static str {
@@ -768,5 +922,61 @@ mod tests {
         // Copper has 3 changed regions; threshold 5 passes, 2 fails.
         assert!(!gate(None, Some(5), "copper").fails(&report()));
         assert!(gate(None, Some(2), "copper").fails(&report()));
+    }
+
+    #[test]
+    fn passing_gate_summary_does_not_contradict_exit_0() {
+        // #258: geometry differs (total ~0.52 mm²) but a 1.0 mm² gate passes, so
+        // the process exits 0. The summary must NOT read as a bare "differences
+        // found" beside that exit 0 — it must say the change was within the gate,
+        // while still admitting geometry differs.
+        let r = report();
+        let v = gate(Some(1.0), None, "all").verdict(&r);
+        assert!(v.passed, "the change is within the 1.0 mm² gate");
+        let summary = format_summary(&r, &v);
+        assert!(summary.contains("differences found"), "still admits a diff");
+        assert!(
+            summary.contains("gate PASS") && summary.contains("exit 0"),
+            "reconciles with the exit code: {summary}"
+        );
+    }
+
+    #[test]
+    fn failing_gate_summary_stays_plain() {
+        // A gate that fails (or the default gate) keeps the plain wording — it
+        // matches exit 1, so there is nothing to reconcile.
+        let r = report();
+        let v = gate(None, None, "all").verdict(&r);
+        assert!(!v.passed);
+        let summary = format_summary(&r, &v);
+        assert!(summary.contains("result: differences found"));
+        assert!(
+            !summary.contains("gate PASS"),
+            "no downgrade note: {summary}"
+        );
+    }
+
+    #[test]
+    fn no_change_summary_reads_no_differences() {
+        let r = DiffReport::new(vec![layer("top-copper", 0.0, 0)], Vec::new());
+        let v = gate(None, None, "all").verdict(&r);
+        assert!(v.passed);
+        assert!(format_summary(&r, &v).contains("result: no differences"));
+    }
+
+    #[test]
+    fn json_carries_the_gate_verdict() {
+        // #258: a JSON consumer must be able to read the exit outcome directly.
+        let r = report();
+        let v = gate(Some(1.0), None, "all").verdict(&r);
+        let json = board_json(&r, &v);
+        // The report's own contract is untouched (flattened in).
+        assert!(json.contains("\"schema_version\": 1"), "json: {json}");
+        assert!(json.contains("\"any_changes\": true"));
+        // …and the gate verdict is attached, matching the exit code.
+        assert!(json.contains("\"gate\""));
+        assert!(json.contains("\"configured\": true"));
+        assert!(json.contains("\"passed\": true"));
+        assert!(json.contains("\"fail_on_area\": 1.0"));
     }
 }
