@@ -3,7 +3,7 @@
 //! filesystem walk and pass strings/bytes here, keeping path/discovery policy in
 //! the surfaces while the (rename-tolerant) classification stays in one place.
 
-use crate::model::LayerKind;
+use crate::model::{DrillKind, LayerKind};
 
 /// Content sniff for a Gerber layer. RS-274X requires a format-spec (`%FS`) and a
 /// mode (`%MO`) statement, each its own `%…%` block on a line. We look for either
@@ -72,7 +72,7 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
     } else if has("B_PASTE") || has("B.PASTE") || e == "gbp" {
         LayerKind::BottomPaste
     } else if has("DRILL") || e == "drl" || e == "xln" {
-        LayerKind::Drill
+        LayerKind::Drill(drill_kind(stem))
     } else if has("EDGE") || has("OUTLINE") || e == "gko" || e == "gm1" || e == "gm" {
         LayerKind::Outline
     } else if e == "pos" || has("PICK") || has("PLACE") || has("CENTROID") || has("PNP") {
@@ -81,6 +81,28 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
         LayerKind::Placement
     } else {
         LayerKind::Other
+    }
+}
+
+/// Detect drill plating from a filename stem (#237). Fab tools mark plated vs
+/// non-plated holes with `PTH` / `NPTH` (KiCad `*-PTH.drl` / `*-NPTH.drl`, Altium
+/// split drills) or the spelled-out `PLATED` / `NON-PLATED`. NPTH is checked
+/// first because `NPTH` and `NON-PLATED` both contain the plated marker. A stem
+/// with no marker (a combined `.drl`, or Altium's `Board.TXT`) is `Unspecified`.
+pub fn drill_kind(stem: &str) -> DrillKind {
+    // Uppercase and fold `_`/space to `-` so `NON_PLATED`/`NON PLATED` read the
+    // same as `NON-PLATED`.
+    let s: String = stem
+        .to_ascii_uppercase()
+        .chars()
+        .map(|c| if c == '_' || c == ' ' { '-' } else { c })
+        .collect();
+    if s.contains("NPTH") || s.contains("NON-PLATED") || s.contains("NONPLATED") {
+        DrillKind::NonPlated
+    } else if s.contains("PTH") || s.contains("PLATED") {
+        DrillKind::Plated
+    } else {
+        DrillKind::Unspecified
     }
 }
 
@@ -138,8 +160,11 @@ mod tests {
         // Extension wins over a "DRILL" in the stem: a drill *drawing* is docs,
         // not the actual (Excellon) drill layer.
         assert_eq!(classify("DrillDrawing", "gd1"), LayerKind::Documentation);
-        // The real Excellon drill file is still Drill.
-        assert_eq!(classify("board-PTH", "drl"), LayerKind::Drill);
+        // The real Excellon drill file is still Drill (plated here).
+        assert_eq!(
+            classify("board-PTH", "drl"),
+            LayerKind::Drill(DrillKind::Plated)
+        );
         // Altium profile/mechanical outline extensions still map to Outline, and
         // paste (.gtp/.gbp) is not confused with pad master (.gpt/.gpb).
         assert_eq!(classify("board", "gm"), LayerKind::Outline);
@@ -187,6 +212,36 @@ mod tests {
         assert_eq!(inner_copper_index("F_CU"), None);
         assert_eq!(inner_copper_index("IN3_CU"), Some(3));
         assert_eq!(inner_copper_index("IN10.CU"), Some(10));
+    }
+
+    #[test]
+    fn classify_distinguishes_pth_npth_drills() {
+        // #237: plated / non-plated / generic drill files get distinct kinds so
+        // pairing can only match like with like. NPTH must not be read as PTH
+        // (the `NPTH` string contains `PTH`).
+        assert_eq!(
+            classify("board-PTH", "drl"),
+            LayerKind::Drill(DrillKind::Plated)
+        );
+        assert_eq!(
+            classify("board-NPTH", "drl"),
+            LayerKind::Drill(DrillKind::NonPlated)
+        );
+        assert_eq!(
+            classify("board-NPTH", "drl").kind_str(),
+            "drill-npth",
+            "gate token `drill` still matches (contains check), but the tag is specific"
+        );
+        // A combined drill file with no plating marker stays generic.
+        assert_eq!(
+            classify("board", "drl"),
+            LayerKind::Drill(DrillKind::Unspecified)
+        );
+        // Spelled-out and underscore/space variants.
+        assert_eq!(drill_kind("board-NON_PLATED"), DrillKind::NonPlated);
+        assert_eq!(drill_kind("board Non Plated"), DrillKind::NonPlated);
+        assert_eq!(drill_kind("board-plated"), DrillKind::Plated);
+        assert_eq!(drill_kind("Board.TXT-ish"), DrillKind::Unspecified);
     }
 
     #[test]

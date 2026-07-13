@@ -216,7 +216,7 @@ fn board_from_files(
             }
             etchy_core::polygonize_gerber(bytes).ok()
         } else if etchy_core::looks_like_excellon(bytes) {
-            kind = etchy_core::LayerKind::Drill;
+            kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
             etchy_core::resolve_excellon(bytes).ok()
         } else if etchy_core::looks_like_placement(bytes) {
             kind = etchy_core::LayerKind::Placement;
@@ -1008,7 +1008,7 @@ fn layer_type_color(kind: etchy_core::LayerKind, theme: Theme) -> Color32 {
             Color32::from_rgb(0xb4, 0xb4, 0xbe),
             Color32::from_rgb(0x6b, 0x6f, 0x78),
         ),
-        Drill => (
+        Drill(_) => (
             Color32::from_rgb(0x7a, 0x8a, 0xa0),
             Color32::from_rgb(0x4a, 0x55, 0x68),
         ),
@@ -1765,7 +1765,9 @@ fn short_layer_name(kind: etchy_core::LayerKind) -> String {
         TopCopper | TopMask | TopSilk | TopPaste => "top".to_string(),
         BottomCopper | BottomMask | BottomSilk | BottomPaste => "bottom".to_string(),
         InnerCopper(n) => format!("inner {n}"),
-        Drill => "drill".to_string(),
+        Drill(etchy_core::DrillKind::Plated) => "drill (pth)".to_string(),
+        Drill(etchy_core::DrillKind::NonPlated) => "drill (npth)".to_string(),
+        Drill(etchy_core::DrillKind::Unspecified) => "drill".to_string(),
         Outline => "outline".to_string(),
         Documentation => "docs".to_string(),
         Placement => "placement".to_string(),
@@ -1781,7 +1783,7 @@ fn layer_group(kind: etchy_core::LayerKind) -> LayerGroup {
         TopMask | BottomMask => LayerGroup::Mask,
         TopSilk | BottomSilk => LayerGroup::Silk,
         TopPaste | BottomPaste => LayerGroup::Paste,
-        Drill => LayerGroup::Drill,
+        Drill(_) => LayerGroup::Drill,
         Outline | Documentation | Placement => LayerGroup::Mechanical,
         Other => LayerGroup::Other,
     }
@@ -7665,7 +7667,18 @@ mod tests {
         assert_eq!(short_layer_name(LayerKind::TopCopper), "top");
         assert_eq!(short_layer_name(LayerKind::BottomMask), "bottom");
         assert_eq!(short_layer_name(LayerKind::InnerCopper(2)), "inner 2");
-        assert_eq!(short_layer_name(LayerKind::Drill), "drill");
+        assert_eq!(
+            short_layer_name(LayerKind::Drill(etchy_core::DrillKind::Unspecified)),
+            "drill"
+        );
+        assert_eq!(
+            short_layer_name(LayerKind::Drill(etchy_core::DrillKind::Plated)),
+            "drill (pth)"
+        );
+        assert_eq!(
+            short_layer_name(LayerKind::Drill(etchy_core::DrillKind::NonPlated)),
+            "drill (npth)"
+        );
         assert_eq!(short_layer_name(LayerKind::Other), "other");
     }
 
@@ -7676,7 +7689,10 @@ mod tests {
         assert_eq!(layer_group(LayerKind::BottomMask), LayerGroup::Mask);
         assert_eq!(layer_group(LayerKind::TopSilk), LayerGroup::Silk);
         assert_eq!(layer_group(LayerKind::BottomPaste), LayerGroup::Paste);
-        assert_eq!(layer_group(LayerKind::Drill), LayerGroup::Drill);
+        assert_eq!(
+            layer_group(LayerKind::Drill(etchy_core::DrillKind::Plated)),
+            LayerGroup::Drill
+        );
         assert_eq!(layer_group(LayerKind::Outline), LayerGroup::Mechanical);
         assert_eq!(layer_group(LayerKind::Other), LayerGroup::Other);
     }

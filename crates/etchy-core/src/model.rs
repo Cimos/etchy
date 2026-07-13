@@ -10,6 +10,21 @@ use std::sync::Arc;
 use crate::error::{EngineError, Result};
 use crate::geo::{PolygonSet, NM_PER_MM};
 
+/// Plating of an Excellon drill file. Real fab packs routinely ship plated and
+/// non-plated holes as separate files (`*-PTH.drl` / `*-NPTH.drl`, Altium split
+/// drills). Carrying the plating in [`LayerKind::Drill`] keeps them distinct
+/// identities so pairing can only match like with like (#237) — a PTH file can
+/// never pair against an NPTH file across two revisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DrillKind {
+    /// Plated through-holes (PTH).
+    Plated,
+    /// Non-plated through-holes (NPTH).
+    NonPlated,
+    /// Plating not indicated by the filename (a combined/generic drill file).
+    Unspecified,
+}
+
 /// Rename-tolerant layer identity used to pair the two revisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayerKind {
@@ -22,7 +37,7 @@ pub enum LayerKind {
     BottomSilk,
     TopPaste,
     BottomPaste,
-    Drill,
+    Drill(DrillKind),
     Outline,
     /// Fabrication documentation (drill drawing/guide, pad master, assembly).
     /// Not a physical board layer — never diffed as copper; kept distinct from
@@ -54,7 +69,9 @@ impl LayerKind {
             LayerKind::BottomSilk => "bottom-silk",
             LayerKind::TopPaste => "top-paste",
             LayerKind::BottomPaste => "bottom-paste",
-            LayerKind::Drill => "drill",
+            LayerKind::Drill(DrillKind::Plated) => "drill-pth",
+            LayerKind::Drill(DrillKind::NonPlated) => "drill-npth",
+            LayerKind::Drill(DrillKind::Unspecified) => "drill",
             LayerKind::Outline => "outline",
             LayerKind::Documentation => "documentation",
             LayerKind::Placement => "placement",
@@ -82,7 +99,17 @@ impl LayerKind {
             LayerKind::BottomSilk => (6, 0),
             LayerKind::TopPaste => (7, 0),
             LayerKind::BottomPaste => (8, 0),
-            LayerKind::Drill => (9, 0),
+            // Group all drill files together in the report, plated before
+            // non-plated before generic, so a pack with several drill files reads
+            // in a stable order.
+            LayerKind::Drill(d) => (
+                9,
+                match d {
+                    DrillKind::Plated => 0,
+                    DrillKind::NonPlated => 1,
+                    DrillKind::Unspecified => 2,
+                },
+            ),
             LayerKind::Outline => (10, 0),
             LayerKind::Documentation => (11, 0),
             LayerKind::Placement => (12, 0),
@@ -574,11 +601,59 @@ mod tests {
     }
 
     #[test]
+    fn pth_and_npth_drills_never_cross_pair() {
+        // #237: a plated (PTH) and a non-plated (NPTH) drill file, with the
+        // board/rev name embedded (so exact-name pairing can't help) and listed
+        // in opposite encounter order across the two revisions. They must pair
+        // like-with-like — PTH↔PTH, NPTH↔NPTH — never a plated↔non-plated pair
+        // reporting a large meaningless "changed" drill layer.
+        use crate::naming::classify;
+        let mk = |name: &str| {
+            let (stem, ext) = name.rsplit_once('.').unwrap();
+            Layer {
+                kind: classify(stem, ext),
+                label: name.into(),
+                geometry: Arc::new(PolygonSet::new(vec![vec![vec![
+                    Pt::new(0, 0),
+                    Pt::new(1_000_000, 0),
+                    Pt::new(1_000_000, 1_000_000),
+                    Pt::new(0, 1_000_000),
+                ]]])),
+            }
+        };
+        let old = Board {
+            layers: vec![mk("revA-NPTH.drl"), mk("revA-PTH.drl")],
+        };
+        let new = Board {
+            layers: vec![mk("revB-PTH.drl"), mk("revB-NPTH.drl")],
+        };
+        let pairs = pair_layers(&old, &new);
+        let is_npth = |l: &str| l.contains("NPTH");
+        let both: Vec<_> = pairs
+            .iter()
+            .filter_map(|p| match p {
+                LayerPairing::Both { old, new, .. } => Some((old, new)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(both.len(), 2, "both drill files should pair, none dropped");
+        for (o, n) in both {
+            assert_eq!(
+                is_npth(&o.label),
+                is_npth(&n.label),
+                "plating must match across the pair: {} vs {}",
+                o.label,
+                n.label
+            );
+        }
+    }
+
+    #[test]
     fn pairs_report_unmatched_layers() {
         let a = Board {
             layers: vec![
                 layer(LayerKind::TopCopper, [0, 0, 1, 1]),
-                layer(LayerKind::Drill, [0, 0, 1, 1]),
+                layer(LayerKind::Drill(DrillKind::Unspecified), [0, 0, 1, 1]),
             ],
         };
         let b = Board {
