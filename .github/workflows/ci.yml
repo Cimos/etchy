@@ -83,22 +83,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --all-targets
 
-      # TRUST gate: populate the golden corpus so the deep cross-validation test
-      # (committed_corpus_matches_ground_truth) runs against the ground truth rather
-      # than skipping. Must fail loud — a bare `python` is absent on the runners, so
-      # use python3 and let a failure fail the job (no continue-on-error). The guard
-      # below then refuses to proceed if the corpus dirs came out empty, so the
-      # cross-check can never be silently skipped in CI.
-      - name: Generate golden corpus
-        run: python3 corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
-
-      - name: Verify golden corpus populated (no silent skip)
-        run: |
-          set -euo pipefail
-          test -f corpus/synthetic/ground_truth.json
-          test -n "$(ls -A corpus/synthetic/revA 2>/dev/null)"
-          test -n "$(ls -A corpus/synthetic/revB 2>/dev/null)"
-
+      # The golden-corpus cross-validation runs for real in the ubuntu `test` job
+      # (which generates the corpus with python3). This cross-OS leg only needs to
+      # confirm the workspace builds and tests pass on Windows/macOS, so it does not
+      # regenerate the corpus here — that step relied on python3, which the
+      # GitHub-hosted Windows runner doesn't provide, and on a bash-only guard.
       - name: Test
         run: cargo test --workspace
 
