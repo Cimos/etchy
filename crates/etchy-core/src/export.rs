@@ -82,12 +82,22 @@ fn layer_bbox(layer: &LayerView) -> Option<[i64; 4]> {
     bb
 }
 
-/// Render one paired layer's diff to a standalone SVG document string.
+/// Render one paired layer's diff to a standalone SVG document string, using the
+/// etchy default added/removed colours. The CLI's output is stable through this
+/// entry point; a caller with a user-chosen palette uses [`layer_svg_with_colors`].
 ///
 /// Pure: no I/O. The CLI writes the result to `<layer>.svg`. The viewBox is in
 /// mm, computed from the layer's combined bounding box; an empty layer yields a
 /// minimal valid (1×1) document so callers never have to special-case it.
 pub fn layer_svg(layer: &LayerView) -> String {
+    layer_svg_with_colors(layer, ADDED_FILL, REMOVED_FILL)
+}
+
+/// Like [`layer_svg`], but with caller-supplied fills for added/removed copper so
+/// an export matches the diff colours shown on screen (#244) — including the
+/// colour-safe preset (#155). `added_fill`/`removed_fill` are any valid SVG fill
+/// (e.g. `"#3b82f6"`); the unchanged base stays the faint grey [`BASE_FILL`].
+pub fn layer_svg_with_colors(layer: &LayerView, added_fill: &str, removed_fill: &str) -> String {
     let bb = layer_bbox(layer).unwrap_or([0, 0, NM_PER_MM, NM_PER_MM]);
     let [min_x, min_y, max_x, max_y] = bb;
     let w_nm = (max_x - min_x).max(1);
@@ -95,8 +105,8 @@ pub fn layer_svg(layer: &LayerView) -> String {
 
     let mut body = Vec::new();
     body.extend(paths_for(&layer.new, BASE_FILL, max_y));
-    body.extend(paths_for(&layer.removed, REMOVED_FILL, max_y));
-    body.extend(paths_for(&layer.added, ADDED_FILL, max_y));
+    body.extend(paths_for(&layer.removed, removed_fill, max_y));
+    body.extend(paths_for(&layer.added, added_fill, max_y));
 
     // viewBox: min-x/min-y in mm (Y origin shifts to 0 after the flip), width/height in mm.
     let view_box = format!("{} {} {} {}", mm(min_x), mm(0), mm(w_nm), mm(h_nm));
@@ -287,6 +297,25 @@ mod tests {
         // evenodd so holes fall out.
         assert!(svg.contains("fill-rule=\"evenodd\""));
         assert!(svg.trim_start().starts_with("<svg"));
+    }
+
+    #[test]
+    fn layer_svg_with_colors_uses_the_supplied_fills() {
+        // A colour-safe user palette (#155): blue added / orange removed. The
+        // export must carry those, not the etchy default red/green (#244).
+        let added = "#3b82f6";
+        let removed = "#f59e0b";
+        let svg = layer_svg_with_colors(&synthetic_layer(), added, removed);
+        assert!(svg.contains(added), "added uses the supplied colour");
+        assert!(svg.contains(removed), "removed uses the supplied colour");
+        // The defaults must NOT leak into the diff fills when a palette is given.
+        assert!(!svg.contains(ADDED_FILL), "default green must not appear");
+        assert!(!svg.contains(REMOVED_FILL), "default red must not appear");
+        // The unchanged base stays the neutral grey regardless of palette.
+        assert!(svg.contains(BASE_FILL), "base fill unchanged");
+        // `layer_svg` stays on the etchy defaults (CLI output is stable).
+        let default_svg = layer_svg(&synthetic_layer());
+        assert!(default_svg.contains(ADDED_FILL) && default_svg.contains(REMOVED_FILL));
     }
 
     #[test]
