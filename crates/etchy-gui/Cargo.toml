@@ -55,8 +55,10 @@ serde.workspace = true
 zip = { version = "4.2.0", default-features = false, features = ["deflate"] }
 # File/folder dialog + browser file picker (#120). rfd has first-class wasm
 # support, so it's all-targets: gtk3 backend on Linux, the HTML file API on web.
-# MIT — cargo-deny clean.
-rfd = "0.17.2"
+# `file-handle-inner` exposes the underlying `web_sys::File` so the web picker can
+# read `File.size` and reject an oversized upload before pulling it into wasm
+# memory (#247). MIT — cargo-deny clean.
+rfd = { version = "0.17.2", features = ["file-handle-inner"] }
 # Decode the embedded brand-icon PNG for the top-bar mark (#191). Already in the
 # tree via eframe/arboard, so this adds no new crate; default-features off + png
 # keeps it lean, and the pure-Rust png decoder works on wasm too.
@@ -80,6 +82,7 @@ web-sys = { version = "0.3", features = [
     "HtmlCanvasElement",
     "Element",
     "Blob",
+    "File",
     "Url",
     "HtmlAnchorElement",
 ] }

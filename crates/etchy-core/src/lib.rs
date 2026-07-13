@@ -30,7 +30,7 @@ pub mod view;
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
 pub use excellon::{looks_like_excellon, resolve_excellon};
-pub use export::{board_areas_csv, board_report_html, layer_svg};
+pub use export::{board_areas_csv, board_report_html, layer_svg, layer_svg_with_colors};
 pub use geo::{
     quantize_mm, simplify_contour, triangulate_shape, Aperture, Contour, Polarity, PolygonSet,
     Primitive, Pt, Shape, GRID_NM, NM_PER_MM,
