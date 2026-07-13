@@ -144,8 +144,10 @@ pub enum LayerPairing<'a> {
 /// (`revA-F_Cu.gbr` vs `revB-F_Cu.gbr`) — pairing by name would spuriously report
 /// every layer as removed + added. Within a kind that has several layers (e.g.
 /// mechanical "other" layers), exact-filename matches pair first and the rest pair
-/// positionally by stack order, so distinct same-kind layers are never collapsed
-/// onto one. A layer with no counterpart is `OnlyOld`/`OnlyNew` (a legitimately
+/// positionally by stack order — but a positional guess is only accepted when the
+/// two layers' extents plausibly overlap (see [`positional_pair_plausible`]), so
+/// two unrelated same-kind files are never silently collapsed onto one "changed"
+/// layer (#238). A layer with no counterpart is `OnlyOld`/`OnlyNew` (a legitimately
 /// added/removed layer, not an error).
 pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> {
     // Distinct kinds present in either revision, ordered by stack position.
@@ -186,7 +188,12 @@ pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> 
         }
 
         // Pass 2: pair the remainder positionally (rename-tolerant); report any
-        // leftover on either side as an added/removed layer.
+        // leftover on either side as an added/removed layer. A positional pair is
+        // only a *guess* (it matched by stack order, not by name), so it must pass
+        // a generous plausibility gate — two same-kind files that sit in disjoint
+        // regions of the board can't be one physical layer's two revisions, so we
+        // report them as an honest removed + added rather than one misleading
+        // "changed" layer (#238).
         let mut leftover_new = news
             .iter()
             .enumerate()
@@ -195,11 +202,18 @@ pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> 
         let mut unmatched_old = unmatched_old.into_iter();
         loop {
             match (unmatched_old.next(), leftover_new.next()) {
-                (Some(o), Some(n)) => out.push(LayerPairing::Both {
-                    kind,
-                    old: o,
-                    new: n,
-                }),
+                (Some(o), Some(n)) => {
+                    if positional_pair_plausible(o, n) {
+                        out.push(LayerPairing::Both {
+                            kind,
+                            old: o,
+                            new: n,
+                        });
+                    } else {
+                        out.push(LayerPairing::OnlyOld(o));
+                        out.push(LayerPairing::OnlyNew(n));
+                    }
+                }
                 (Some(o), None) => out.push(LayerPairing::OnlyOld(o)),
                 (None, Some(n)) => out.push(LayerPairing::OnlyNew(n)),
                 (None, None) => break,
@@ -207,6 +221,43 @@ pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> 
         }
     }
     out
+}
+
+/// Generous plausibility gate for a **positional** (rename-tolerant) pairing:
+/// two same-kind layers that matched only by stack order — not by filename —
+/// must still plausibly be the same physical layer on the same board. Same-board
+/// revisions keep a layer in roughly the same place, so a genuine pair's filled
+/// extents overlap heavily; two unrelated files sharing a kind bucket (several
+/// mechanical/`Other` layers, or split drill files per #237) tend to sit in
+/// disjoint regions. When the extents barely overlap we refuse the pair, so the
+/// diff reports an honest removed + added instead of one misleading "changed"
+/// layer (#238).
+///
+/// This gates *only* positional guesses — exact-filename matches are intentional
+/// and never checked. Empty or degenerate geometry can't be judged geometrically,
+/// so it passes (an empty diff is harmless and never a silent miss).
+fn positional_pair_plausible(old: &Layer, new: &Layer) -> bool {
+    let (Some(o), Some(n)) = (old.geometry.bbox_nm(), new.geometry.bbox_nm()) else {
+        return true; // one side has no geometry — nothing to compare on
+    };
+    // Intersection of the two axis-aligned bounding boxes.
+    let ix0 = o[0].max(n[0]);
+    let iy0 = o[1].max(n[1]);
+    let ix1 = o[2].min(n[2]);
+    let iy1 = o[3].min(n[3]);
+    if ix1 <= ix0 || iy1 <= iy0 {
+        return false; // disjoint (or edge-touching) extents — not one layer
+    }
+    let inter = (ix1 - ix0) as i128 * (iy1 - iy0) as i128;
+    let area = |bb: [i64; 4]| (bb[2] - bb[0]) as i128 * (bb[3] - bb[1]) as i128;
+    let smaller = area(o).min(area(n));
+    if smaller <= 0 {
+        return true; // a zero-width bbox can't be judged by overlap
+    }
+    // Generous: the overlap need only reach 10% of the smaller layer's extent.
+    // Tuned to catch clearly-unrelated (near-disjoint) files while never splitting
+    // a heavily-edited but co-located revision of the same layer.
+    inter * 10 >= smaller
 }
 
 /// Coarse same-board plausibility check: the two revisions' whole-board union
@@ -450,6 +501,75 @@ mod tests {
             1,
             "same kind, different names → one paired layer"
         );
+        assert!(matches!(pairs[0], LayerPairing::Both { .. }));
+    }
+
+    fn labeled(kind: LayerKind, label: &str, sq: [i64; 4]) -> Layer {
+        let mut l = layer(kind, sq);
+        l.label = label.into();
+        l
+    }
+
+    #[test]
+    fn positional_pairing_rejects_disjoint_layers() {
+        // Two same-kind "other" layers whose filenames differ (so the exact-name
+        // pass misses) and whose geometry sits in disjoint regions of the board.
+        // Positional order alone would pair them into one misleading "changed"
+        // layer; the guard must instead report an honest removed + added (#238).
+        let mm = 1_000_000;
+        let a = Board {
+            layers: vec![labeled(
+                LayerKind::Other,
+                "rev1-notes.gbr",
+                [0, 0, 40 * mm, 40 * mm],
+            )],
+        };
+        let b = Board {
+            layers: vec![labeled(
+                LayerKind::Other,
+                "rev2-keepout.gbr",
+                [60 * mm, 60 * mm, 100 * mm, 100 * mm],
+            )],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(
+            pairs.len(),
+            2,
+            "disjoint unrelated same-kind layers must not collapse onto one"
+        );
+        assert!(
+            pairs.iter().any(|p| matches!(p, LayerPairing::OnlyOld(_))),
+            "the old-only layer must be reported as removed"
+        );
+        assert!(
+            pairs.iter().any(|p| matches!(p, LayerPairing::OnlyNew(_))),
+            "the new-only layer must be reported as added"
+        );
+    }
+
+    #[test]
+    fn positional_pairing_keeps_co_located_rename() {
+        // Guard against false splits: a genuinely-revised same-kind layer keeps
+        // its filename different across revisions but stays in roughly the same
+        // place. Overlapping extents must still pair (rename tolerance), even when
+        // the geometry changed a lot.
+        let mm = 1_000_000;
+        let a = Board {
+            layers: vec![labeled(
+                LayerKind::Other,
+                "rev1-mech.gbr",
+                [0, 0, 50 * mm, 50 * mm],
+            )],
+        };
+        let b = Board {
+            layers: vec![labeled(
+                LayerKind::Other,
+                "rev2-mech.gbr",
+                [2 * mm, 2 * mm, 48 * mm, 55 * mm],
+            )],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(pairs.len(), 1, "co-located rename must still pair");
         assert!(matches!(pairs[0], LayerPairing::Both { .. }));
     }
 
