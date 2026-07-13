@@ -375,11 +375,14 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
 
     // `--json` is the deprecated alias for `--format json`, same as the geometry path.
     let format = if cli.json { Format::Json } else { cli.format };
-    match format {
-        Format::Json => println!("{}", report.to_json_pretty()),
-        Format::Md => println!("{}", report.to_markdown()),
-        Format::Summary => println!("{}", report.to_summary()),
-    }
+    let out = match format {
+        Format::Json => report.to_json_pretty(),
+        Format::Md => report.to_markdown(),
+        Format::Summary => report.to_summary(),
+    };
+    // Route through the shared writer so a closed pipe (`… | head`) exits cleanly
+    // instead of panicking (#261).
+    crate::write_stdout(&out)?;
     Ok(report.any_changes)
 }
 

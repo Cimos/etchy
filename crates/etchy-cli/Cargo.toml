@@ -17,12 +17,15 @@ path = "src/main.rs"
 # of the default build so the geometric-diff binary keeps its lean dep tree and
 # low MSRV. Turn on with `--features pdf` (release binaries ship it on).
 default = []
-pdf = ["dep:etchy-pdf", "etchy-pdf/pdf", "dep:serde", "dep:serde_json"]
+pdf = ["dep:etchy-pdf", "etchy-pdf/pdf"]
 
 [dependencies]
 etchy-core = { path = "../etchy-core" }
 etchy-pdf = { path = "../etchy-pdf", optional = true }
 clap.workspace = true
 anyhow.workspace = true
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+# serde/serde_json are always on: etchy-core already pulls them in, and the
+# geometry JSON output attaches the CI-gate verdict (so the message and exit
+# code can never disagree — #258).
+serde = { workspace = true }
+serde_json = { workspace = true }
