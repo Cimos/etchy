@@ -124,13 +124,13 @@ mod imp {
     }
 
     impl PdfDiff {
-        /// Any pixel change on any paired page, or a page-count change.
+        /// Any pixel change on any paired page, or a page-count change. Uses raw
+        /// presence ([`etchy_core::ImageDiffStats::has_any_change`]), not `changed_fraction`,
+        /// so a change hidden by the noise floor still counts — the floor never
+        /// causes a silent "no differences" (the trust bar).
         pub fn any_changes(&self) -> bool {
             self.old_pages != self.new_pages
-                || self
-                    .pages
-                    .iter()
-                    .any(|p| p.diff.stats.changed_fraction > 0.0)
+                || self.pages.iter().any(|p| p.diff.stats.has_any_change())
         }
     }
 
@@ -272,6 +272,30 @@ mod pdf_tests {
         assert_eq!((imgs[0].width, imgs[0].height), (200, 200));
         // Junk bytes fail loud, same as rasterize.
         assert!(page_pixel_dims(b"not a pdf", 72.0).is_err());
+    }
+
+    #[test]
+    fn a_sub_floor_change_still_counts_as_a_difference() {
+        // #260: even with an aggressive noise floor, a genuine change smaller than
+        // the floor must still make the document read as changed — never a silent
+        // "no differences".
+        let old = one_square_pdf(10, 10);
+        let new = one_square_pdf(60, 60);
+        let opts = ImageDiffOptions {
+            min_region_px: u32::MAX, // hide everything from the tallies
+            ..Default::default()
+        };
+        let d = diff_pdfs(&old, &new, 72.0, &opts).expect("diff");
+        let s = &d.pages[0].diff.stats;
+        assert_eq!(
+            s.added_px, 0,
+            "everything below the floor, hidden from tallies"
+        );
+        assert!(s.suppressed_px > 0, "but the change is surfaced");
+        assert!(
+            d.any_changes(),
+            "a hidden change is still a change (no silent miss)"
+        );
     }
 
     #[test]

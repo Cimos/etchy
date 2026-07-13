@@ -96,6 +96,14 @@ struct Cli {
     /// into this directory (created if it does not exist).
     #[arg(long, value_name = "DIR")]
     out: Option<PathBuf>,
+    /// PDF inputs only: hide changed regions smaller than this many connected
+    /// pixels from the overlay and tallies as likely anti-aliasing noise
+    /// (default 1 = hide nothing). Hidden regions are still reported and still
+    /// count as a difference — the floor never causes a silent "no differences".
+    /// Raise it to declutter; lower DPI can shrink a real feature to 1px, so 1
+    /// is the safe default.
+    #[arg(long, value_name = "N")]
+    min_region_px: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -346,8 +354,8 @@ fn run(cli: &Cli) -> Result<RunOutcome> {
         }
     }
     // The PDF-only flags must not be silently ignored on the geometry path.
-    if cli.dpi.is_some() || cli.out.is_some() {
-        anyhow::bail!("--dpi / --out apply to PDF inputs only");
+    if cli.dpi.is_some() || cli.out.is_some() || cli.min_region_px.is_some() {
+        anyhow::bail!("--dpi / --out / --min-region-px apply to PDF inputs only");
     }
 
     let (old, of, new, nf) = if git_mode {
