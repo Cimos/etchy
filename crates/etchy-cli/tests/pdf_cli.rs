@@ -134,6 +134,53 @@ mod with_pdf {
     }
 
     #[test]
+    fn min_region_px_floor_is_surfaced_and_still_counts_as_a_change() {
+        // A huge floor hides every changed region from the overlay/tallies, but the
+        // change must still exit 1 and the summary must say what was hidden — the
+        // noise floor never turns a real change into "no differences" (#260).
+        let out = etchy()
+            .arg("--min-region-px")
+            .arg("100000000")
+            .arg(fixture("old.pdf"))
+            .arg(fixture("new.pdf"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "a change hidden by the floor still exits 1"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("differences found"), "summary: {stdout}");
+        assert!(
+            stdout.contains("noise floor") && stdout.contains("min-region-px"),
+            "the hidden change is surfaced: {stdout}"
+        );
+    }
+
+    #[test]
+    fn min_region_px_on_the_gerber_path_is_a_loud_error() {
+        // A PDF-only flag on the geometry path must fail loud, not silently no-op.
+        let a = scratch("gerber-a");
+        let b = scratch("gerber-b");
+        let out = etchy()
+            .arg("--min-region-px")
+            .arg("4")
+            .arg(&a)
+            .arg(&b)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--min-region-px") && stderr.contains("PDF"),
+            "stderr points at the PDF-only flag: {stderr}"
+        );
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
     fn oversized_dpi_hits_the_pixel_cap_loudly() {
         // An A4-ish sheet at 20000 DPI is far over the ~50 MP per-page cap.
         let out = etchy()

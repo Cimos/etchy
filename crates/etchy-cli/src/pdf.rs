@@ -58,14 +58,21 @@ pub struct PdfPageReport {
     pub total_px: u64,
     pub changed_fraction: f64,
     pub regions: u32,
+    /// Pixels in changed regions hidden by the `--min-region-px` noise floor.
+    /// `0` at the default floor. Reported so a hidden change is never invisible.
+    pub suppressed_px: u64,
+    /// Number of sub-floor changed regions the noise floor hid.
+    pub suppressed_regions: u32,
     /// Filename of the overlay PNG written under `--out`, when given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay_png: Option<String>,
 }
 
 impl PdfPageReport {
+    /// Includes sub-floor (`suppressed_*`) changes: a change hidden from the
+    /// overlay by the noise floor is still a change (the trust bar).
     fn changed(&self) -> bool {
-        self.present != Presence::Both || self.changed_fraction > 0.0
+        self.present != Presence::Both || self.changed_fraction > 0.0 || self.suppressed_px > 0
     }
 }
 
@@ -76,6 +83,10 @@ pub struct PdfReport {
     pub tool_version: &'static str,
     pub any_changes: bool,
     pub dpi: f32,
+    /// The active noise floor: changed regions smaller than this many pixels are
+    /// hidden from the overlay/tallies (but still reported as `suppressed_*` and
+    /// still count as a change). Default 1 = nothing hidden.
+    pub min_region_px: u32,
     pub old_pages: usize,
     pub new_pages: usize,
     pub pages: Vec<PdfPageReport>,
@@ -85,7 +96,7 @@ impl PdfReport {
     /// Build the report from an engine diff: paired pages carry their pixel
     /// stats; extra pages on either side are appended as explicit
     /// `old-only` / `new-only` rows with 1-based numbering.
-    pub fn from_diff(diff: &PdfDiff, dpi: f32) -> Self {
+    pub fn from_diff(diff: &PdfDiff, dpi: f32, min_region_px: u32) -> Self {
         let mut pages: Vec<PdfPageReport> = diff
             .pages
             .iter()
@@ -98,6 +109,8 @@ impl PdfReport {
                 total_px: p.diff.stats.total_px,
                 changed_fraction: p.diff.stats.changed_fraction,
                 regions: p.diff.stats.regions,
+                suppressed_px: p.diff.stats.suppressed_px,
+                suppressed_regions: p.diff.stats.suppressed_regions,
                 overlay_png: None,
             })
             .collect();
@@ -117,6 +130,8 @@ impl PdfReport {
                 total_px: 0,
                 changed_fraction: 1.0,
                 regions: 0,
+                suppressed_px: 0,
+                suppressed_regions: 0,
                 overlay_png: None,
             });
         }
@@ -125,6 +140,7 @@ impl PdfReport {
             tool_version: env!("CARGO_PKG_VERSION"),
             any_changes: diff.any_changes(),
             dpi,
+            min_region_px,
             old_pages: diff.old_pages,
             new_pages: diff.new_pages,
             pages,
@@ -157,6 +173,10 @@ impl PdfReport {
         out.push('\n');
         out.push_str(&self.page_count_line());
         out.push('\n');
+        if let Some(note) = self.noise_floor_line() {
+            out.push_str(&note);
+            out.push('\n');
+        }
         out.push_str(if self.any_changes {
             "result: differences found"
         } else {
@@ -193,6 +213,11 @@ impl PdfReport {
                 p.regions
             ));
         }
+        if let Some(note) = self.noise_floor_line() {
+            out.push('\n');
+            out.push_str(&note);
+            out.push('\n');
+        }
         out.push('\n');
         out.push_str(if self.any_changes {
             "**Result: differences found.**"
@@ -200,6 +225,23 @@ impl PdfReport {
             "**Result: no differences.**"
         });
         out
+    }
+
+    /// A note about the noise floor, when it is armed above the default or has
+    /// actually hidden something. Kept out of the "no differences" happy path so
+    /// the default (floor 1, nothing hidden) stays quiet — but any suppression is
+    /// always surfaced so a hidden change can never look like no change.
+    fn noise_floor_line(&self) -> Option<String> {
+        let hidden_px: u64 = self.pages.iter().map(|p| p.suppressed_px).sum();
+        let hidden_regions: u32 = self.pages.iter().map(|p| p.suppressed_regions).sum();
+        if hidden_regions == 0 && self.min_region_px <= 1 {
+            return None;
+        }
+        Some(format!(
+            "noise floor: --min-region-px {} hid {} region(s) / {} px \
+             (still counted as changes)",
+            self.min_region_px, hidden_regions, hidden_px
+        ))
     }
 
     /// The page-count sentence — prominent in every format so an added or removed
@@ -306,10 +348,14 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
         }
     }
 
-    let diff = etchy_pdf::diff_pdfs(&old, &new, dpi, &Default::default())
+    let mut opts = etchy_core::ImageDiffOptions::default();
+    if let Some(m) = cli.min_region_px {
+        opts.min_region_px = m;
+    }
+    let diff = etchy_pdf::diff_pdfs(&old, &new, dpi, &opts)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("diffing PDFs")?;
-    let mut report = PdfReport::from_diff(&diff, dpi);
+    let mut report = PdfReport::from_diff(&diff, dpi, opts.min_region_px);
 
     // Optional per-page overlay PNGs (the viewable deliverable).
     if let Some(dir) = &cli.out {
@@ -344,6 +390,16 @@ mod tests {
     use etchy_pdf::PageDiff;
 
     fn page(page: usize, changed_px: u64, total_px: u64) -> PageDiff {
+        page_with_suppressed(page, changed_px, total_px, 0, 0)
+    }
+
+    fn page_with_suppressed(
+        page: usize,
+        changed_px: u64,
+        total_px: u64,
+        suppressed_px: u64,
+        suppressed_regions: u32,
+    ) -> PageDiff {
         let changed_fraction = changed_px as f64 / total_px as f64;
         PageDiff {
             page,
@@ -357,6 +413,8 @@ mod tests {
                     total_px,
                     changed_fraction,
                     regions: u32::from(changed_px > 0),
+                    suppressed_px,
+                    suppressed_regions,
                 },
                 overlay: Image::new(1, 1, vec![0, 0, 0, 0]).unwrap(),
             },
@@ -373,7 +431,11 @@ mod tests {
 
     #[test]
     fn identical_pdfs_report_no_changes() {
-        let r = PdfReport::from_diff(&diff(2, 2, vec![page(1, 0, 100), page(2, 0, 100)]), 150.0);
+        let r = PdfReport::from_diff(
+            &diff(2, 2, vec![page(1, 0, 100), page(2, 0, 100)]),
+            150.0,
+            1,
+        );
         assert!(!r.any_changes);
         assert_eq!(r.schema_version, PDF_SCHEMA_VERSION);
         assert_eq!(r.pages.len(), 2);
@@ -384,7 +446,7 @@ mod tests {
 
     #[test]
     fn a_changed_page_reports_its_pixels() {
-        let r = PdfReport::from_diff(&diff(1, 1, vec![page(1, 30, 100)]), 150.0);
+        let r = PdfReport::from_diff(&diff(1, 1, vec![page(1, 30, 100)]), 150.0, 1);
         assert!(r.any_changes);
         let p = &r.pages[0];
         assert_eq!((p.page, p.changed_px, p.total_px), (1, 30, 100));
@@ -396,7 +458,7 @@ mod tests {
     fn an_added_page_is_listed_explicitly_in_every_format() {
         // old has 1 page, new has 3 → pages 2 and 3 are new-only, and a page
         // appearing IS a change even when the paired page is identical.
-        let r = PdfReport::from_diff(&diff(1, 3, vec![page(1, 0, 100)]), 150.0);
+        let r = PdfReport::from_diff(&diff(1, 3, vec![page(1, 0, 100)]), 150.0, 1);
         assert!(r.any_changes, "a page appearing is a change");
         assert_eq!(r.pages.len(), 3);
         assert_eq!(r.pages[1].present, Presence::NewOnly);
@@ -414,7 +476,7 @@ mod tests {
 
     #[test]
     fn a_removed_page_is_old_only() {
-        let r = PdfReport::from_diff(&diff(2, 1, vec![page(1, 0, 100)]), 150.0);
+        let r = PdfReport::from_diff(&diff(2, 1, vec![page(1, 0, 100)]), 150.0, 1);
         assert!(r.any_changes, "a page disappearing is a change");
         assert_eq!(r.pages[1].present, Presence::OldOnly);
         assert!(r.to_summary().contains("old-only"));
@@ -423,14 +485,50 @@ mod tests {
 
     #[test]
     fn json_carries_the_schema_and_overlay_name() {
-        let mut r = PdfReport::from_diff(&diff(1, 1, vec![page(1, 5, 100)]), 300.0);
+        let mut r = PdfReport::from_diff(&diff(1, 1, vec![page(1, 5, 100)]), 300.0, 1);
         r.pages[0].overlay_png = Some("page-1.png".into());
         let json = r.to_json_pretty();
         assert!(json.contains("\"schema_version\": 1"));
         assert!(json.contains("\"dpi\": 300.0"));
         assert!(json.contains("\"overlay_png\": \"page-1.png\""));
         // Unwritten overlays are omitted, not null.
-        let r2 = PdfReport::from_diff(&diff(1, 1, vec![page(1, 5, 100)]), 300.0);
+        let r2 = PdfReport::from_diff(&diff(1, 1, vec![page(1, 5, 100)]), 300.0, 1);
         assert!(!r2.to_json_pretty().contains("overlay_png"));
+    }
+
+    #[test]
+    fn a_sub_floor_change_is_surfaced_and_counts_as_a_difference() {
+        // #260: a page whose only change is below the noise floor has zero
+        // above-floor pixels (changed_fraction 0.0) but MUST still read as changed
+        // and must surface the hidden region — never a silent "no differences".
+        let r = PdfReport::from_diff(
+            &diff(1, 1, vec![page_with_suppressed(1, 0, 100, 1, 1)]),
+            150.0,
+            2,
+        );
+        assert!(r.any_changes, "a hidden sub-floor change is still a change");
+        assert!(r.pages[0].changed(), "the page is marked changed");
+        // Every format surfaces the suppression, not just the JSON.
+        let summary = r.to_summary();
+        assert!(summary.contains("result: differences found"));
+        assert!(
+            summary.contains("noise floor") && summary.contains("min-region-px"),
+            "summary surfaces the noise floor: {summary}"
+        );
+        assert!(r.to_markdown().contains("noise floor"));
+        let json = r.to_json_pretty();
+        assert!(json.contains("\"suppressed_px\": 1"));
+        assert!(json.contains("\"suppressed_regions\": 1"));
+        assert!(json.contains("\"min_region_px\": 2"));
+    }
+
+    #[test]
+    fn the_default_floor_stays_quiet_when_nothing_is_hidden() {
+        // At the default floor (1, hides nothing) with no suppression, no noise-floor
+        // note clutters the happy path.
+        let r = PdfReport::from_diff(&diff(1, 1, vec![page(1, 0, 100)]), 150.0, 1);
+        assert!(!r.any_changes);
+        assert!(!r.to_summary().contains("noise floor"));
+        assert!(!r.to_markdown().contains("noise floor"));
     }
 }
