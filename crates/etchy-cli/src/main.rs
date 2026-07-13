@@ -451,7 +451,7 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
         anyhow::bail!("--dpi / --out / --min-region-px apply to PDF inputs only");
     }
 
-    let (old, of, new, nf) = if git_mode {
+    let (old, of, ow, new, nf, nw) = if git_mode {
         let subdir = cli
             .subdir
             .as_deref()
@@ -468,21 +468,29 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
         }
         let old_ref = cli.old.to_string_lossy();
         let new_ref = cli.new.to_string_lossy();
-        let (old, of) = load_board_git(&old_ref, subdir)
+        let (old, of, ow) = load_board_git(&old_ref, subdir)
             .with_context(|| format!("loading old revision {old_ref}:{subdir}"))?;
-        let (new, nf) = load_board_git(&new_ref, subdir)
+        let (new, nf, nw) = load_board_git(&new_ref, subdir)
             .with_context(|| format!("loading new revision {new_ref}:{subdir}"))?;
-        (old, of, new, nf)
+        (old, of, ow, new, nf, nw)
     } else {
-        let (old, of) = load_board(&cli.old)
+        let (old, of, ow) = load_board(&cli.old)
             .with_context(|| format!("loading old revision {}", cli.old.display()))?;
-        let (new, nf) = load_board(&cli.new)
+        let (new, nf, nw) = load_board(&cli.new)
             .with_context(|| format!("loading new revision {}", cli.new.display()))?;
-        (old, of, new, nf)
+        (old, of, ow, new, nf, nw)
     };
 
     let diff = compare_detailed(&old, &new).context("comparing revisions")?;
     let mut report = diff.report.clone();
+    // Layer-classification cross-check warnings (#239), old rev then new. A
+    // conflict repeated on both revisions is reported once per side, tagged by
+    // revision so it's clear which pack the mismatch is in.
+    for (rev, ws) in [("old", ow), ("new", nw)] {
+        for w in ws {
+            report.warnings.push(format!("{rev} {w}"));
+        }
+    }
     if let (Some(o), Some(n)) = (of, nf) {
         if let Some(w) = coordinate_mismatch_warning(&o, &n) {
             report.warnings.push(w);
@@ -592,9 +600,12 @@ const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
 /// Build a board from an in-memory set of `(filename, bytes)` — the shared
 /// classify + route (Gerber / Excellon / skip) behind both directory and git-ref
 /// loading (#93). Non-Gerber, non-Excellon files are skipped.
-fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<GerberFormat>)> {
+fn board_from_files(
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
     let mut layers = Vec::new();
     let mut fmt = None;
+    let mut warnings = Vec::new();
     for (name, bytes) in files {
         if bytes.len() as u64 > MAX_LAYER_FILE_BYTES {
             anyhow::bail!(
@@ -613,6 +624,15 @@ fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<Gerb
         let geometry = if etchy_core::looks_like_gerber(&bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(&bytes).ok();
+            }
+            // Cross-check the filename classification against the file's own X2
+            // `.FileFunction` attribute (#239): adopt it where the filename was
+            // unrecognized, warn on a genuine conflict — never a silent override.
+            let (reconciled, warn) =
+                etchy_core::reconcile_kind(kind, etchy_core::file_function(&bytes), &name);
+            kind = reconciled;
+            if let Some(w) = warn {
+                warnings.push(w);
             }
             std::sync::Arc::new(
                 etchy_core::polygonize_gerber(&bytes)
@@ -644,11 +664,11 @@ fn board_from_files(files: Vec<(String, Vec<u8>)>) -> Result<(Board, Option<Gerb
             geometry,
         });
     }
-    Ok((Board { layers }, fmt))
+    Ok((Board { layers }, fmt, warnings))
 }
 
 /// Walk a directory (one level) and load it as a revision.
-fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
+fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
     if !dir.is_dir() {
         anyhow::bail!("{} is not a directory", dir.display());
     }
@@ -685,7 +705,10 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>)> {
 /// Load a revision straight from a git ref — `etchy <refA> <refB> [subdir]` over a
 /// repo of committed Gerbers, no checkout (#M2). Lists the blobs at
 /// `<ref>:<subdir>` via `git ls-tree` and reads each with `git show`.
-fn load_board_git(gitref: &str, subdir: &str) -> Result<(Board, Option<GerberFormat>)> {
+fn load_board_git(
+    gitref: &str,
+    subdir: &str,
+) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
     let listing = git_stdout(&["ls-tree", "-r", "-z", "--name-only", gitref, "--", subdir])
         .with_context(|| format!("listing gerbers at {gitref}:{subdir}"))?;
     let paths: Vec<&str> = listing.split('\0').filter(|s| !s.is_empty()).collect();
@@ -860,12 +883,53 @@ mod tests {
         // a drilled-hole change passed the gate silently). The content sniff must
         // win: Excellon content ⇒ LayerKind::Drill regardless of name.
         let drl = b"M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX10.0Y10.0\nM30\n".to_vec();
-        let (board, _) = board_from_files(vec![("Board.TXT".to_string(), drl)]).unwrap();
+        let (board, _, _) = board_from_files(vec![("Board.TXT".to_string(), drl)]).unwrap();
         assert_eq!(board.layers.len(), 1);
         assert_eq!(
             board.layers[0].kind,
             etchy_core::LayerKind::Drill(etchy_core::DrillKind::Unspecified)
         );
+    }
+
+    #[test]
+    fn file_function_recovers_unrecognized_gerber_name() {
+        // #239: a Gerber whose filename matches no naming pattern (→ Other) but
+        // whose X2 .FileFunction declares it top copper must be classified from the
+        // attribute, not left in the wrong bucket. A warning surfaces the recovery.
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%TF.FileFunction,Copper,L1,Top*%\n\
+                  %ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n"
+            .to_vec();
+        let (board, _, warns) =
+            board_from_files(vec![("mystery-layer.xyz".to_string(), g)]).unwrap();
+        assert_eq!(board.layers.len(), 1);
+        assert_eq!(board.layers[0].kind, etchy_core::LayerKind::TopCopper);
+        assert_eq!(warns.len(), 1, "the promotion must be surfaced");
+        assert!(warns[0].contains("mystery-layer.xyz") && warns[0].contains("top-copper"));
+    }
+
+    #[test]
+    fn file_function_conflict_keeps_filename_and_warns() {
+        // #239 trust bar: filename says top copper, attribute says bottom — a real
+        // conflict. The filename classification is retained (pairing-stable) and the
+        // disagreement is warned, never silently resolved.
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%TF.FileFunction,Copper,L4,Bot*%\n\
+                  %ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n"
+            .to_vec();
+        let (board, _, warns) = board_from_files(vec![("board-F_Cu.gbr".to_string(), g)]).unwrap();
+        assert_eq!(board.layers[0].kind, etchy_core::LayerKind::TopCopper);
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("top-copper") && warns[0].contains("bottom-copper"));
+    }
+
+    #[test]
+    fn file_function_agreement_is_silent() {
+        // A confirming attribute must not produce noise.
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%TF.FileFunction,Copper,L1,Top*%\n\
+                  %ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n"
+            .to_vec();
+        let (board, _, warns) = board_from_files(vec![("board-F_Cu.gbr".to_string(), g)]).unwrap();
+        assert_eq!(board.layers[0].kind, etchy_core::LayerKind::TopCopper);
+        assert!(warns.is_empty(), "agreement must not warn: {warns:?}");
     }
 
     #[test]

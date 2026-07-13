@@ -406,6 +406,55 @@ mod tests {
     }
 
     #[test]
+    fn arc_sweep_area_and_sign_are_correct() {
+        // #240: pin the actual SWEPT AREA and its SIGN, not just that points sit on
+        // the radius. Close each arc to the centre to form a circular sector; the
+        // signed shoelace area is +(sweep/2π)·πr² for a CCW sweep and negative for a
+        // CW one. This catches a sweep-direction sign error (CW area would come out
+        // positive, or a quarter would measure like a three-quarter) that the
+        // on-radius property test cannot see.
+        let r = 1_000_000.0;
+        let full = std::f64::consts::PI * r * r;
+        let sector = |arc: &[Pt]| {
+            let mut c = vec![p(0.0, 0.0)];
+            c.extend_from_slice(arc);
+            area(c)
+        };
+        let close = |got: f64, want: f64| (got - want).abs() <= 0.02 * want.abs();
+
+        // 90° CCW (r,0)->(0,r): +quarter.
+        let q_ccw = sector(&arc_points(r, 0.0, 0.0, r, 0.0, 0.0, true));
+        assert!(
+            q_ccw > 0.0,
+            "CCW sweep must give positive (CCW) sector area"
+        );
+        assert!(
+            close(q_ccw, full / 4.0),
+            "quarter area {q_ccw} vs {}",
+            full / 4.0
+        );
+
+        // 180° CCW (r,0)->(-r,0): +half.
+        let semi = sector(&arc_points(r, 0.0, -r, 0.0, 0.0, 0.0, true));
+        assert!(
+            close(semi, full / 2.0),
+            "semicircle area {semi} vs {}",
+            full / 2.0
+        );
+
+        // Same endpoints as the quarter but CW: the long way round = three-quarters,
+        // and the sector winds CW so the signed area is NEGATIVE — direction honoured.
+        let q_cw = sector(&arc_points(r, 0.0, 0.0, r, 0.0, 0.0, false));
+        assert!(q_cw < 0.0, "CW sweep must flip the sector's signed area");
+        assert!(
+            close(q_cw.abs(), 3.0 * full / 4.0),
+            "CW long-way area {} vs {}",
+            q_cw.abs(),
+            3.0 * full / 4.0
+        );
+    }
+
+    #[test]
     fn arc_direction_is_honoured() {
         let r = 1_000_000.0;
         // Same endpoints (r,0)->(0,r): CCW is the short 90°, CW the long 270°.

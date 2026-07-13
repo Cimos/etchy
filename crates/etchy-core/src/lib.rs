@@ -39,7 +39,7 @@ pub use geom::CIRCLE_SEGMENTS;
 pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};
 pub use imagediff::{diff_images, Image, ImageDiffOptions, ImageDiffResult, ImageDiffStats};
 pub use model::{pair_layers, same_board_guard, Board, DrillKind, Layer, LayerKind, LayerPairing};
-pub use naming::{classify, drill_kind, looks_like_gerber};
+pub use naming::{classify, drill_kind, file_function, looks_like_gerber, reconcile_kind};
 pub use placement::{looks_like_placement, resolve_placement};
 pub use report::{DiffReport, LayerReport, LayerStatus, Totals, SCHEMA_VERSION};
 pub use view::{BoardDiff, LayerView};
@@ -196,6 +196,88 @@ mod tests {
         assert_eq!(rep.totals.added_regions, 1);
         assert_eq!(rep.totals.removed_regions, 0);
         assert_eq!(rep.layers[0].status, LayerStatus::Changed);
+    }
+
+    // ---- #240: public-API integration (through compare / compare_detailed) ----
+
+    const HDR: &str = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+
+    /// A copper layer flashed at the given `X…Y…` positions (nm), through the real
+    /// Gerber pipeline, wrapped as a [`Layer`] of `kind`.
+    fn cu_layer(kind: LayerKind, label: &str, flashes: &str) -> Layer {
+        let txt = format!("{HDR}{flashes}M02*\n");
+        Layer {
+            kind,
+            label: label.into(),
+            geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
+        }
+    }
+
+    #[test]
+    fn compare_reports_removed_and_added_layers() {
+        // A layer present on only one side must surface through the public `compare`
+        // as a Removed/Added layer (not just at the unit level). Both boards share
+        // the same physical extent (corner pads) so the same-board guard passes; the
+        // old rev additionally carries a B_Cu layer the new rev drops, and the new
+        // rev carries an F_Silk the old rev lacks.
+        let corners = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let old = Board {
+            layers: vec![
+                cu_layer(LayerKind::TopCopper, "F_Cu", corners),
+                cu_layer(LayerKind::BottomCopper, "B_Cu", corners),
+            ],
+        };
+        let new = Board {
+            layers: vec![
+                cu_layer(LayerKind::TopCopper, "F_Cu", corners),
+                cu_layer(LayerKind::TopSilk, "F_Silk", corners),
+            ],
+        };
+        let rep = compare(&old, &new).unwrap();
+        let status = |k: LayerKind| {
+            rep.layers
+                .iter()
+                .find(|l| l.kind == k.kind_str())
+                .map(|l| l.status)
+                .unwrap_or_else(|| panic!("no {k:?} layer in report"))
+        };
+        assert_eq!(status(LayerKind::BottomCopper), LayerStatus::RemovedLayer);
+        assert_eq!(status(LayerKind::TopSilk), LayerStatus::AddedLayer);
+        assert_eq!(status(LayerKind::TopCopper), LayerStatus::Unchanged);
+        assert!(
+            rep.any_changes(),
+            "an added and a removed layer are changes"
+        );
+    }
+
+    #[test]
+    fn compare_fails_loud_on_board_mismatch() {
+        // Grossly different board extents (a wrong-pair) must fail loud through the
+        // public API — the same-board guard is not bypassable except via --force,
+        // which lives in the CLI, not here.
+        let old = Board {
+            layers: vec![cu_layer(
+                LayerKind::TopCopper,
+                "F_Cu",
+                "X5000000Y5000000D03*\nX10000000Y10000000D03*\n",
+            )],
+        };
+        let new = Board {
+            layers: vec![cu_layer(
+                LayerKind::TopCopper,
+                "F_Cu",
+                "X5000000Y5000000D03*\nX200000000Y200000000D03*\n",
+            )],
+        };
+        assert!(matches!(
+            compare(&old, &new),
+            Err(EngineError::BoardMismatch { .. })
+        ));
+        // compare_detailed shares the guard.
+        assert!(matches!(
+            compare_detailed(&old, &new),
+            Err(EngineError::BoardMismatch { .. })
+        ));
     }
 
     #[test]
