@@ -16,7 +16,7 @@ use std::io::{BufReader, Cursor};
 use gerber_parser::gerber_types::{
     Aperture as GtAperture, ApertureMacro, Command, CoordinateOffset, Coordinates, DCode,
     ExtendedCode, FunctionCode, GCode, InterpolationMode, MacroBoolean, MacroContent, MacroDecimal,
-    MacroInteger, Operation, Polarity as GtPolarity, Unit,
+    MacroInteger, Operation, Polarity as GtPolarity, QuadrantMode, Unit,
 };
 use gerber_parser::parse;
 
@@ -286,6 +286,10 @@ struct Machine<'a> {
     cur: Pt,
     ap: Option<i32>,
     interp: InterpolationMode,
+    /// Arc quadrant mode (`G74` single / `G75` multi). Defaults to multi: modern
+    /// exporters emit `G75` and it matches the historic behaviour; a `G74` seen in
+    /// the stream switches the I/J interpretation to single-quadrant (#234).
+    quadrant: QuadrantMode,
     polarity_dark: bool,
 
     in_region: bool,
@@ -316,6 +320,7 @@ impl<'a> Machine<'a> {
             cur: Pt::new(0, 0),
             ap: None,
             interp: InterpolationMode::Linear,
+            quadrant: QuadrantMode::Multi,
             polarity_dark: true,
             in_region: false,
             region_loops: Vec::new(),
@@ -335,10 +340,10 @@ impl<'a> Machine<'a> {
             }
             Command::FunctionCode(FunctionCode::GCode(g)) => match g {
                 GCode::InterpolationMode(m) => self.interp = *m,
+                GCode::QuadrantMode(q) => self.quadrant = *q,
                 GCode::RegionMode(true) => self.begin_region(),
                 GCode::RegionMode(false) => self.end_region(),
                 GCode::Comment(_)
-                | GCode::QuadrantMode(_)
                 | GCode::Unit(_)
                 | GCode::CoordinateMode(_)
                 | GCode::SelectAperture => {}
@@ -450,8 +455,8 @@ impl<'a> Machine<'a> {
 
     fn region_segment(&mut self, to: Pt, offset: &Option<CoordinateOffset>) -> Result<()> {
         if self.is_arc(offset) {
-            let center = self.arc_center(offset)?;
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
+            let center = self.arc_center(to, offset, ccw)?;
             let pts = geom::arc_points(
                 self.cur.x as f64,
                 self.cur.y as f64,
@@ -482,8 +487,8 @@ impl<'a> Machine<'a> {
     fn draw_segment(&mut self, to: Pt, offset: &Option<CoordinateOffset>) -> Result<()> {
         let r = self.stroke_radius_nm()?;
         if self.is_arc(offset) {
-            let center = self.arc_center(offset)?;
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
+            let center = self.arc_center(to, offset, ccw)?;
             let pts = geom::arc_points(
                 self.cur.x as f64,
                 self.cur.y as f64,
@@ -525,17 +530,43 @@ impl<'a> Machine<'a> {
         }
     }
 
-    fn arc_center(&self, offset: &Option<CoordinateOffset>) -> Result<(f64, f64)> {
+    /// Resolve an arc's centre from its I/J offset. `to`/`ccw` are only consulted
+    /// in single-quadrant mode, where I/J are unsigned and the centre is chosen so
+    /// the arc stays <=90° through the end point (#234).
+    fn arc_center(
+        &self,
+        to: Pt,
+        offset: &Option<CoordinateOffset>,
+        ccw: bool,
+    ) -> Result<(f64, f64)> {
         let o = offset
             .as_ref()
             .ok_or_else(|| unsupported("arc without I/J offset"))?;
-        let i = o.x.map(f64::from).unwrap_or(0.0);
-        let j = o.y.map(f64::from).unwrap_or(0.0);
-        // I/J are relative to the current point, in document units.
-        Ok((
-            self.cur.x as f64 + i * self.nm_per_unit,
-            self.cur.y as f64 + j * self.nm_per_unit,
-        ))
+        // I/J are relative to the current point, in document units → nm.
+        let i = o.x.map(f64::from).unwrap_or(0.0) * self.nm_per_unit;
+        let j = o.y.map(f64::from).unwrap_or(0.0) * self.nm_per_unit;
+        let (fx, fy) = (self.cur.x as f64, self.cur.y as f64);
+        match self.quadrant {
+            // Multi-quadrant (G75): I/J are signed offsets to the centre.
+            QuadrantMode::Multi => Ok((fx + i, fy + j)),
+            // Single-quadrant (G74): I/J are magnitudes; pick the valid <=90° corner
+            // or fail loud on an inconsistent arc rather than render a wrong centre.
+            QuadrantMode::Single => geom::single_quadrant_center(
+                fx,
+                fy,
+                to.x as f64,
+                to.y as f64,
+                i.abs(),
+                j.abs(),
+                ccw,
+            )
+            .ok_or_else(|| {
+                unsupported(
+                    "G74 single-quadrant arc with no valid <=90° centre \
+                             (inconsistent endpoints/offsets)",
+                )
+            }),
+        }
     }
 
     // --- flashes ---
@@ -1083,6 +1114,47 @@ mod tests {
         assert!(
             (a - 88.0).abs() < 0.05,
             "sequential polarity area {a} vs 88.0"
+        );
+    }
+
+    #[test]
+    fn g74_single_quadrant_arc_honoured() {
+        // #234: a quarter-disk region — centre (0,0) → out to (1mm,0) → G74 90° CCW
+        // arc back up to (0,1mm) → return to centre. Area = π r²/4 ≈ 0.7854 mm².
+        // In single-quadrant the I/J are UNSIGNED (I=1mm, J=0); the pre-fix code
+        // ignored G74 and read them as signed multi-quadrant offsets, putting the
+        // centre at (2mm,0) and sweeping a garbage ~333° arc — wrong, silent copper.
+        let r = 1_000_000; // 1.000000 mm at %FSLAX46
+        let g = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG74*\nG36*\n\
+             X0Y0D02*\nG01*\nX{r}Y0D01*\nG03*\nX0Y{r}I{r}J0D01*\nG01*\nX0Y0D01*\nG37*\nM02*\n"
+        );
+        let a = area_mm2(&g);
+        let ideal = std::f64::consts::PI / 4.0;
+        assert!(
+            (a - ideal).abs() < 0.02,
+            "G74 quarter-disk area {a} vs {ideal}"
+        );
+    }
+
+    #[test]
+    fn g74_arc_differs_from_g75_for_same_tokens() {
+        // The same arc tokens must render DIFFERENTLY under G74 vs G75 — proof the
+        // quadrant mode is honoured, not discarded. With I=1mm J=0 the multi-quadrant
+        // (G75) reading centres the arc at (2mm,0), the single-quadrant (G74) reading
+        // at (0,0); their pie-slice areas can't coincide.
+        let r = 1_000_000;
+        let body = format!(
+            "%MOMM*%\n%ADD10C,0.1*%\nD10*\n{{mode}}\nG36*\n\
+             X0Y0D02*\nG01*\nX{r}Y0D01*\nG03*\nX0Y{r}I{r}J0D01*\nG01*\nX0Y0D01*\nG37*\nM02*\n"
+        );
+        let g74 = format!("%FSLAX46Y46*%\n{}", body.replace("{mode}", "G74*"));
+        let g75 = format!("%FSLAX46Y46*%\n{}", body.replace("{mode}", "G75*"));
+        let a74 = area_mm2(&g74);
+        let a75 = area_mm2(&g75);
+        assert!(
+            (a74 - a75).abs() > 0.1,
+            "G74 area {a74} and G75 area {a75} must differ (mode was ignored?)"
         );
     }
 
