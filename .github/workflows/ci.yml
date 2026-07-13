@@ -23,23 +23,36 @@ jobs:
     name: build + test (ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      # Fail loud if a private board slipped into the tracked demo fab pack.
+      - name: Guard demo assets (public board only)
+        run: bash scripts/check-demo-assets.sh
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: rustfmt, clippy
 
       - name: Build
         run: cargo build --workspace --all-targets
 
-      # Populate the golden corpus so the deep `committed_corpus_*` test runs
-      # (revA/revB are gitignored — regenerated on demand). Best-effort: where
-      # Python is absent the test skips gracefully and the self-contained
-      # `synthetic_*` golden tests still provide full coverage.
-      - name: Generate golden corpus (best-effort)
-        run: python corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
-        continue-on-error: true
+      # TRUST gate: populate the golden corpus (revA/revB are gitignored,
+      # regenerated on demand) so the deep cross-validation test
+      # (committed_corpus_matches_ground_truth) runs against the ground truth
+      # instead of skipping. Must fail loud — a bare `python` is absent on the
+      # runners, so use python3 and let a failure fail the job (no
+      # continue-on-error). The guard below then refuses to proceed if the corpus
+      # came out empty, so the cross-check can never be silently skipped in CI.
+      - name: Generate golden corpus
+        run: python3 corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
+
+      - name: Verify golden corpus populated (no silent skip)
+        run: |
+          set -euo pipefail
+          test -f corpus/synthetic/ground_truth.json
+          test -n "$(ls -A corpus/synthetic/revA 2>/dev/null)"
+          test -n "$(ls -A corpus/synthetic/revB 2>/dev/null)"
 
       - name: Test
         run: cargo test --workspace
@@ -62,17 +75,29 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Build
         run: cargo build --workspace --all-targets
 
-      - name: Generate golden corpus (best-effort)
-        run: python corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
-        continue-on-error: true
+      # TRUST gate: populate the golden corpus so the deep cross-validation test
+      # (committed_corpus_matches_ground_truth) runs against the ground truth rather
+      # than skipping. Must fail loud — a bare `python` is absent on the runners, so
+      # use python3 and let a failure fail the job (no continue-on-error). The guard
+      # below then refuses to proceed if the corpus dirs came out empty, so the
+      # cross-check can never be silently skipped in CI.
+      - name: Generate golden corpus
+        run: python3 corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
+
+      - name: Verify golden corpus populated (no silent skip)
+        run: |
+          set -euo pipefail
+          test -f corpus/synthetic/ground_truth.json
+          test -n "$(ls -A corpus/synthetic/revA 2>/dev/null)"
+          test -n "$(ls -A corpus/synthetic/revB 2>/dev/null)"
 
       - name: Test
         run: cargo test --workspace
@@ -81,32 +106,40 @@ jobs:
     name: web build (wasm)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install Rust (stable) + wasm target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: wasm32-unknown-unknown
 
       # Prebuilt trunk binary, pinned — avoids the slow build-from-source and
       # any extra third-party action. Bump deliberately alongside the toolchain.
-      - name: Install trunk (prebuilt, pinned)
+      - name: Install trunk (prebuilt, pinned + checksum-verified)
         run: |
           set -euo pipefail
           ver=v0.21.14
+          sha256=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
           curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${ver}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xz -C "$HOME/.cargo/bin"
+            -o trunk.tar.gz
+          echo "${sha256}  trunk.tar.gz" | sha256sum -c -
+          tar -xz -C "$HOME/.cargo/bin" -f trunk.tar.gz
+          rm -f trunk.tar.gz
           trunk --version
 
       # Prebuilt binaryen, pinned. trunk's own wasm-opt is disabled in index.html
       # (its bundled binaryen fails on Rust's bulk-memory output, #99); we run
       # wasm-opt ourselves below with all features enabled.
-      - name: Install binaryen (wasm-opt, prebuilt, pinned)
+      - name: Install binaryen (wasm-opt, prebuilt, pinned + checksum-verified)
         run: |
           set -euo pipefail
           ver=version_123
+          sha256=e959f2170af4c20c552e9de3a0253704d6a9d2766e8fdb88e4d6ac4bae9388fe
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${ver}/binaryen-${ver}-x86_64-linux.tar.gz" \
-            | tar -xz -C "$HOME"
+            -o binaryen.tar.gz
+          echo "${sha256}  binaryen.tar.gz" | sha256sum -c -
+          tar -xz -C "$HOME" -f binaryen.tar.gz
+          rm -f binaryen.tar.gz
           echo "$HOME/binaryen-${ver}/bin" >> "$GITHUB_PATH"
 
       # Builds the browser viewer, which embeds the committed demo board via
@@ -136,15 +169,17 @@ jobs:
     name: cargo-deny (licenses, advisories, bans)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       # Install from crates.io (no extra third-party action to audit). Slower than
       # a prebuilt binary; swap for a pinned prebuilt (like trunk above) if it drags.
+      # Pin the version too: --locked pins its dependency tree, not the tool itself,
+      # so the policy enforcer stays a fixed input. Bump deliberately.
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+        run: cargo install cargo-deny --version 0.20.2 --locked
 
       # Enforces the permissive-only license policy + RUSTSEC advisories + bans
       # (deny.toml). A real advisory or a non-allow-listed license fails the job.
