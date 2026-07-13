@@ -81,6 +81,14 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
     };
     let nm_per_unit = unit_to_mm * 1.0e6; // document unit → nm
 
+    // Coordinate grid step in nm, for the G74 single-quadrant tolerance (#234/#274).
+    // Re-sniff the %FS decimals from the bytes (cheap, independent of the geometry
+    // parse); 0 if unresolved, so single_quadrant_center falls back to relative-only.
+    let grid_step_nm = gerber_format(bytes)
+        .ok()
+        .map(|f| nm_per_unit * 10f64.powi(-(f.dec_digits as i32)))
+        .unwrap_or(0.0);
+
     // Collect aperture-macro definitions (referenced by macro apertures).
     let mut macros: HashMap<&str, &ApertureMacro> = HashMap::new();
     for cmd in doc.commands() {
@@ -89,7 +97,13 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
         }
     }
 
-    let mut m = Machine::new(&doc.apertures, &macros, unit_to_mm, nm_per_unit);
+    let mut m = Machine::new(
+        &doc.apertures,
+        &macros,
+        unit_to_mm,
+        nm_per_unit,
+        grid_step_nm,
+    );
     for cmd in doc.commands() {
         m.step(cmd)?;
     }
@@ -276,6 +290,10 @@ struct Machine<'a> {
     macros: &'a HashMap<&'a str, &'a ApertureMacro>,
     unit_to_mm: f64,
     nm_per_unit: f64,
+    /// Source coordinate grid step in nm (`nm_per_unit × 10^-dec_digits`), used to
+    /// size the G74 single-quadrant tolerance to the real quantization. 0 when the
+    /// format couldn't be resolved (fall back to a radius-relative tolerance).
+    grid_step_nm: f64,
 
     /// Objects in paint order, batched into runs of one polarity. Gerber polarity
     /// is sequential — a later dark run repaints over an earlier clear — so these
@@ -310,12 +328,14 @@ impl<'a> Machine<'a> {
         macros: &'a HashMap<&'a str, &'a ApertureMacro>,
         unit_to_mm: f64,
         nm_per_unit: f64,
+        grid_step_nm: f64,
     ) -> Self {
         Self {
             apertures,
             macros,
             unit_to_mm,
             nm_per_unit,
+            grid_step_nm,
             spans: Vec::new(),
             cur: Pt::new(0, 0),
             ap: None,
@@ -559,6 +579,7 @@ impl<'a> Machine<'a> {
                 i.abs(),
                 j.abs(),
                 ccw,
+                self.grid_step_nm,
             )
             .ok_or_else(|| {
                 unsupported(
