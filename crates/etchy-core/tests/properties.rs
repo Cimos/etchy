@@ -28,6 +28,17 @@ fn layer_strategy() -> impl Strategy<Value = Vec<(i32, i32)>> {
     })
 }
 
+/// Pitch FINER than the pad diameter, so neighbouring cells' pads OVERLAP.
+const PITCH_FINE: f64 = 0.3; // mm, < 0.5 mm pad diameter
+
+/// A layer as a Vec (NOT a set) over a small grid, so cells can repeat (COINCIDENT
+/// pads) and — at [`PITCH_FINE`] — adjacent cells OVERLAP. The disjoint-grid
+/// [`layer_strategy`] above never produces either, so the union/NonZero merge path
+/// goes untested there; this variant drives exactly that case (#240).
+fn overlapping_layer_strategy() -> impl Strategy<Value = Vec<(i32, i32)>> {
+    prop::collection::vec((0i32..4, 0i32..4), 0..16)
+}
+
 proptest! {
     /// diff(A,A) must be empty for any layer A.
     #[test]
@@ -99,6 +110,55 @@ proptest! {
     #[test]
     fn polygonize_never_panics_on_arbitrary_input(s in ".{0,400}") {
         let _ = polygonize_gerber(&s); // must not panic; result is irrelevant here
+    }
+
+    // ---- #240: the same invariants, now with OVERLAPPING / COINCIDENT pads ----
+
+    /// diff(A,A) = ∅ must hold even when A's pads overlap and coincide — the boolean
+    /// difference has to cancel the whole self-overlapping set, not leave slivers.
+    #[test]
+    fn overlap_self_diff_is_empty(cells in overlapping_layer_strategy()) {
+        let a = pad_layer(&cells, PITCH_FINE);
+        let d = diff_layer(&a, &a);
+        prop_assert!(d.is_empty(), "diff(A,A) not empty for {} overlapping pads", cells.len());
+    }
+
+    /// Add/remove symmetry holds through the union merge: removed(A,B) == added(B,A)
+    /// even when both layers are dense overlapping pad clusters.
+    #[test]
+    fn overlap_add_remove_symmetry(
+        a_cells in overlapping_layer_strategy(),
+        b_cells in overlapping_layer_strategy(),
+    ) {
+        let a = pad_layer(&a_cells, PITCH_FINE);
+        let b = pad_layer(&b_cells, PITCH_FINE);
+        let ab = diff_layer(&a, &b);
+        let ba = diff_layer(&b, &a);
+        prop_assert_eq!(&ab.removed, &ba.added, "removed(A,B) != added(B,A) under overlap");
+        prop_assert_eq!(&ab.added, &ba.removed, "added(A,B) != removed(B,A) under overlap");
+    }
+
+    /// Areas stay non-negative and finite under overlap (no double-count blow-up or
+    /// negative-area sign flip from the merge).
+    #[test]
+    fn overlap_areas_non_negative_finite(
+        a_cells in overlapping_layer_strategy(),
+        b_cells in overlapping_layer_strategy(),
+    ) {
+        let d = diff_layer(&pad_layer(&a_cells, PITCH_FINE), &pad_layer(&b_cells, PITCH_FINE));
+        prop_assert!(d.added_area() >= -1e-9 && d.added_area().is_finite());
+        prop_assert!(d.removed_area() >= -1e-9 && d.removed_area().is_finite());
+    }
+
+    /// The diff stays deterministic when the union path is in play.
+    #[test]
+    fn overlap_diff_is_deterministic(
+        a_cells in overlapping_layer_strategy(),
+        b_cells in overlapping_layer_strategy(),
+    ) {
+        let a = pad_layer(&a_cells, PITCH_FINE);
+        let b = pad_layer(&b_cells, PITCH_FINE);
+        prop_assert_eq!(diff_layer(&a, &b), diff_layer(&a, &b));
     }
 }
 
