@@ -71,11 +71,17 @@ mod native {
                 return ExitCode::from(2);
             }
         };
-        // No window icon: the in-app "etchy" wordmark is the single logo on both
-        // surfaces (#18). Setting a window icon here gave native a second logo.
-        let viewport = egui::ViewportBuilder::default()
+        // OS-level window icon (#271): the etchy app mark in the title bar,
+        // taskbar, alt-tab and dock. This is a different job from the in-app
+        // wordmark (#18) — that stays the on-screen brand; this is the binary's
+        // identity at the desktop level. A decode failure falls back to no icon
+        // (the OS default) rather than panicking — see `window_icon`.
+        let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 760.0])
             .with_title("etchy — PCB diff viewer");
+        if let Some(icon) = window_icon() {
+            viewport = viewport.with_icon(icon);
+        }
         // 4x MSAA so sub-pixel slivers (thin track/pad junctions, shared edges)
         // cover at least one sample and don't drop out as "no copper" (#55/#47).
         // BUT under software GL — Mesa llvmpipe on WSLg (no GPU passthrough) —
@@ -176,6 +182,63 @@ mod native {
                 app
             }
             None => ViewApp::from_cc(cc, empty_diff(), String::new(), String::new()),
+        }
+    }
+
+    /// The etchy app icon (#271), embedded at compile time so a bare binary
+    /// carries its OS-level window icon with no external file. 512 px source;
+    /// the windowing backend scales it to the sizes the title bar / taskbar /
+    /// dock want.
+    const WINDOW_ICON_PNG: &[u8] =
+        include_bytes!("../../../assets/brand/png/etchy-app-icon-512.png");
+
+    /// Decode a PNG byte slice to `(rgba, width, height)`, or `None` if it does
+    /// not decode. Split out from [`window_icon`] so the embedded asset can be
+    /// checked in a unit test without building an `IconData`.
+    fn decode_icon_rgba(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+        let img = image::load_from_memory(png).ok()?.to_rgba8();
+        let (width, height) = (img.width(), img.height());
+        Some((img.into_raw(), width, height))
+    }
+
+    /// The native window icon, or `None` if the embedded PNG fails to decode.
+    /// Deliberately fallible, not an `expect`: a bad decode must open the window
+    /// without an icon (the OS default), never take the app down.
+    fn window_icon() -> Option<egui::IconData> {
+        let (rgba, width, height) = decode_icon_rgba(WINDOW_ICON_PNG)?;
+        Some(egui::IconData {
+            rgba,
+            width,
+            height,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{decode_icon_rgba, window_icon, WINDOW_ICON_PNG};
+
+        // #271: the embedded app icon must decode to a full RGBA buffer of the
+        // expected dimensions, so `window_icon` hands the windowing backend a
+        // valid icon (a silently-empty or mis-sized buffer would show nothing).
+        #[test]
+        fn embedded_window_icon_decodes_to_expected_rgba() {
+            let (rgba, width, height) =
+                decode_icon_rgba(WINDOW_ICON_PNG).expect("embedded app-icon PNG decodes");
+            assert_eq!((width, height), (512, 512), "app icon is the 512 px source");
+            assert_eq!(
+                rgba.len(),
+                width as usize * height as usize * 4,
+                "RGBA buffer is 4 bytes/pixel and non-empty"
+            );
+            // The whole point of the fallible loader: a valid embed yields Some.
+            assert!(window_icon().is_some());
+        }
+
+        // A decode failure must fall back to no icon, not panic — the guarantee
+        // that keeps a bad asset from taking the window down.
+        #[test]
+        fn garbage_png_yields_no_icon_without_panicking() {
+            assert!(decode_icon_rgba(b"not a png").is_none());
         }
     }
 }
