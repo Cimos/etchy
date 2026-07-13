@@ -1089,6 +1089,27 @@ fn swipe_rects(rect: Rect, frac: f32) -> (Rect, Rect, f32) {
     (left, right, div)
 }
 
+/// The sub-rect that pointer input (measure clicks, crosshair, coordinate readout,
+/// wheel-zoom anchor) must project through for a pointer at screen-x `px`. In Split
+/// each half renders a full board/page into its OWN sub-rect, so input has to use the
+/// SAME sub-rect the geometry under the cursor was drawn through — otherwise clicks
+/// and measurements land offset from the geometry, and a cross-divider measurement
+/// reads a wrong distance (#242). Every other mode (Overlay/Old/New and the Swipe
+/// curtain) projects through the full canvas rect, returned unchanged. Kept in step
+/// with the split constants the renderer uses (`split_rects(rect, 0.5, 6.0)`).
+fn input_rect(mode: Mode, full: Rect, px: f32) -> Rect {
+    if mode == Mode::Split {
+        let (lr, rr, div_x) = split_rects(full, 0.5, 6.0);
+        if px < div_x {
+            lr
+        } else {
+            rr
+        }
+    } else {
+        full
+    }
+}
+
 /// Pan/zoom camera in world (nm) space.
 struct Camera {
     center: [f64; 2], // world nm
@@ -1106,6 +1127,25 @@ impl Default for Camera {
             fitted: false,
         }
     }
+}
+
+/// Bounds for the camera scale (pixels per nm). The wheel zoom multiplies
+/// `cam.scale` by a factor per event; unclamped, a sustained zoom-out drives it to
+/// ~0 (the next `screen_to_world` then divides by ~0, and the inf/NaN corrupts
+/// `cam.center` until Fit), and zoom-in runs toward infinity (#248). These floor it
+/// well above 0 and cap it well below overflow, without interfering with any real
+/// board zoom (a typical Fit scale is ~1e-5..1e-6).
+const SCALE_MIN: f64 = 1e-9;
+const SCALE_MAX: f64 = 1e3;
+
+/// Clamp a camera scale into `[SCALE_MIN, SCALE_MAX]`, mapping non-finite (NaN/±inf)
+/// and non-positive values to the floor so a bad zoom step can never corrupt the
+/// camera (#248).
+fn clamp_scale(scale: f64) -> f64 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return SCALE_MIN;
+    }
+    scale.clamp(SCALE_MIN, SCALE_MAX)
 }
 
 /// One loaded revision, retained so either side can be swapped and re-diffed
@@ -1395,6 +1435,23 @@ struct ViewApp {
     rail_side: RailSide,
 }
 
+/// A one-line note reconciling the export with the Overlay view's noise filter
+/// (#245/#91). The Overlay view hides diff regions below `min_area_mm2`, but the
+/// export includes ALL regions (the safe direction — an export must never hide a
+/// real change), so when the filter is active the note documents that so the
+/// SVG/CSV numbers stay explainable. Returns `None` when the filter is off (nothing
+/// to reconcile).
+fn export_filter_note(min_area_mm2: f64) -> Option<String> {
+    if min_area_mm2 > 0.0 {
+        Some(format!(
+            "etchy: this export includes all diff regions; the Overlay view hides regions \
+             smaller than {min_area_mm2} mm² (noise filter)."
+        ))
+    } else {
+        None
+    }
+}
+
 impl ViewApp {
     fn new(diff: BoardDiff, old_label: String, new_label: String) -> Self {
         #[cfg(target_arch = "wasm32")]
@@ -1498,17 +1555,35 @@ impl ViewApp {
         } else {
             self.diff.layers.get(self.selected).into_iter().collect()
         };
+        // The export always includes EVERY diff region (the safe direction — an
+        // export must never quietly drop a real change). The Overlay view hides
+        // regions below the noise threshold, so when that filter is active, stamp a
+        // note into each artifact making the view/export disagreement explainable
+        // rather than silent (#245/#91).
+        let note = export_filter_note(self.min_area_mm2);
         for (i, l) in chosen.iter().enumerate() {
+            let mut svg = etchy_core::layer_svg(l);
+            if let Some(note) = &note {
+                // A leading XML comment is valid in the SVG prolog and ignored by
+                // renderers, so the drawing is unchanged — only annotated.
+                svg.insert_str(0, &format!("<!-- {note} -->\n"));
+            }
             // Prefix with an index so two layers sharing a display name (e.g. two
             // "other" layers) don't clobber each other's file.
             files.push(exportio::ExportFile {
                 name: format!("{i:02}-{}.svg", l.name()),
-                content: etchy_core::layer_svg(l).into_bytes(),
+                content: svg.into_bytes(),
             });
+        }
+        let mut csv = etchy_core::board_areas_csv(&self.diff);
+        if let Some(note) = &note {
+            // A leading `#` comment line documents that the CSV areas count every
+            // region, including those the Overlay view hides.
+            csv.insert_str(0, &format!("# {note}\n"));
         }
         files.push(exportio::ExportFile {
             name: "areas.csv".into(),
-            content: etchy_core::board_areas_csv(&self.diff).into_bytes(),
+            content: csv.into_bytes(),
         });
         files
     }
@@ -2132,6 +2207,16 @@ impl Default for Settings {
     }
 }
 
+/// Which cache items the GPU base-transform path uploads (#243). Only the dense
+/// BASE geometry goes to the GPU (the HDI/O(1) perf win); the diff (added/removed)
+/// and the outline reference stay on the CPU `transform_cache` path so they keep the
+/// LOD marker floor + noise cull — a sub-pixel real diff must surface as a marker,
+/// never silently vanish on the GPU path (the class of miss #156 closed).
+#[cfg(feature = "gpu-transform")]
+fn gpu_uploads_role(role: Role) -> bool {
+    matches!(role, Role::Base)
+}
+
 impl ViewApp {
     /// Build the app and restore any persisted settings from eframe storage (#52).
     /// The creation closure for both `run_native` and the web `WebRunner` routes
@@ -2160,16 +2245,22 @@ impl ViewApp {
         app
     }
 
-    /// Build the colour'd triangle list for the GPU path (#80): every visible item
-    /// (base + diff + outline) with its colour baked per-vertex, using the same
-    /// colour logic as `transform_cache` minus the per-frame LOD/marker (the GPU
-    /// path draws true-scale). Colours are premultiplied (`Color32::to_array`) to
-    /// match egui's blend.
+    /// Build the colour'd triangle list for the GPU path (#80): the BASE geometry
+    /// only (`gpu_uploads_role`), with its colour baked per-vertex using the same
+    /// colour logic as `transform_cache`. The diff (added/removed) and the outline
+    /// stay on the CPU `transform_cache` path so they keep the per-frame LOD marker
+    /// floor + noise cull — a sub-pixel real diff must surface as a marker, never
+    /// silently vanish (the #156 class of miss; #243). Base is the dense/HDI bulk, so
+    /// it carries the O(1) perf win. Colours are premultiplied (`Color32::to_array`)
+    /// to match egui's blend.
     #[cfg(feature = "gpu-transform")]
     fn build_gpu_tris(&self, cache: &TessCache) -> Vec<gpu::ColorTri> {
         let canvas = self.canvas_color();
         let mut out = Vec::new();
         for item in &cache.items {
+            if !gpu_uploads_role(item.role) {
+                continue; // diff + outline stay on the CPU LOD path (#243)
+            }
             let dim = layer_focus_alpha(item.layer_index, self.selected, self.focus);
             if dim == 0.0 {
                 continue; // fully focus-dimmed — same skip as the CPU path (#224)
@@ -2212,7 +2303,10 @@ impl ViewApp {
 
     /// Hash of everything that affects the uploaded GPU mesh — geometry/visibility
     /// (the cache key), selection, base opacity, theme, and colours — so we re-upload
-    /// only on a real change, never per pan frame.
+    /// only on a real change, never per pan frame. The GPU mesh is base-only (#243),
+    /// so the noise threshold `min_area_mm2` is deliberately NOT hashed: it filters
+    /// the diff, which lives on the CPU `transform_cache` path (re-run every frame),
+    /// so the slider takes effect without re-uploading the base mesh.
     #[cfg(feature = "gpu-transform")]
     fn gpu_input_hash(&self, cache: &TessCache) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -4387,7 +4481,12 @@ impl ViewApp {
         } else if self.measure_mode {
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    let mut w = screen_to_world(&self.cam, pos, rect);
+                    // Map the click through the sub-rect it landed in (Split renders
+                    // each half through its own sub-rect), so the placed point sits on
+                    // the geometry under the cursor and cross-divider distances are
+                    // right (#242).
+                    let ir = input_rect(self.mode, rect, pos.x);
+                    let mut w = screen_to_world(&self.cam, pos, ir);
                     // Snap the placed point to the nearest grid intersection when
                     // enabled (#51) — the click follows the already-snapped cursor.
                     if self.snap_grid {
@@ -4446,9 +4545,14 @@ impl ViewApp {
         match scroll_to_camera_action(raw.x, raw.y, ctrl, shift, 0.0015, 1.0) {
             CameraAction::Zoom(f) => {
                 if let Some(ptr) = response.hover_pos() {
-                    let before = screen_to_world(&self.cam, ptr, rect);
-                    self.cam.scale *= f;
-                    let after = screen_to_world(&self.cam, ptr, rect);
+                    // Anchor the zoom through the sub-rect the cursor is over so the
+                    // point under the pointer stays put in Split too (#242).
+                    let ir = input_rect(self.mode, rect, ptr.x);
+                    let before = screen_to_world(&self.cam, ptr, ir);
+                    // Clamp so a runaway zoom can't drive scale to 0/inf and NaN the
+                    // camera on the next screen↔world round-trip (#248).
+                    self.cam.scale = clamp_scale(self.cam.scale * f);
+                    let after = screen_to_world(&self.cam, ptr, ir);
                     self.cam.center[0] += before[0] - after[0];
                     self.cam.center[1] += before[1] - after[1];
                 }
@@ -4530,10 +4634,11 @@ impl ViewApp {
         if geom_cache_dirty(self.cache.as_ref().map(|c| &c.key), &key) {
             self.cache = Some(build_cache(&self.diff, &key, self.outline));
         }
-        // GPU path (#80/#107): upload ALL visible geometry (base + diff + outline)
-        // once, with per-vertex colour, whenever the inputs change — then pan/zoom
-        // only updates a uniform, so frame time is O(1) in triangle count (the HDI
-        // fix). Overlay/Old/New only; Split/Swipe keep the CPU path. The cache
+        // GPU path (#80/#107): upload the dense BASE geometry once, with per-vertex
+        // colour, whenever the inputs change — then pan/zoom only updates a uniform,
+        // so frame time is O(1) in triangle count (the HDI fix). The diff + outline
+        // stay on the CPU path so they keep their LOD marker floor + noise cull
+        // (#243). Overlay/Old/New only; Split/Swipe keep the full CPU path. The cache
         // borrow is dropped before we set the hash.
         #[cfg(feature = "gpu-transform")]
         {
@@ -4630,10 +4735,13 @@ impl ViewApp {
             self.last_hidden = 0;
             n = ln + rn;
         } else {
-            // GPU path active this frame iff a mesh is uploaded for the current
-            // inputs (#80). When active, the GPU draws everything and the CPU path
-            // is skipped entirely. No per-feature LOD/markers on the GPU path — it
-            // draws true-scale; that's the dense/HDI trade for O(1) frames.
+            // GPU path active this frame iff a base mesh is uploaded for the current
+            // inputs (#80). When active, the GPU transforms the dense BASE geometry
+            // (the O(1)/HDI win) and the CPU path still runs for the DIFF + outline,
+            // with `skip_base` telling it the base is already on the GPU — so the
+            // diff keeps its LOD marker floor + noise cull (#243). The diff is never
+            // swept onto the GPU true-scale, which would let a sub-pixel real change
+            // vanish (the #156 silent-miss class).
             #[cfg(feature = "gpu-transform")]
             let gpu_active = self.use_gpu
                 && self.gpu.is_some()
@@ -4649,29 +4757,27 @@ impl ViewApp {
                 }
             }
 
-            if gpu_active {
-                // GPU drew it; the CPU build is skipped (the O(1) win).
-                self.last_hidden = 0;
-                n = 1;
-            } else {
-                let (shapes, hidden) = transform_cache(
-                    cache,
-                    &self.cam,
-                    rect,
-                    self.base_opacity,
-                    self.selected,
-                    base_of,
-                    self.canvas_color(),
-                    self.col_added,
-                    self.col_removed,
-                    min_area_nm2,
-                    false,
-                    self.focus,
-                );
-                self.last_hidden = hidden;
-                n = shapes.len();
-                painter.extend(shapes);
-            }
+            // The diff + outline always run through the CPU LOD/marker/noise path;
+            // when the GPU is active `skip_base` drops only the base (drawn on GPU).
+            let (shapes, hidden) = transform_cache(
+                cache,
+                &self.cam,
+                rect,
+                self.base_opacity,
+                self.selected,
+                base_of,
+                self.canvas_color(),
+                self.col_added,
+                self.col_removed,
+                min_area_nm2,
+                gpu_active, // skip_base: the GPU drew the base this frame
+                self.focus,
+            );
+            self.last_hidden = hidden;
+            // Count the GPU-drawn base as present so the "no geometry" hint doesn't
+            // fire when only the diff mesh is empty.
+            n = shapes.len() + usize::from(gpu_active);
+            painter.extend(shapes);
         }
 
         // Empty-state hint.
@@ -4843,15 +4949,19 @@ impl ViewApp {
         let mut coord_txt = None;
         if self.show_crosshair || self.measure_mode {
             if let Some(ptr) = response.hover_pos() {
-                let w_raw = screen_to_world(&self.cam, ptr, rect);
+                // Read the cursor through the sub-rect it is over (Split projects
+                // each half through its own sub-rect), so the coordinate readout and
+                // the crosshair track the geometry under the pointer (#242).
+                let ir = input_rect(self.mode, rect, ptr.x);
+                let w_raw = screen_to_world(&self.cam, ptr, ir);
                 let w = if self.snap_grid {
                     snap_world_to_grid(w_raw, self.grid_mm)
                 } else {
                     w_raw
                 };
                 let cross_at = Pos2::new(
-                    (rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale) as f32,
-                    (rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale) as f32,
+                    (ir.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale) as f32,
+                    (ir.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale) as f32,
                 );
                 let cross = Stroke::new(1.0, C_CROSSHAIR);
                 painter.line_segment(
@@ -4923,31 +5033,45 @@ impl ViewApp {
         // plus the in-progress point while the tool is armed. Each ruler is a
         // segment with a distance label offset off the line. The cursor crosshair
         // is drawn above (always-on, #179).
-        // World [f64;2] → screen, matching world_to_screen's float transform.
-        let w2s = |w: [f64; 2]| -> Pos2 {
-            let x = rect.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
-            let y = rect.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
-            Pos2::new(x as f32, y as f32)
+        //
+        // Projection targets: in Split each half is a full board in its own sub-rect,
+        // so the ruler is drawn into BOTH halves (clipped) — the same world point on
+        // the OLD (left) and NEW (right) board, matching where the click landed
+        // (#242). Every other mode draws once through the full canvas rect.
+        let targets: Vec<Rect> = if self.mode == Mode::Split {
+            let (lr, rr, _) = split_rects(rect, 0.5, 6.0);
+            vec![lr, rr]
+        } else {
+            vec![rect]
         };
-        // Completed measurements persist on-canvas so they stay visible for
-        // reference even when the tool is disarmed (#211: the canvas is their
-        // only home — cleared by the preset key / a custom clear binding).
-        for m in &self.measurements {
-            let (dx, dy, angle) = measure_components(m.a, m.b);
-            draw_ruler(
-                painter,
-                w2s(m.a),
-                w2s(m.b),
-                &format_distance(distance_mm(m.a, m.b), self.measure_unit),
-                &format_components(dx, dy, angle, self.measure_unit),
-            );
-        }
-        if self.measure_mode {
-            // In-progress: the first point of the pair (the second click completes
-            // it into the list above). The how-to hint lives in the bottom-left
-            // chip stack (#194).
-            for w in &self.measure_pts {
-                painter.circle_filled(w2s(*w), 3.0, C_COPPER);
+        for target in targets {
+            let p = painter.with_clip_rect(target);
+            // World [f64;2] → screen, matching world_to_screen's float transform.
+            let w2s = |w: [f64; 2]| -> Pos2 {
+                let x = target.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale;
+                let y = target.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale;
+                Pos2::new(x as f32, y as f32)
+            };
+            // Completed measurements persist on-canvas so they stay visible for
+            // reference even when the tool is disarmed (#211: the canvas is their
+            // only home — cleared by the preset key / a custom clear binding).
+            for m in &self.measurements {
+                let (dx, dy, angle) = measure_components(m.a, m.b);
+                draw_ruler(
+                    &p,
+                    w2s(m.a),
+                    w2s(m.b),
+                    &format_distance(distance_mm(m.a, m.b), self.measure_unit),
+                    &format_components(dx, dy, angle, self.measure_unit),
+                );
+            }
+            if self.measure_mode {
+                // In-progress: the first point of the pair (the second click completes
+                // it into the list above). The how-to hint lives in the bottom-left
+                // chip stack (#194).
+                for w in &self.measure_pts {
+                    p.circle_filled(w2s(*w), 3.0, C_COPPER);
+                }
             }
         }
 
@@ -7029,6 +7153,195 @@ mod tests {
         assert_eq!(clamp_split_frac(0.0), 0.1);
         assert_eq!(clamp_split_frac(1.0), 0.9);
         assert_eq!(clamp_split_frac(0.5), 0.5);
+    }
+
+    #[test]
+    fn input_rect_uses_the_sub_rect_under_the_cursor_in_split() {
+        use super::{input_rect, screen_to_world, split_rects, Camera};
+        use egui::{pos2, vec2, Rect};
+        let full = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 200.0));
+        let (lr, rr, div_x) = split_rects(full, 0.5, 6.0);
+        // Every non-Split mode maps through the full canvas rect, whatever the x.
+        assert_eq!(input_rect(Mode::Overlay, full, 50.0), full);
+        assert_eq!(input_rect(Mode::Old, full, 350.0), full);
+        assert_eq!(input_rect(Mode::New, full, 200.0), full);
+        // Swipe is a curtain over ONE board through the full rect — not per-side.
+        assert_eq!(input_rect(Mode::Swipe, full, 350.0), full);
+        // Split routes to the half the pointer is inside — the SAME sub-rect the
+        // renderer drew that half through (#242).
+        assert_eq!(input_rect(Mode::Split, full, div_x - 10.0), lr);
+        assert_eq!(input_rect(Mode::Split, full, div_x + 10.0), rr);
+
+        // Trust property (#242): in Split, a pointer at the RIGHT half's centre must
+        // resolve to the world point the renderer drew there (the camera centre),
+        // NOT the offset world point the old full-rect mapping produced.
+        let cam = Camera {
+            center: [1_000_000.0, 2_000_000.0],
+            scale: 1e-4,
+            fit_scale: 1e-4,
+            fitted: true,
+        };
+        let ptr = rr.center();
+        let good = screen_to_world(&cam, ptr, input_rect(Mode::Split, full, ptr.x));
+        assert!(
+            (good[0] - cam.center[0]).abs() < 1.0 && (good[1] - cam.center[1]).abs() < 1.0,
+            "sub-rect mapping puts the sub-rect centre at the camera centre; got {good:?}"
+        );
+        let wrong = screen_to_world(&cam, ptr, full);
+        assert!(
+            (wrong[0] - cam.center[0]).abs() > 1.0,
+            "the old full-rect mapping is offset from the geometry — the bug this fixes"
+        );
+    }
+
+    #[test]
+    fn clamp_scale_bounds_the_zoom_and_kills_non_finite() {
+        use super::{clamp_scale, SCALE_MAX, SCALE_MIN};
+        // In-range values pass through untouched.
+        assert_eq!(clamp_scale(1e-4), 1e-4);
+        // Runaway zoom-out toward 0 is floored, never reaching 0 (the divide-by-~0
+        // that NaNs the camera, #248).
+        assert_eq!(clamp_scale(0.0), SCALE_MIN);
+        assert_eq!(clamp_scale(1e-300), SCALE_MIN);
+        assert!(clamp_scale(0.0) > 0.0);
+        // Runaway zoom-in toward infinity is capped.
+        assert_eq!(clamp_scale(f64::MAX), SCALE_MAX);
+        assert_eq!(clamp_scale(1e30), SCALE_MAX);
+        // Non-finite (a prior bad step) collapses to the floor, not inf/NaN.
+        assert_eq!(clamp_scale(f64::INFINITY), SCALE_MIN);
+        assert_eq!(clamp_scale(f64::NEG_INFINITY), SCALE_MIN);
+        assert_eq!(clamp_scale(f64::NAN), SCALE_MIN);
+        // A negative scale is nonsensical (mirrors the view) — floored, never < 0.
+        assert!(clamp_scale(-5.0) > 0.0);
+    }
+
+    #[test]
+    fn skip_base_still_marks_and_culls_the_diff() {
+        // #243: when the base is transformed on the GPU (skip_base = true), the DIFF
+        // must still run the CPU LOD/marker/noise path — a real sub-pixel diff draws a
+        // marker (never silently gone), and genuine noise is culled and counted. This
+        // guards the invariant the GPU restriction relies on.
+        use super::{
+            transform_cache, CachedItem, Camera, GeomKey, Role, Side, TessCache, C_ADDED, C_BASE,
+            C_REMOVED,
+        };
+        use egui::{pos2, vec2, Color32, Rect};
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
+        // Zoomed far out: a µm-scale feature is sub-pixel on screen.
+        let cam = Camera {
+            center: [0.0, 0.0],
+            scale: 1e-6,
+            fit_scale: 1e-6,
+            fitted: true,
+        };
+        let tri = |s: i64| {
+            vec![[
+                super::Pt::new(0, 0),
+                super::Pt::new(s, 0),
+                super::Pt::new(0, s),
+            ]]
+        };
+        // A large base plane that WOULD draw — must be skipped (GPU draws it).
+        let base = CachedItem {
+            role: Role::Base,
+            side: Side::Full,
+            layer_index: 0,
+            tris: tri(10_000_000),
+            bbox: [0, 0, 10_000_000, 10_000_000],
+            extent_nm: 10_000_000,
+            area_nm2: 1e14,
+        };
+        // A real, sub-pixel diff region well above any noise floor.
+        let s = 4000i64;
+        let diff = CachedItem {
+            role: Role::Added,
+            side: Side::Full,
+            layer_index: 0,
+            tris: tri(s),
+            bbox: [0, 0, s, s],
+            extent_nm: s,
+            area_nm2: (s as f64) * (s as f64),
+        };
+        let cache = TessCache {
+            key: GeomKey {
+                visible: vec![0],
+                mode: Mode::Overlay,
+                base_on: true,
+                outline_effective: false,
+            },
+            items: vec![base, diff],
+        };
+        let (shapes, hidden) = transform_cache(
+            &cache,
+            &cam,
+            rect,
+            BASE_OPACITY_FAINT,
+            0,
+            |_| C_BASE,
+            Color32::BLACK,
+            C_ADDED,
+            C_REMOVED,
+            0.0,  // min_area: nothing is noise here
+            true, // skip_base: GPU drew the base this frame
+            0.0,
+        );
+        assert!(
+            !shapes.is_empty(),
+            "a real sub-pixel diff must still surface (marker) even with the base on the GPU"
+        );
+        assert_eq!(hidden, 0, "a real diff above the noise floor is not hidden");
+
+        // Now make the SAME region genuine noise (min-area above its area): it culls
+        // and is counted, never a silent miss.
+        let big_min = (s as f64) * (s as f64) * 4.0;
+        let (_shapes2, hidden2) = transform_cache(
+            &cache,
+            &cam,
+            rect,
+            BASE_OPACITY_FAINT,
+            0,
+            |_| C_BASE,
+            Color32::BLACK,
+            C_ADDED,
+            C_REMOVED,
+            big_min,
+            true,
+            0.0,
+        );
+        assert_eq!(
+            hidden2, 1,
+            "sub-min-area diff is culled AND counted as hidden"
+        );
+    }
+
+    #[cfg(feature = "gpu-transform")]
+    #[test]
+    fn gpu_uploads_base_geometry_only() {
+        // #243: the GPU base-transform path carries ONLY the dense base geometry.
+        // The diff (added/removed) and the outline stay on the CPU transform_cache
+        // path so a sub-pixel real diff keeps its marker floor + noise cull — the
+        // silent-miss class #156 closed must not reopen on the GPU path.
+        use super::{gpu_uploads_role, Role};
+        assert!(gpu_uploads_role(Role::Base));
+        assert!(!gpu_uploads_role(Role::Added));
+        assert!(!gpu_uploads_role(Role::Removed));
+        assert!(!gpu_uploads_role(Role::Outline));
+    }
+
+    #[test]
+    fn export_filter_note_explains_the_view_disagreement() {
+        use super::export_filter_note;
+        // Filter off: nothing to explain, no note.
+        assert_eq!(export_filter_note(0.0), None);
+        // Filter on: a note naming the threshold, stating the export keeps ALL
+        // regions (the safe direction) so SVG/CSV numbers are explainable vs the
+        // Overlay view (#245/#91).
+        let note = export_filter_note(0.0004).expect("a note when the filter is active");
+        assert!(note.contains("0.0004"), "names the mm² threshold: {note}");
+        assert!(
+            note.to_lowercase().contains("all diff regions"),
+            "states the export includes all diff regions: {note}"
+        );
     }
 
     #[test]
