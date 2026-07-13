@@ -1561,8 +1561,13 @@ impl ViewApp {
         // note into each artifact making the view/export disagreement explainable
         // rather than silent (#245/#91).
         let note = export_filter_note(self.min_area_mm2);
+        // Export with the diff colours the user is actually looking at, not the
+        // hard-coded defaults — the file must agree with the screen, including the
+        // colour-safe preset (#244).
+        let added_hex = color_to_svg_hex(self.col_added);
+        let removed_hex = color_to_svg_hex(self.col_removed);
         for (i, l) in chosen.iter().enumerate() {
-            let mut svg = etchy_core::layer_svg(l);
+            let mut svg = etchy_core::layer_svg_with_colors(l, &added_hex, &removed_hex);
             if let Some(note) = &note {
                 // A leading XML comment is valid in the SVG prolog and ignored by
                 // renderers, so the drawing is unchanged — only annotated.
@@ -2137,6 +2142,13 @@ fn color_to_rgba(c: Color32) -> [u8; 4] {
 /// The inverse of [`color_to_rgba`].
 fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// `Color32` -> a `#rrggbb` SVG fill string (alpha dropped — the export fills are
+/// opaque). Used to thread the user's diff colours into the SVG export (#244).
+fn color_to_svg_hex(c: Color32) -> String {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 /// The user-tunable view state, persisted via eframe storage (#52). Colours are
