@@ -140,6 +140,7 @@ pub fn arc_points(fx: f64, fy: f64, tx: f64, ty: f64, cx: f64, cy: f64, ccw: boo
 /// directed sweep (CCW/CW) is at most 90°. Returns that centre, or `None` when no
 /// corner satisfies both — an inconsistent arc the caller must reject loud rather
 /// than render with a guessed centre (the trust bar).
+#[allow(clippy::too_many_arguments)] // start/end/offset points + direction + grid
 pub fn single_quadrant_center(
     fx: f64,
     fy: f64,
@@ -148,14 +149,23 @@ pub fn single_quadrant_center(
     i: f64,
     j: f64,
     ccw: bool,
+    grid_step_nm: f64,
 ) -> Option<(f64, f64)> {
     // Start radius is fixed by the offsets and identical for all four corners.
     let r_start = i.hypot(j);
-    // End-point-on-circle tolerance: coordinates and offsets are quantized to nm,
-    // so allow a little slack; wrong corners miss by order-of-radius, not nm.
-    let r_tol = (r_start * 1e-3).max(2.0);
-    // A true 90° arc can round just over π/2; permit a hair over.
-    let sweep_max = PI / 2.0 + 1e-3;
+    // End-point-on-circle tolerance. The endpoint and offsets are quantized to the
+    // source coordinate grid, so the *correct* corner misses by a few grid steps
+    // (an ABSOLUTE error), while the three wrong corners miss by order-of-radius
+    // (they are displaced by 2i/2j). On coarse legacy grids — where G74 actually
+    // appears (e.g. FSLAX24 inch = 2540 nm/step) — a radius-relative-only tolerance
+    // is far too tight and false-rejects valid arcs, so floor it at a few grid
+    // steps. `grid_step_nm` is 0 when the caller couldn't resolve the format; then
+    // only the relative term applies.
+    let r_tol = (r_start * 1e-3).max(grid_step_nm * 3.0).max(2.0);
+    // A true 90° arc can round just over π/2. The angular slack scales with the
+    // grid: a quantized endpoint shifts the swept angle by ~grid/r radians. Clamp
+    // to ~5° so a genuine 90°–180° arc (off by ~90°) is still rejected.
+    let sweep_max = PI / 2.0 + (grid_step_nm / r_start * 3.0).clamp(1e-3, 0.09);
     let tau = 2.0 * PI;
 
     let mut best: Option<((f64, f64), f64)> = None;
@@ -274,7 +284,7 @@ mod tests {
         let (fx, fy) = (r * a0.cos(), r * a0.sin());
         let (tx, ty) = (0.0, r); // 90°
         let (i, j) = (fx.abs(), fy.abs()); // unsigned offsets to the origin
-        let c = single_quadrant_center(fx, fy, tx, ty, i, j, true)
+        let c = single_quadrant_center(fx, fy, tx, ty, i, j, true, 1.0)
             .expect("a valid <=90° single-quadrant centre exists");
         assert!(
             c.0.abs() < 1.0 && c.1.abs() < 1.0,
@@ -282,8 +292,36 @@ mod tests {
         );
         // No corner yields a valid <=90° arc for a bogus (too-far) endpoint.
         assert!(
-            single_quadrant_center(fx, fy, 5.0 * r, 5.0 * r, i, j, true).is_none(),
+            single_quadrant_center(fx, fy, 5.0 * r, 5.0 * r, i, j, true, 1.0).is_none(),
             "inconsistent single-quadrant arc must be rejected, not guessed"
+        );
+    }
+
+    #[test]
+    fn single_quadrant_center_tolerates_coarse_grid_quantization() {
+        // #274 review: on a coarse legacy grid (FSLAX24 inch = 2540 nm/step) a valid
+        // G74 arc's endpoint misses the true circle by a few grid steps — an ABSOLUTE
+        // error. The old radius-relative-only tolerance (r·1e-3) was far too tight and
+        // false-rejected these, the very files G74 support targets. A 60° arc about
+        // the origin (r≈0.43 mm), with start/end/offsets snapped to the 2540 nm grid.
+        let step = 2540.0;
+        let snap = |v: f64| (v / step).round() * step;
+        let r = 430_000.0;
+        let (a0, a1) = (PI / 6.0, PI / 2.0); // 30° → 90°, a 60° sweep (≤ 90°)
+        let (fx, fy) = (snap(r * a0.cos()), snap(r * a0.sin()));
+        let (tx, ty) = (snap(r * a1.cos()), snap(r * a1.sin()));
+        let (i, j) = (fx.abs(), fy.abs()); // unsigned offsets to the (origin) centre
+                                           // Pre-fix (grid unknown / relative-only) this returns None — the endpoint
+                                           // misses by ~2 grid steps, well over r·1e-3. With the real grid step it holds.
+        assert!(
+            single_quadrant_center(fx, fy, tx, ty, i, j, true, 0.0).is_none(),
+            "relative-only tolerance rejects the quantized arc (documents the bug)"
+        );
+        let c = single_quadrant_center(fx, fy, tx, ty, i, j, true, step)
+            .expect("a coarse-grid single-quadrant arc must resolve, not be rejected");
+        assert!(
+            c.0.abs() < 2.0 * step && c.1.abs() < 2.0 * step,
+            "centre {c:?} should be ~origin within a couple of grid steps"
         );
     }
 
