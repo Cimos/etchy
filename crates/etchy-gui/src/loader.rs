@@ -126,10 +126,21 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
 
 /// Read a `.zip` fab pack (its raw bytes) into a [`Board`]. Entries are flattened
 /// to their basename (a pack zipped with a top folder still classifies correctly),
-/// and each entry's *uncompressed* size is checked before extraction so a zip bomb
+/// and each entry's size is enforced on the *actual bytes read* so a zip bomb
 /// can't OOM us. Cross-platform (in-memory) so the same path serves native file
 /// picks and web uploads.
 pub fn load_zip(bytes: Vec<u8>) -> Result<(Board, Option<GerberFormat>)> {
+    load_zip_capped(bytes, MAX_LAYER_FILE_BYTES)
+}
+
+/// [`load_zip`] with an explicit per-entry byte cap so the guard is testable with
+/// a small limit. The cap is enforced on the bytes actually decompressed, never on
+/// the header-declared uncompressed size: that size is attacker-controlled
+/// metadata, so a forged header that under-declares while its deflate stream
+/// expands past the limit would otherwise sail straight through (#246). We read
+/// through a reader capped at `limit + 1` and bail the moment more than `limit`
+/// bytes come out — the stream is abandoned before it can inflate to gigabytes.
+fn load_zip_capped(bytes: Vec<u8>, limit: u64) -> Result<(Board, Option<GerberFormat>)> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("reading zip archive")?;
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(zip.len());
     for i in 0..zip.len() {
@@ -138,13 +149,6 @@ pub fn load_zip(bytes: Vec<u8>) -> Result<(Board, Option<GerberFormat>)> {
             .with_context(|| format!("reading zip entry {i}"))?;
         if !entry.is_file() {
             continue;
-        }
-        if entry.size() > MAX_LAYER_FILE_BYTES {
-            bail!(
-                "zip entry {} is {} bytes uncompressed, over the {MAX_LAYER_FILE_BYTES}-byte limit",
-                entry.name(),
-                entry.size()
-            );
         }
         // Flatten any in-zip directory to the basename so classification (which
         // keys on filename) works regardless of how the pack was zipped.
@@ -157,10 +161,18 @@ pub fn load_zip(bytes: Vec<u8>) -> Result<(Board, Option<GerberFormat>)> {
         if name.is_empty() {
             continue;
         }
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry
+        let mut buf = Vec::new();
+        let read = (&mut entry)
+            .take(limit + 1)
             .read_to_end(&mut buf)
             .with_context(|| format!("extracting {name}"))?;
+        if read as u64 > limit {
+            bail!(
+                "zip entry {name} expands past the {limit}-byte per-file limit \
+                 (header declared {} bytes)",
+                entry.size()
+            );
+        }
         files.push((name, buf));
     }
     board_from_bytes(files)
@@ -247,5 +259,74 @@ mod tests {
             "flattened basename"
         );
         assert!(fmt.is_some());
+    }
+
+    /// Overwrite the little-endian u32 at `field_off` inside the record that
+    /// begins with `sig`, but only when it currently holds `expect` — so we patch
+    /// the intended header field and nothing that merely happens to match.
+    fn forge_u32(buf: &mut [u8], sig: &[u8; 4], field_off: usize, expect: u32, forged: u32) {
+        let pos = buf
+            .windows(4)
+            .position(|w| w == sig)
+            .expect("record signature present");
+        let at = pos + field_off;
+        assert_eq!(
+            u32::from_le_bytes(buf[at..at + 4].try_into().unwrap()),
+            expect,
+            "field holds the expected real size before forging"
+        );
+        buf[at..at + 4].copy_from_slice(&forged.to_le_bytes());
+    }
+
+    // #246: the cap must bite on the bytes actually decompressed, not the size the
+    // header claims. We build a real entry, then forge its declared uncompressed
+    // size down to 10 in both the local file header and the central directory —
+    // the old `entry.size()` check would wave it through.
+    #[test]
+    fn load_zip_enforces_actual_bytes_over_a_forged_declared_size() {
+        use std::io::Write;
+        // Real content ~2 KiB (well over our test cap of 100), but highly
+        // compressible so the archive stays tiny.
+        let payload = MIN_GERBER.repeat(40);
+        let real = payload.len() as u32;
+        assert!(real > 100, "payload must exceed the test cap");
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("bomb-F_Cu.gtl", opts).unwrap();
+            w.write_all(&payload).unwrap();
+            w.finish().unwrap();
+        }
+        // Local file header (PK\x03\x04): uncompressed size at +22.
+        forge_u32(&mut buf, b"PK\x03\x04", 22, real, 10);
+        // Central directory header (PK\x01\x02): uncompressed size at +24 —
+        // this is the field `entry.size()` reports.
+        forge_u32(&mut buf, b"PK\x01\x02", 24, real, 10);
+
+        // Cap of 100: above the forged 10 (so a declared-size check passes it) but
+        // below the real payload (so an actual-bytes check must reject it).
+        let err = load_zip_capped(buf, 100)
+            .expect_err("a forged small declaration must not bypass the cap")
+            .to_string();
+        assert!(err.contains("per-file limit"), "got: {err}");
+    }
+
+    // A small honest zip still loads through the capped path.
+    #[test]
+    fn load_zip_capped_accepts_within_limit() {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file("board-F_Cu.gtl", opts).unwrap();
+            w.write_all(MIN_GERBER).unwrap();
+            w.finish().unwrap();
+        }
+        let (board, _) = load_zip_capped(buf, MAX_LAYER_FILE_BYTES).unwrap();
+        assert_eq!(board.layers.len(), 1);
     }
 }
