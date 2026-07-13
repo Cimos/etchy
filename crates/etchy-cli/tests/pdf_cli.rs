@@ -15,6 +15,33 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+// The PDF/non-PDF mismatch check runs before any PDF decoding, so it is
+// feature-independent — this test guards it in the default build too (#263).
+#[test]
+fn missing_second_input_is_not_labelled_not_a_pdf() {
+    // `etchy real.pdf missing.pdf`: the old code called the missing file "is not
+    // a PDF", conflating "absent" with "wrong type". It must now say the path
+    // does not exist. (Exit code was already correct at 2.)
+    let missing =
+        std::env::temp_dir().join(format!("etchy-263-missing-{}.pdf", std::process::id()));
+    let _ = std::fs::remove_file(&missing);
+    let out = etchy()
+        .arg(fixture("old.pdf"))
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "a mismatch still exits 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not exist"),
+        "the missing file is named as missing, not 'not a PDF': {stderr}"
+    );
+    assert!(
+        !stderr.contains("is not a PDF"),
+        "must not mislabel a missing path as wrong-type: {stderr}"
+    );
+}
+
 #[cfg(feature = "pdf")]
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("etchy-pdf-{}-{}", std::process::id(), tag));
