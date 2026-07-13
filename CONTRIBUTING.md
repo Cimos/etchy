@@ -38,9 +38,10 @@ as real dependencies land:
 - **Test boards (Spike 1 / corpus):** `kicad-cli` to plot public KiCad demo boards
   to Gerbers, e.g. `sudo apt install kicad`, then
   `kicad-cli pcb export gerbers -o out/ board.kicad_pcb`.
-- **PDF path (`etchy-pdf`, pdfium-render — M3):** a prebuilt `libpdfium.a` per
-  target (vendored from bblanchon/paulocoutinhox); a C++ toolchain for static
-  linking. Feature-gated, so it doesn't affect the core build.
+- **PDF path (`etchy-pdf`, hayro):** **pure Rust — no system packages, no C++
+  toolchain, no `libpdfium`.** Build it with `--features pdf` (release binaries
+  and the container ship it on). It raises that crate's MSRV to 1.85; it's
+  feature-gated, so the core build is unaffected.
 
 ## Conventions
 
