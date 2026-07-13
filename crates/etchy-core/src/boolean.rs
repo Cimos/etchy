@@ -101,3 +101,142 @@ pub(crate) fn fill_even_odd(contours: &[Contour]) -> Vec<Contour> {
         Overlay::<i64>::with_contours(&s, &[]).overlay(OverlayRule::Subject, FillRule::EvenOdd);
     flatten(&from_int(out))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Axis-aligned CCW square `[x0,x1] × [y0,y1]` (positive winding).
+    fn sq(x0: i64, y0: i64, x1: i64, y1: i64) -> Contour {
+        vec![
+            Pt::new(x0, y0),
+            Pt::new(x1, y0),
+            Pt::new(x1, y1),
+            Pt::new(x0, y1),
+        ]
+    }
+
+    /// Total (unsigned) area of a flat triangle list, in nm² — via the integer
+    /// cross product, summed and halved.
+    fn tri_area(ts: &[[Pt; 3]]) -> i128 {
+        let doubled: i128 = ts
+            .iter()
+            .map(|[a, b, c]| {
+                let ux = (b.x - a.x) as i128;
+                let uy = (b.y - a.y) as i128;
+                let vx = (c.x - a.x) as i128;
+                let vy = (c.y - a.y) as i128;
+                (ux * vy - uy * vx).abs()
+            })
+            .sum();
+        doubled / 2
+    }
+
+    #[test]
+    fn union_merges_overlap_not_double_counts() {
+        // Two 10×10 squares overlapping in a 5×10 strip. The union is one shape of
+        // area 150 (100 + 100 − 50), NOT the 200 a naive sum would give.
+        let a = sq(0, 0, 10, 10);
+        let b = sq(5, 0, 15, 10);
+        let u = union(&[a], &[b]);
+        assert_eq!(
+            u.shapes.len(),
+            1,
+            "overlapping squares merge into one region"
+        );
+        assert_eq!(
+            u.area_nm2(),
+            150,
+            "union area must not double-count overlap"
+        );
+    }
+
+    #[test]
+    fn union_keeps_disjoint_regions_separate() {
+        // Far-apart squares stay two regions, area summed.
+        let u = union(&[sq(0, 0, 10, 10)], &[sq(100, 100, 110, 110)]);
+        assert_eq!(u.shapes.len(), 2);
+        assert_eq!(u.area_nm2(), 200);
+    }
+
+    #[test]
+    fn union_self_overlap_via_empty_clip() {
+        // `union(a, &[])` is the self-merge path (the running dark-span accumulator):
+        // two coincident squares collapse to one, counted once.
+        let u = union(&[sq(0, 0, 10, 10), sq(0, 0, 10, 10)], &[]);
+        assert_eq!(u.shapes.len(), 1);
+        assert_eq!(u.area_nm2(), 100);
+    }
+
+    #[test]
+    fn difference_subtracts_clip() {
+        // 10×10 minus a 5×10 clip on the right → a 5×10 rectangle (area 50).
+        let d = difference(&[sq(0, 0, 10, 10)], &[sq(5, 0, 10, 10)]);
+        assert_eq!(d.area_nm2(), 50);
+    }
+
+    #[test]
+    fn difference_disjoint_clip_is_noop() {
+        // A clip that touches nothing leaves the subject whole.
+        let d = difference(&[sq(0, 0, 10, 10)], &[sq(100, 100, 110, 110)]);
+        assert_eq!(d.area_nm2(), 100);
+    }
+
+    #[test]
+    fn difference_enclosing_clip_empties() {
+        // Subtracting a strictly larger clip erases the subject entirely.
+        let d = difference(&[sq(0, 0, 10, 10)], &[sq(-1, -1, 11, 11)]);
+        assert!(d.is_empty(), "fully-covered subject must vanish");
+        assert_eq!(d.area_nm2(), 0);
+    }
+
+    #[test]
+    fn triangulate_shape_subtracts_hole() {
+        // Outer 10×10 (CCW) with a 6×6 hole (CW). Triangulated area = 100 − 36 = 64
+        // — the hole is cut, not filled. A regression that ignored holes would
+        // report 100 (solid disk for an annular pad — the silent miss this guards).
+        let outer = sq(0, 0, 10, 10);
+        let mut hole = sq(2, 2, 8, 8);
+        hole.reverse(); // CW winding marks it a hole
+        let ts = triangulate_shape(&[outer, hole]);
+        assert_eq!(tri_area(&ts), 64, "hole must be subtracted from the fill");
+    }
+
+    #[test]
+    fn triangulate_shape_solid_covers_full_area() {
+        // No hole → triangles tile the whole square exactly.
+        let ts = triangulate_shape(&[sq(0, 0, 10, 10)]);
+        assert_eq!(tri_area(&ts), 100);
+    }
+
+    #[test]
+    fn triangulate_shape_rejects_degenerate() {
+        // Fewer than three points can't triangulate → empty, not a panic.
+        assert!(triangulate_shape(&[]).is_empty());
+        assert!(triangulate_shape(&[vec![Pt::new(0, 0), Pt::new(1, 0)]]).is_empty());
+    }
+
+    #[test]
+    fn flatten_round_trips_outer_and_hole() {
+        // A shape with a hole (built via difference) flattens to two contours; the
+        // signed shoelace over them nets the holed area (outer − hole).
+        let holed = difference(&[sq(0, 0, 10, 10)], &[sq(2, 2, 8, 8)]);
+        let flat = flatten(&holed);
+        assert_eq!(flat.len(), 2, "outer ring + one hole");
+        // Rebuild a PolygonSet from the flat list and confirm the net area holds.
+        let rebuilt = PolygonSet::new(vec![flat]);
+        assert_eq!(rebuilt.area_nm2(), 64);
+    }
+
+    #[test]
+    fn fill_even_odd_turns_nested_loop_into_hole() {
+        // Two nested loops wound the SAME way. Even-odd fill treats the inner loop
+        // as a hole regardless of winding (a G36 region with an island cut-out):
+        // net area = 100 − 36 = 64.
+        let outer = sq(0, 0, 10, 10);
+        let inner = sq(2, 2, 8, 8); // same (CCW) winding as outer
+        let filled = fill_even_odd(&[outer, inner]);
+        let area = PolygonSet::new(vec![filled]).area_nm2();
+        assert_eq!(area, 64, "nested same-wound loop must become a hole");
+    }
+}

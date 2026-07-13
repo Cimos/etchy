@@ -974,6 +974,33 @@ mod tests {
     }
 
     #[test]
+    fn drilled_apertures_fail_loud() {
+        // #240: an aperture with a hole (annular pad) must fail loud, not silently
+        // report the solid-disk area — otherwise a copper-annulus change diffs as if
+        // the whole pad were solid (a silent miss). Pin circle / rectangle / obround.
+        // Each is flashed once; the SAME aperture without the hole is checked to
+        // resolve, so the failure is provably the hole, not a parse problem.
+        let cases = [
+            ("C,0.5X0.2", "C,0.5"),         // drilled circle vs solid circle
+            ("R,0.6X0.4X0.2", "R,0.6X0.4"), // drilled rect vs solid rect
+            ("O,0.6X0.4X0.2", "O,0.6X0.4"), // drilled obround vs solid obround
+        ];
+        for (drilled, solid) in cases {
+            let g = format!("%FSLAX46Y46*%\n%MOMM*%\n%ADD10{drilled}*%\nD10*\nX0Y0D03*\nM02*\n");
+            let err = resolve_layer(g.as_bytes());
+            assert!(
+                matches!(err, Err(EngineError::Unsupported { .. })),
+                "drilled aperture {drilled} must fail loud, got {err:?}"
+            );
+            let ok = format!("%FSLAX46Y46*%\n%MOMM*%\n%ADD10{solid}*%\nD10*\nX0Y0D03*\nM02*\n");
+            assert!(
+                resolve_layer(ok.as_bytes()).is_ok(),
+                "the same aperture without a hole ({solid}) must resolve"
+            );
+        }
+    }
+
+    #[test]
     fn deprecated_g71_is_normalized_away() {
         // Altium emits G71 alongside %MO; it must not break parsing.
         let g = "%FSLAX46Y46*%\n%MOMM*%\nG71*\n%ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n";
