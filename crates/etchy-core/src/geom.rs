@@ -112,7 +112,14 @@ pub fn arc_points(fx: f64, fy: f64, tx: f64, ty: f64, cx: f64, cy: f64, ccw: boo
     }
     // Step from the sagitta tolerance.
     let max_step = 2.0 * (1.0 - (SAG_TOL_NM / r).min(1.0)).acos();
-    let n = ((sweep / max_step).ceil() as usize).clamp(2, 4096);
+    // Floor the segment count in proportion to sweep so a tiny-radius arc keeps real
+    // area instead of collapsing to a doubled-back sliver (#236): at r <= the µm
+    // tolerance the step saturates at π (n=2, zero area). A full turn gets at least
+    // CIRCLE_SEGMENTS, matching flash-circle fidelity.
+    let floor = (sweep / (2.0 * PI) * CIRCLE_SEGMENTS as f64).ceil() as usize;
+    let n = ((sweep / max_step).ceil() as usize)
+        .max(floor)
+        .clamp(2, 4096);
     (0..=n)
         .map(|k| {
             let frac = k as f64 / n as f64;
@@ -124,6 +131,55 @@ pub fn arc_points(fx: f64, fy: f64, tx: f64, ty: f64, cx: f64, cy: f64, ccw: boo
             p(cx + r * a.cos(), cy + r * a.sin())
         })
         .collect()
+}
+
+/// Resolve the arc centre for **G74 single-quadrant** mode. The `i`/`j` offsets
+/// are magnitudes (unsigned per RS-274X), so the true centre is one of the four
+/// `(fx ± i, fy ± j)` corners. The valid corner is the one that places the end
+/// point on the same circle as the start (an equidistant centre) **and** whose
+/// directed sweep (CCW/CW) is at most 90°. Returns that centre, or `None` when no
+/// corner satisfies both — an inconsistent arc the caller must reject loud rather
+/// than render with a guessed centre (the trust bar).
+pub fn single_quadrant_center(
+    fx: f64,
+    fy: f64,
+    tx: f64,
+    ty: f64,
+    i: f64,
+    j: f64,
+    ccw: bool,
+) -> Option<(f64, f64)> {
+    // Start radius is fixed by the offsets and identical for all four corners.
+    let r_start = i.hypot(j);
+    // End-point-on-circle tolerance: coordinates and offsets are quantized to nm,
+    // so allow a little slack; wrong corners miss by order-of-radius, not nm.
+    let r_tol = (r_start * 1e-3).max(2.0);
+    // A true 90° arc can round just over π/2; permit a hair over.
+    let sweep_max = PI / 2.0 + 1e-3;
+    let tau = 2.0 * PI;
+
+    let mut best: Option<((f64, f64), f64)> = None;
+    for (si, sj) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+        let (cx, cy) = (fx + si * i, fy + sj * j);
+        let r_mis = ((tx - cx).hypot(ty - cy) - r_start).abs();
+        if r_mis > r_tol {
+            continue; // end point isn't on this candidate circle
+        }
+        let a0 = (fy - cy).atan2(fx - cx);
+        let a1 = (ty - cy).atan2(tx - cx);
+        let mut sweep = if ccw { a1 - a0 } else { a0 - a1 };
+        while sweep < 0.0 {
+            sweep += tau;
+        }
+        if sweep > sweep_max {
+            continue; // single-quadrant arcs never exceed 90°
+        }
+        match best {
+            Some((_, m)) if r_mis >= m => {}
+            _ => best = Some(((cx, cy), r_mis)),
+        }
+    }
+    best.map(|(c, _)| c)
 }
 
 /// Rotate `(x, y)` by `deg` degrees CCW about the origin.
@@ -183,6 +239,52 @@ mod tests {
         let a = area(obround(0.0, 0.0, 700_000.0, 250_000.0));
         let bbox = 700_000.0 * 250_000.0;
         assert!(a > 0.0 && a < bbox, "obround area {a} vs bbox {bbox}");
+    }
+
+    #[test]
+    fn tiny_full_circle_arc_keeps_area() {
+        // #236: at a radius <= the µm sagitta tolerance the step saturates at π, so
+        // with no segment floor a full-circle arc collapsed to 3 collinear points →
+        // zero enclosed area (a silent miss). The sweep-proportional floor keeps
+        // CIRCLE_SEGMENTS for a full turn, matching flash-circle fidelity, so a real
+        // circle survives.
+        let r = 800.0; // nm, below SAG_TOL_NM (1 µm) — the collapse regime
+        let pts = arc_points(r, 0.0, r, 0.0, 0.0, 0.0, true);
+        assert!(
+            pts.len() > 16,
+            "tiny circle collapsed to {} points",
+            pts.len()
+        );
+        let a = area(pts);
+        let ideal = PI * r * r;
+        assert!(
+            (a / ideal - 1.0).abs() < 0.05,
+            "tiny-circle-arc area {a} vs {ideal}"
+        );
+    }
+
+    #[test]
+    fn single_quadrant_center_picks_valid_corner() {
+        // #234: G74 I/J are unsigned magnitudes; the true centre is one of the four
+        // (f ± i, f ± j) corners — the one that puts the end point on the same
+        // circle and whose directed sweep is <= 90°. A 45°→90° CCW arc (both offsets
+        // non-zero): centre at the origin, only the (-i, -j) corner qualifies.
+        let r = 1_000_000.0;
+        let a0 = PI / 4.0; // 45°
+        let (fx, fy) = (r * a0.cos(), r * a0.sin());
+        let (tx, ty) = (0.0, r); // 90°
+        let (i, j) = (fx.abs(), fy.abs()); // unsigned offsets to the origin
+        let c = single_quadrant_center(fx, fy, tx, ty, i, j, true)
+            .expect("a valid <=90° single-quadrant centre exists");
+        assert!(
+            c.0.abs() < 1.0 && c.1.abs() < 1.0,
+            "single-quadrant centre {c:?} should be ~(0,0)"
+        );
+        // No corner yields a valid <=90° arc for a bogus (too-far) endpoint.
+        assert!(
+            single_quadrant_center(fx, fy, 5.0 * r, 5.0 * r, i, j, true).is_none(),
+            "inconsistent single-quadrant arc must be rejected, not guessed"
+        );
     }
 
     #[test]
