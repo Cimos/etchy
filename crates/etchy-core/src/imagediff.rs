@@ -49,9 +49,16 @@ pub struct ImageDiffOptions {
     pub ink_threshold: u8,
     /// Per-channel absolute delta above this counts a same-ink pixel as *changed*.
     pub change_threshold: u8,
-    /// Connected changed components smaller than this many pixels are dropped as
-    /// noise (anti-aliasing shimmer, rescan speckle) — they count toward neither
-    /// the region total nor the pixel tallies.
+    /// Connected changed components smaller than this many pixels are hidden from
+    /// the overlay, the region total, and the pixel tallies as likely noise
+    /// (anti-aliasing shimmer, rescan speckle). Any hidden region is still counted
+    /// in [`ImageDiffStats::suppressed_px`] / `suppressed_regions` and still trips
+    /// [`ImageDiffStats::has_any_change`], so the floor can never turn a genuine
+    /// change into a silent "no differences" (the trust bar).
+    ///
+    /// The default is `1`, which hides nothing — every changed region survives.
+    /// A thin feature can rasterize to exactly one pixel at low DPI, so a floor
+    /// above 1 is opt-in, not the shipping default.
     pub min_region_px: u32,
 }
 
@@ -60,7 +67,7 @@ impl Default for ImageDiffOptions {
         Self {
             ink_threshold: 128,
             change_threshold: 24,
-            min_region_px: 2,
+            min_region_px: 1,
         }
     }
 }
@@ -74,11 +81,29 @@ pub struct ImageDiffStats {
     pub removed_px: u64,
     pub changed_px: u64,
     pub total_px: u64,
-    /// `(added+removed+changed) / total`.
+    /// `(added+removed+changed) / total` — the fraction of pixels in *surviving*
+    /// (above-floor) changed regions. A page whose only change is sub-floor reads
+    /// 0.0 here yet still has `suppressed_px > 0`; use [`Self::has_any_change`],
+    /// not this fraction, to decide whether anything changed.
     pub changed_fraction: f64,
     /// Connected components (4-connectivity) over the union changed mask, after
-    /// the `min_region_px` filter.
+    /// the `min_region_px` filter (i.e. only regions at or above the floor).
     pub regions: u32,
+    /// Pixels in changed regions the `min_region_px` floor hid from the overlay
+    /// and the tallies. `0` at the default floor. Surfaced so a hidden change is
+    /// never invisible — the noise filter declutters, it does not silence.
+    pub suppressed_px: u64,
+    /// Number of sub-floor changed regions hidden by the `min_region_px` filter.
+    pub suppressed_regions: u32,
+}
+
+impl ImageDiffStats {
+    /// True when this page carries ANY change — including sub-floor regions the
+    /// noise filter hid from the tallies. Change-detection must use this, never
+    /// `changed_fraction`, or a hidden region becomes a silent miss (trust bar).
+    pub fn has_any_change(&self) -> bool {
+        self.added_px > 0 || self.removed_px > 0 || self.changed_px > 0 || self.suppressed_px > 0
+    }
 }
 
 /// The diff of one page pair: tallies plus a renderable overlay.
@@ -163,6 +188,8 @@ pub fn diff_images(old: &Image, new: &Image, opts: &ImageDiffOptions) -> Result<
     // any smaller than `min_region_px` — clearing them back to Unchanged so the
     // pixel tallies and the region count agree.
     let mut regions: u32 = 0;
+    let mut suppressed_px: u64 = 0;
+    let mut suppressed_regions: u32 = 0;
     let mut visited = vec![false; n];
     let mut stack: Vec<usize> = Vec::new();
     for start in 0..n {
@@ -189,8 +216,12 @@ pub fn diff_images(old: &Image, new: &Image, opts: &ImageDiffOptions) -> Result<
             }
         }
         if (members.len() as u32) < opts.min_region_px {
+            // Below the floor: hide from the overlay/tallies as likely noise, but
+            // record it so the change is surfaced, never silently dropped.
+            suppressed_regions += 1;
+            suppressed_px += members.len() as u64;
             for m in members {
-                class[m] = Class::Unchanged; // noise — drop it
+                class[m] = Class::Unchanged;
             }
         } else {
             regions += 1;
@@ -239,6 +270,8 @@ pub fn diff_images(old: &Image, new: &Image, opts: &ImageDiffOptions) -> Result<
             total_px,
             changed_fraction,
             regions,
+            suppressed_px,
+            suppressed_regions,
         },
         overlay: Image {
             width: w,
@@ -329,18 +362,55 @@ mod tests {
     }
 
     #[test]
-    fn min_region_px_drops_speckle() {
-        // A lone changed pixel is dropped at the default min_region_px (2)…
+    fn a_lone_pixel_change_is_never_a_silent_miss_at_the_default_floor() {
+        // #260 trust bar: a genuine one-pixel change (a thin feature at low DPI can
+        // rasterize to exactly 1px) must NOT read as "no differences" under the
+        // shipping default options. The default floor hides nothing.
         let old = img(5, 5, &[]);
         let new = img(5, 5, &[(12, [0, 0, 0])]);
-        let dropped = diff_images(&old, &new, &ImageDiffOptions::default()).unwrap();
-        assert_eq!(dropped.stats.regions, 0, "1px < min_region_px(2) → noise");
-        assert_eq!(dropped.stats.added_px, 0, "dropped from tallies too");
-        // …but a 2-pixel adjacent blob survives.
+        let r = diff_images(&old, &new, &ImageDiffOptions::default()).unwrap();
+        assert!(
+            r.stats.has_any_change(),
+            "a 1px change was silently dropped — trust-bar failure"
+        );
+        assert!(
+            r.stats.changed_fraction > 0.0,
+            "changed_fraction tipped to 0.0 on a genuine change"
+        );
+        assert_eq!(r.stats.added_px, 1, "the pixel is tallied by default");
+        assert_eq!(r.stats.regions, 1);
+        assert_eq!(
+            r.stats.suppressed_px, 0,
+            "nothing hidden at the default floor"
+        );
+    }
+
+    #[test]
+    fn min_region_px_hides_speckle_but_surfaces_it() {
+        // With an explicit floor of 2 a lone changed pixel is hidden from the
+        // overlay/tallies as likely noise…
+        let opts = ImageDiffOptions {
+            min_region_px: 2,
+            ..Default::default()
+        };
+        let old = img(5, 5, &[]);
+        let new = img(5, 5, &[(12, [0, 0, 0])]);
+        let dropped = diff_images(&old, &new, &opts).unwrap();
+        assert_eq!(dropped.stats.regions, 0, "1px < min_region_px(2) → hidden");
+        assert_eq!(dropped.stats.added_px, 0, "hidden from tallies too");
+        // …but the suppression is surfaced, never silent, and still counts as a change.
+        assert_eq!(dropped.stats.suppressed_px, 1, "hidden pixel is surfaced");
+        assert_eq!(dropped.stats.suppressed_regions, 1);
+        assert!(
+            dropped.stats.has_any_change(),
+            "a hidden sub-floor region is still a change (no silent miss)"
+        );
+        // A 2-pixel adjacent blob survives above the floor.
         let new2 = img(5, 5, &[(12, [0, 0, 0]), (13, [0, 0, 0])]);
-        let kept = diff_images(&old, &new2, &ImageDiffOptions::default()).unwrap();
+        let kept = diff_images(&old, &new2, &opts).unwrap();
         assert_eq!(kept.stats.regions, 1);
         assert_eq!(kept.stats.added_px, 2);
+        assert_eq!(kept.stats.suppressed_px, 0);
     }
 
     #[test]
