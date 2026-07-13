@@ -1561,8 +1561,13 @@ impl ViewApp {
         // note into each artifact making the view/export disagreement explainable
         // rather than silent (#245/#91).
         let note = export_filter_note(self.min_area_mm2);
+        // Export with the diff colours the user is actually looking at, not the
+        // hard-coded defaults — the file must agree with the screen, including the
+        // colour-safe preset (#244).
+        let added_hex = color_to_svg_hex(self.col_added);
+        let removed_hex = color_to_svg_hex(self.col_removed);
         for (i, l) in chosen.iter().enumerate() {
-            let mut svg = etchy_core::layer_svg(l);
+            let mut svg = etchy_core::layer_svg_with_colors(l, &added_hex, &removed_hex);
             if let Some(note) = &note {
                 // A leading XML comment is valid in the SVG prolog and ignored by
                 // renderers, so the drawing is unchanged — only annotated.
@@ -2139,6 +2144,13 @@ fn rgba_to_color([r, g, b, a]: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
+/// `Color32` -> a `#rrggbb` SVG fill string (alpha dropped — the export fills are
+/// opaque). Used to thread the user's diff colours into the SVG export (#244).
+fn color_to_svg_hex(c: Color32) -> String {
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
 /// The user-tunable view state, persisted via eframe storage (#52). Colours are
 /// `[u8; 4]` because `Color32` isn't `Serialize`; everything round-trips through
 /// [`ViewApp::to_settings`] / [`ViewApp::apply_settings`].
@@ -2630,12 +2642,28 @@ impl ViewApp {
                 return;
             };
             let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut oversized: Option<anyhow::Error> = None;
             for h in handles {
                 let name = h.file_name();
+                // Check `File.size` BEFORE reading, so an oversized upload is
+                // rejected without ever pulling it into wasm memory (#247).
+                let size = h.inner().size();
+                if size > loader::MAX_LAYER_FILE_BYTES as f64 {
+                    oversized = Some(anyhow::anyhow!(
+                        "{} is {} bytes, over the {}-byte per-file limit",
+                        basename(&name),
+                        size as u64,
+                        loader::MAX_LAYER_FILE_BYTES
+                    ));
+                    break;
+                }
                 let bytes = h.read().await;
                 byte_files.push((basename(&name), bytes));
             }
-            let result = files_to_source(byte_files, "uploaded");
+            let result = match oversized {
+                Some(e) => Err(e),
+                None => files_to_source(byte_files, "uploaded"),
+            };
             let _ = tx.send(FilePick { side, result });
             ctx.request_repaint();
         });
@@ -2933,6 +2961,20 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSour
     }
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
     for p in paths {
+        // Check the size from metadata BEFORE reading, so an oversized drop is
+        // rejected without ever buffering it into RAM (#247; same pre-read guard
+        // as `read_pdf_bytes` and the folder loader).
+        let len = p
+            .metadata()
+            .with_context(|| format!("reading metadata for {}", p.display()))?
+            .len();
+        if len > loader::MAX_LAYER_FILE_BYTES {
+            anyhow::bail!(
+                "{} is {len} bytes, over the {}-byte per-file limit",
+                p.display(),
+                loader::MAX_LAYER_FILE_BYTES
+            );
+        }
         let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
         files.push((path_label(p), bytes));
     }
@@ -6618,6 +6660,29 @@ mod tests {
     // Minimal valid RS-274X: one 1mm circular flash at the origin (same fixture
     // as the loader tests).
     const MIN_GERBER: &[u8] = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
+
+    // #247: a dropped file over the per-file cap must be rejected from its
+    // metadata, before any bytes are read. The fixture is a *sparse* file whose
+    // logical length exceeds the cap but occupies almost no disk — if the guard
+    // ever fell through to `fs::read` it would try to buffer 100 MiB+ (the point
+    // of the bug), so a clean rejection proves the check runs pre-read.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropped_oversized_file_is_rejected_before_reading() {
+        use super::{load_dropped_paths, loader};
+        let dir = std::env::temp_dir().join(format!("etchy-drop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge-F_Cu.gtl");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(loader::MAX_LAYER_FILE_BYTES + 1).unwrap();
+        drop(f);
+        let err = load_dropped_paths(std::slice::from_ref(&path))
+            .err()
+            .map(|e| e.to_string());
+        std::fs::remove_dir_all(&dir).ok();
+        let err = err.expect("an oversized drop must be rejected");
+        assert!(err.contains("per-file limit"), "got: {err}");
+    }
 
     #[test]
     fn files_to_source_routes_a_single_pdf_to_pdf_mode() {
