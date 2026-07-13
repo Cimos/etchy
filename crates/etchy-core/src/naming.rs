@@ -84,6 +84,119 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
     }
 }
 
+/// Parse the X2 `.FileFunction` file attribute (`%TF.FileFunction,<args>*%`) out
+/// of a Gerber's bytes and map it to a [`LayerKind`] (#239). X2 files declare
+/// their true layer role machine-readably, so this is authoritative where the
+/// filename heuristic is silent and a cross-check where it is not — see
+/// [`reconcile_kind`]. Returns `None` when the attribute is absent or names a role
+/// we don't model, so callers fall back to the filename (never a guess).
+///
+/// Byte-sniffed like [`looks_like_gerber`] / [`crate::gerber_format`] — the
+/// attribute is a standalone `%…%` block, so we don't need the full parse. The
+/// first `.FileFunction` declaration wins.
+pub fn file_function(bytes: &[u8]) -> Option<LayerKind> {
+    let text = String::from_utf8_lossy(bytes);
+    let body = text.lines().find_map(|l| {
+        let l = l.trim();
+        let l = l.strip_prefix('%').unwrap_or(l);
+        // Strip the trailing block terminator (`*%` after the `%` prefix is gone,
+        // so `*`), tolerating a missing one.
+        l.strip_prefix("TF.FileFunction,")
+            .map(|rest| rest.trim_end_matches('%').trim_end_matches('*'))
+    })?;
+    let mut f = body.split(',').map(str::trim);
+    let role = f.next()?;
+    // Position keyword (`Top` / `Bot`) → the top/bottom pair for a side-scoped
+    // layer (mask/legend/paste). `None` for anything else.
+    let side_pair = |top: LayerKind, bot: LayerKind, s: Option<&str>| match s
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
+        Some("TOP") => Some(top),
+        Some("BOT") => Some(bot),
+        _ => None,
+    };
+    match role.to_ascii_uppercase().as_str() {
+        "COPPER" => {
+            // Copper,L<n>,<Top|Bot|Inr>[,<type>]
+            let layer = f.next()?; // e.g. "L2"
+            let side = f.next()?.to_ascii_uppercase();
+            let n: u8 = layer.trim_start_matches(['L', 'l']).parse().ok()?;
+            match side.as_str() {
+                "TOP" => Some(LayerKind::TopCopper),
+                "BOT" => Some(LayerKind::BottomCopper),
+                // Physical stack number `L<n>` → ORDINAL inner index (top = L1), so
+                // `L2` is the 1st inner — matching classify()'s `.gl<n>` and
+                // `In<n>_Cu` handling so an attribute and a filename agree on the
+                // same physical layer. `L1,Inr` is malformed → `None`.
+                "INR" => n
+                    .checked_sub(1)
+                    .filter(|o| *o >= 1)
+                    .map(LayerKind::InnerCopper),
+                _ => None,
+            }
+        }
+        "SOLDERMASK" => side_pair(LayerKind::TopMask, LayerKind::BottomMask, f.next()),
+        "LEGEND" => side_pair(LayerKind::TopSilk, LayerKind::BottomSilk, f.next()),
+        "PASTE" => side_pair(LayerKind::TopPaste, LayerKind::BottomPaste, f.next()),
+        // Board outline. Plating suffix (`,P` / `,NP`) is irrelevant to the kind.
+        "PROFILE" => Some(LayerKind::Outline),
+        // Drill/rout files carry their plating in the role itself.
+        "PLATED" => Some(LayerKind::Drill(DrillKind::Plated)),
+        "NONPLATED" => Some(LayerKind::Drill(DrillKind::NonPlated)),
+        _ => None,
+    }
+}
+
+/// A human label for a [`LayerKind`] that keeps the inner-copper index (unlike the
+/// JSON-contract [`LayerKind::kind_str`], where every inner is just
+/// `"inner-copper"`), so a conflict warning names the exact layer.
+fn kind_label(k: LayerKind) -> String {
+    match k.inner_index() {
+        Some(n) => format!("inner-copper-{n}"),
+        None => k.kind_str().to_string(),
+    }
+}
+
+/// Cross-check the filename classification against the X2 `.FileFunction`
+/// attribute (#239) and return the kind to use plus an optional warning. This is a
+/// confirmation / tiebreaker, **never a silent override** (the trust bar):
+///
+/// * attribute absent → filename kind, no warning (behaviour unchanged);
+/// * attribute agrees → filename kind, no warning (confirmed);
+/// * filename matched nothing (`Other`) but the file declares a role → adopt the
+///   attribute and note it (the recovery this issue is about — a rename that broke
+///   the heuristic, e.g. #111/#176);
+/// * both are concrete but disagree → keep the (pairing-stable) filename kind and
+///   warn loudly, so a genuine mismatch is surfaced, not silently resolved.
+pub fn reconcile_kind(
+    filename: LayerKind,
+    attr: Option<LayerKind>,
+    label: &str,
+) -> (LayerKind, Option<String>) {
+    let Some(attr) = attr else {
+        return (filename, None);
+    };
+    if attr == filename {
+        return (filename, None);
+    }
+    if filename == LayerKind::Other {
+        let msg = format!(
+            "{label}: filename matched no layer naming pattern; classified as {} from its \
+             X2 .FileFunction attribute",
+            kind_label(attr)
+        );
+        return (attr, Some(msg));
+    }
+    let msg = format!(
+        "{label}: filename classifies this as {} but its X2 .FileFunction attribute says {}; \
+         keeping the filename classification — check the export or rename the file",
+        kind_label(filename),
+        kind_label(attr)
+    );
+    (filename, Some(msg))
+}
+
 /// Detect drill plating from a filename stem (#237). Fab tools mark plated vs
 /// non-plated holes with `PTH` / `NPTH` (KiCad `*-PTH.drl` / `*-NPTH.drl`, Altium
 /// split drills) or the spelled-out `PLATED` / `NON-PLATED`. NPTH is checked
@@ -242,6 +355,121 @@ mod tests {
         assert_eq!(drill_kind("board Non Plated"), DrillKind::NonPlated);
         assert_eq!(drill_kind("board-plated"), DrillKind::Plated);
         assert_eq!(drill_kind("Board.TXT-ish"), DrillKind::Unspecified);
+    }
+
+    // ---- #239: X2 .FileFunction attribute cross-check ----
+
+    /// Wrap a `.FileFunction` value in a minimal valid X2 header.
+    fn ff(value: &str) -> Vec<u8> {
+        format!("%FSLAX46Y46*%\n%MOMM*%\n%TF.FileFunction,{value}*%\nM02*\n").into_bytes()
+    }
+
+    #[test]
+    fn file_function_maps_standard_roles() {
+        assert_eq!(
+            file_function(&ff("Copper,L1,Top")),
+            Some(LayerKind::TopCopper)
+        );
+        assert_eq!(
+            file_function(&ff("Copper,L4,Bot")),
+            Some(LayerKind::BottomCopper)
+        );
+        // Physical L2 = 1st inner (ordinal), matching `.gl2` / `In1_Cu`.
+        assert_eq!(
+            file_function(&ff("Copper,L2,Inr")),
+            Some(LayerKind::InnerCopper(1))
+        );
+        assert_eq!(
+            file_function(&ff("Copper,L3,Inr")),
+            Some(LayerKind::InnerCopper(2))
+        );
+        assert_eq!(
+            file_function(&ff("Soldermask,Top")),
+            Some(LayerKind::TopMask)
+        );
+        assert_eq!(
+            file_function(&ff("Soldermask,Bot")),
+            Some(LayerKind::BottomMask)
+        );
+        assert_eq!(file_function(&ff("Legend,Top")), Some(LayerKind::TopSilk));
+        assert_eq!(
+            file_function(&ff("Paste,Bot")),
+            Some(LayerKind::BottomPaste)
+        );
+        assert_eq!(file_function(&ff("Profile,NP")), Some(LayerKind::Outline));
+        assert_eq!(file_function(&ff("Profile")), Some(LayerKind::Outline));
+        assert_eq!(
+            file_function(&ff("Plated,1,2,PTH")),
+            Some(LayerKind::Drill(DrillKind::Plated))
+        );
+        assert_eq!(
+            file_function(&ff("NonPlated,1,2,NPTH")),
+            Some(LayerKind::Drill(DrillKind::NonPlated))
+        );
+    }
+
+    #[test]
+    fn file_function_absent_or_unmodelled_is_none() {
+        // No attribute at all → None (filename-only path, unchanged behaviour).
+        assert_eq!(file_function(b"%FSLAX46Y46*%\n%MOMM*%\nM02*\n"), None);
+        // A role we deliberately don't model → None, never a wrong guess.
+        assert_eq!(file_function(&ff("Glue,Top")), None);
+        assert_eq!(file_function(&ff("Other,mystery")), None);
+        // Malformed inner (L1 can't be an inner layer) → None, not InnerCopper(0).
+        assert_eq!(file_function(&ff("Copper,L1,Inr")), None);
+    }
+
+    #[test]
+    fn reconcile_absent_attribute_keeps_filename() {
+        // Behaviour unchanged when the file carries no .FileFunction.
+        let (k, w) = reconcile_kind(LayerKind::TopCopper, None, "F_Cu.gbr");
+        assert_eq!(k, LayerKind::TopCopper);
+        assert!(w.is_none());
+    }
+
+    #[test]
+    fn reconcile_agreement_is_silent() {
+        let (k, w) = reconcile_kind(LayerKind::TopCopper, Some(LayerKind::TopCopper), "F_Cu.gbr");
+        assert_eq!(k, LayerKind::TopCopper);
+        assert!(w.is_none(), "a confirming attribute must not warn");
+    }
+
+    #[test]
+    fn reconcile_recovers_other_from_attribute() {
+        // The #239 win: an unrecognized filename that the file itself classifies.
+        // The attribute is adopted, and the promotion is surfaced (not silent).
+        let (k, w) = reconcile_kind(
+            LayerKind::Other,
+            Some(LayerKind::InnerCopper(2)),
+            "weird-name.xyz",
+        );
+        assert_eq!(k, LayerKind::InnerCopper(2));
+        let w = w.expect("adopting the attribute must be surfaced");
+        assert!(
+            w.contains("weird-name.xyz") && w.contains("inner-copper-2"),
+            "{w}"
+        );
+    }
+
+    #[test]
+    fn reconcile_conflict_keeps_filename_and_warns() {
+        // Trust bar: a genuine disagreement is NOT silently overridden. The
+        // pairing-stable filename kind is kept, and the conflict is warned loudly.
+        let (k, w) = reconcile_kind(
+            LayerKind::TopCopper,
+            Some(LayerKind::BottomCopper),
+            "F_Cu.gbr",
+        );
+        assert_eq!(
+            k,
+            LayerKind::TopCopper,
+            "filename classification is retained"
+        );
+        let w = w.expect("a real conflict must warn");
+        assert!(
+            w.contains("top-copper") && w.contains("bottom-copper") && w.contains("F_Cu.gbr"),
+            "warning names both kinds and the file: {w}"
+        );
     }
 
     #[test]
