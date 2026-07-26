@@ -95,6 +95,25 @@ pub fn page_plan(alignment: &PageAlignment) -> Vec<PagePlanRow> {
         .collect()
 }
 
+/// A paired sheet whose two sides rasterized to different pixel sizes — its paper
+/// size changed between revisions (#262). Mirrors `etchy_pdf::SizeChange`, kept
+/// local so the view model and its tests compile without the `pdf` feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageSizeChange {
+    pub old: (u32, u32),
+    pub new: (u32, u32),
+}
+
+impl std::fmt::Display for PageSizeChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}x{} px -> {}x{} px",
+            self.old.0, self.old.1, self.new.0, self.new.1
+        )
+    }
+}
+
 /// A page row's label. Page numbers name the revision they belong to, so a sheet
 /// that moved between revisions says so instead of hiding behind a row number
 /// (#249: which sheets were compared must never be guesswork).
@@ -108,10 +127,12 @@ pub fn row_label(old_page: Option<usize>, new_page: Option<usize>) -> String {
     }
 }
 
-/// Whether a page row counts as changed: any diffed pixels, or the page exists on
-/// one side only (the whole sheet appeared/disappeared). Pure → unit-testable.
-pub fn row_changed(presence: Presence, changed_fraction: f64) -> bool {
-    presence != Presence::Both || changed_fraction > 0.0
+/// Whether a page row counts as changed: any diffed pixels, the page exists on
+/// one side only (the whole sheet appeared/disappeared), or its paper size changed
+/// (#262 — a resized sheet has no changed pixels to count, but it IS a change).
+/// Pure → unit-testable.
+pub fn row_changed(presence: Presence, changed_fraction: f64, resized: bool) -> bool {
+    presence != Presence::Both || resized || changed_fraction > 0.0
 }
 
 /// Display order for the Pages panel: changed pages first, stable by page number
@@ -160,16 +181,25 @@ pub struct PageRow {
     pub new_page: Option<usize>,
     pub presence: Presence,
     pub changed: bool,
-    /// `(added+removed+changed) / total` pixels; 1.0 for an unpaired page.
+    /// `(added+removed+changed) / total` pixels; 1.0 for an unpaired or resized
+    /// page (the whole sheet is the change).
     pub changed_fraction: f64,
-    /// Raster dimensions in pixels (both sides match for paired pages — a size
-    /// mismatch fails loud at build time).
+    /// Framing size in pixels: both sides for a normal pair, and the larger of
+    /// the two when the sheet was resized, so the camera frames either side.
     pub width: u32,
     pub height: u32,
+    /// Each side's own raster size, so a resized sheet draws both sides at their
+    /// true scale — etchy never stretches one raster onto the other's frame.
+    pub old_dims: Option<(u32, u32)>,
+    pub new_dims: Option<(u32, u32)>,
+    /// Set when this sheet's paper size changed between revisions (#262): there
+    /// is no pixel overlay and the whole page counts as changed.
+    pub size_change: Option<PageSizeChange>,
     pub old_img: Option<Image>,
     pub new_img: Option<Image>,
     /// The diff overlay raster (green added / red removed / amber changed on
-    /// board-dark), kept after texture upload for PNG export.
+    /// board-dark), kept after texture upload for PNG export. `None` for an
+    /// unpaired sheet and for a resized one (nothing to overlay).
     pub overlay_img: Option<Image>,
     old_tex: Option<egui::TextureHandle>,
     new_tex: Option<egui::TextureHandle>,
@@ -185,27 +215,34 @@ fn upload(ctx: &egui::Context, name: String, img: &Image) -> egui::TextureHandle
 }
 
 impl PageRow {
-    /// Constructor mirrors the row's fields one-to-one (the images are what push
-    /// it over clippy's argument budget — a builder would be pure ceremony here).
-    #[allow(clippy::too_many_arguments)]
+    /// Build a row from its rasters. Sizes are read off the images themselves, so
+    /// the framing size and each side's true size can never drift apart.
     pub fn new(
         plan: PagePlanRow,
         changed_fraction: f64,
-        width: u32,
-        height: u32,
         old_img: Option<Image>,
         new_img: Option<Image>,
         overlay_img: Option<Image>,
+        size_change: Option<PageSizeChange>,
     ) -> Self {
+        let dims = |i: &Option<Image>| i.as_ref().map(|i| (i.width, i.height));
+        let (old_dims, new_dims) = (dims(&old_img), dims(&new_img));
+        // Frame the larger of the two sides: with a resized sheet the smaller one
+        // must still fit, and for a normal pair both are identical.
+        let width = old_dims.map_or(0, |d| d.0).max(new_dims.map_or(0, |d| d.0));
+        let height = old_dims.map_or(0, |d| d.1).max(new_dims.map_or(0, |d| d.1));
         Self {
             page: plan.row,
             old_page: plan.old_page,
             new_page: plan.new_page,
             presence: plan.presence,
-            changed: row_changed(plan.presence, changed_fraction),
+            changed: row_changed(plan.presence, changed_fraction, size_change.is_some()),
             changed_fraction,
             width,
             height,
+            old_dims,
+            new_dims,
+            size_change,
             old_img,
             new_img,
             overlay_img,
@@ -219,6 +256,22 @@ impl PageRow {
     /// so when a sheet moved between revisions.
     pub fn label(&self) -> String {
         row_label(self.old_page, self.new_page)
+    }
+
+    /// World bbox (nm) of the old-side raster, at its own true scale.
+    pub fn old_bbox(&self, dpi: f32) -> Option<[i64; 4]> {
+        self.old_dims.map(|(w, h)| page_world_bbox(w, h, dpi))
+    }
+
+    /// World bbox (nm) of the new-side raster, at its own true scale.
+    pub fn new_bbox(&self, dpi: f32) -> Option<[i64; 4]> {
+        self.new_dims.map(|(w, h)| page_world_bbox(w, h, dpi))
+    }
+
+    /// World bbox (nm) the camera should frame: the union of the two sides (both
+    /// start at the origin), so a resized sheet shows either side whole.
+    pub fn fit_bbox(&self, dpi: f32) -> [i64; 4] {
+        page_world_bbox(self.width, self.height, dpi)
     }
 
     /// Old-side texture, uploaded once on first use; the source raster is dropped
@@ -357,37 +410,37 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         let o = plan.old_page.and_then(|p| old_imgs[p - 1].take());
         let n = plan.new_page.and_then(|p| new_imgs[p - 1].take());
         let row = match (o, n) {
+            (Some(o), Some(n)) if o.width != n.width || o.height != n.height => {
+                // The sheet's paper size changed (#262). There is no pixel
+                // correspondence to diff, so the row is wholly changed and says
+                // so — the load keeps going, and neither raster is rescaled.
+                let size_change = PageSizeChange {
+                    old: (o.width, o.height),
+                    new: (n.width, n.height),
+                };
+                PageRow::new(plan, 1.0, Some(o), Some(n), None, Some(size_change))
+            }
             (Some(o), Some(n)) => {
-                // Paired sheet: ALWAYS the full pixel diff — the fingerprint
-                // chose the pairing and nothing else. A size mismatch (a resized
-                // sheet) fails loud: that is itself a change to flag, never a
-                // rescale.
+                // Paired same-size sheet: ALWAYS the full pixel diff — the
+                // fingerprint chose the pairing and nothing else.
                 let diff = etchy_core::diff_images(&o, &n, &Default::default())
                     .map_err(|e| anyhow::anyhow!("{e}"))
                     .with_context(|| {
                         format!("diffing {}", row_label(plan.old_page, plan.new_page))
                     })?;
-                let (w, h) = (o.width, o.height);
                 PageRow::new(
                     plan,
                     diff.stats.changed_fraction,
-                    w,
-                    h,
                     Some(o),
                     Some(n),
                     Some(diff.overlay),
+                    None,
                 )
             }
             // Unpaired sheet: the whole page appeared or disappeared — carried as
             // an explicit changed row with only its own side's raster.
-            (Some(o), None) => {
-                let (w, h) = (o.width, o.height);
-                PageRow::new(plan, 1.0, w, h, Some(o), None, None)
-            }
-            (None, Some(n)) => {
-                let (w, h) = (n.width, n.height);
-                PageRow::new(plan, 1.0, w, h, None, Some(n), None)
-            }
+            (Some(o), None) => PageRow::new(plan, 1.0, Some(o), None, None, None),
+            (None, Some(n)) => PageRow::new(plan, 1.0, None, Some(n), None, None),
             (None, None) => unreachable!("every plan row names at least one side"),
         };
         rows.push(row);
@@ -512,12 +565,14 @@ mod tests {
     }
 
     #[test]
-    fn unpaired_pages_always_count_as_changed() {
-        assert!(!row_changed(Presence::Both, 0.0));
-        assert!(row_changed(Presence::Both, 0.001));
+    fn unpaired_and_resized_pages_always_count_as_changed() {
+        assert!(!row_changed(Presence::Both, 0.0, false));
+        assert!(row_changed(Presence::Both, 0.001, false));
         // A sheet appearing or disappearing IS a change, whatever its pixels say.
-        assert!(row_changed(Presence::OldOnly, 0.0));
-        assert!(row_changed(Presence::NewOnly, 0.0));
+        assert!(row_changed(Presence::OldOnly, 0.0, false));
+        assert!(row_changed(Presence::NewOnly, 0.0, false));
+        // And so is a resized sheet, which has no changed pixels to count (#262).
+        assert!(row_changed(Presence::Both, 0.0, true));
     }
 
     #[test]
@@ -734,6 +789,49 @@ mod pdf_tests {
         let news: Vec<usize> = v.rows.iter().filter_map(|r| r.new_page).collect();
         assert_eq!(olds, vec![1, 2, 3]);
         assert_eq!(news, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_resized_sheet_is_a_changed_row_not_a_failed_load() {
+        // #262: a sheet whose paper size changed used to fail the whole load with
+        // ImageSizeMismatch. It is a legitimate revision diff: the row loads,
+        // reads as wholly changed, and says why.
+        let old = multi_page_pdf(&[test_sheet(10, 10), test_sheet(60, 60)]);
+        let new = multi_page_pdf(&[
+            TestSheet {
+                size: (100, 200),
+                square: (10, 10),
+            },
+            test_sheet(60, 60),
+        ]);
+        let v = build_pdf_view(&old, &new, 150.0).expect("a resized sheet must still load");
+        assert_eq!(v.rows.len(), 2);
+        let row = &v.rows[0];
+        assert_eq!(row.presence, Presence::Both, "the sheet is on both sides");
+        assert!(row.changed, "a resized sheet is a change");
+        assert_eq!(row.changed_fraction, 1.0, "the whole sheet is the change");
+        let sc = row.size_change.expect("the size change is on the row");
+        assert_eq!((sc.old, sc.new), ((208, 208), (208, 416)));
+        assert!(
+            row.overlay_img.is_none(),
+            "different dimensions have no pixel overlay"
+        );
+        assert!(
+            row.old_img.is_some() && row.new_img.is_some(),
+            "both sides are still viewable"
+        );
+        // Each side keeps its own world bbox, so neither raster is stretched to
+        // fit the other — etchy never rescales a raster.
+        assert_ne!(row.old_bbox(v.dpi), row.new_bbox(v.dpi));
+        assert_eq!(
+            row.fit_bbox(v.dpi),
+            page_world_bbox(208, 416, v.dpi),
+            "the camera frames the larger of the two sheets"
+        );
+        // The rest of the document still diffed: page 2 is untouched and clean.
+        assert!(!v.rows[1].changed);
+        assert!(v.rows[1].overlay_img.is_some());
+        assert_eq!(v.changed_count(), 1);
     }
 
     #[test]

@@ -21,6 +21,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default binaries stay lean. CLI wiring lands next.
 
 ### Fixed
+- **A schematic page whose paper size changed is now a diff, not an error**
+  (#262). A resized sheet used to fail the whole run with `ImageSizeMismatch` and
+  exit 2 — which CI treats as infrastructure failure to retry, not a review gate
+  to block. A resized sheet is a legitimate revision diff, so it is now reported
+  as a fully-changed page and the run exits 1; exit 2 is reserved for input etchy
+  cannot render at all. The rest of the document still diffs normally. Both pixel
+  sizes are named in the summary, the Markdown, the JSON (`size_change`), and the
+  viewer, so a 100%-changed page with zero changed pixels never looks like a tool
+  bug. Two rasters of different sizes have no pixel correspondence, so such a page
+  has no diff overlay: the viewer shows both sheets side by side at their true
+  scale (etchy still never rescales a raster) and the Export tab names the page
+  and the reason instead of quietly omitting its PNG.
 - **A PDF sheet inserted mid-document no longer desyncs every later page**
   (#249). Pages used to pair strictly by index, so inserting one sheet made every
   following pair compare the wrong sheets — all of them reported as heavily

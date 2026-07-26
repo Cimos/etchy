@@ -332,6 +332,56 @@ mod with_pdf {
     }
 
     #[test]
+    fn a_page_size_change_exits_1_with_a_size_note_not_exit_2() {
+        // #262: a sheet resized between revisions is a legitimate revision diff.
+        // It must exit 1 (differences found) with the size change spelled out —
+        // exit 2 is reserved for input etchy cannot render at all, and a CI gate
+        // treats it as infrastructure failure rather than a review block.
+        let old = write_multi_page_pdf("262-old", &[sheet(10, 10), sheet(60, 60)]);
+        let new = write_multi_page_pdf("262-new", &[(100, 200, 10, 10), sheet(60, 60)]);
+        let out_dir = scratch("262-out");
+        let out = etchy()
+            .arg("--dpi")
+            .arg("72")
+            .arg(&old)
+            .arg(&new)
+            .arg("--out")
+            .arg(&out_dir)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "a resized sheet is a diff, not an error: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("differences found"), "{stdout}");
+        assert!(
+            stdout.contains("size change") && stdout.contains("100x100 px -> 100x200 px"),
+            "the summary names both sizes: {stdout}"
+        );
+        assert!(
+            stdout.contains("1 pixel-diffed, 1 resized"),
+            "the count line does not claim the resized sheet was diffed: {stdout}"
+        );
+        // The rest of the document still diffed, and the unaffected page 2 is
+        // clean (no overlay written for it, nothing changed).
+        assert!(
+            !out_dir.join("page-1.png").exists(),
+            "a resized sheet has no overlay to write"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("no overlay for page 1") && stderr.contains("page size changed"),
+            "the missing overlay is explained: {stderr}"
+        );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
     fn zero_pixel_dpi_fails_loud_not_no_change() {
         // A tiny positive DPI floors the page to 0x0 px. Diffing zero pixels
         // would read as "no differences" — a silent false negative — so it must
