@@ -95,9 +95,11 @@ pub fn page_plan(alignment: &PageAlignment) -> Vec<PagePlanRow> {
         .collect()
 }
 
-/// A paired sheet whose two sides rasterized to different pixel sizes — its paper
-/// size changed between revisions (#262). Mirrors `etchy_pdf::SizeChange`, kept
-/// local so the view model and its tests compile without the `pdf` feature.
+/// A paired sheet whose two sides rasterized to genuinely different pixel sizes —
+/// its paper size changed between revisions (#262). Mirrors `etchy_pdf::SizeChange`,
+/// kept local so the view model and its tests compile without the `pdf` feature.
+/// A difference of a pixel or two per axis is rasterization rounding, not this —
+/// see [`PageRoundingCrop`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageSizeChange {
     pub old: (u32, u32),
@@ -110,6 +112,28 @@ impl std::fmt::Display for PageSizeChange {
             f,
             "{}x{} px -> {}x{} px",
             self.old.0, self.old.1, self.new.0, self.new.1
+        )
+    }
+}
+
+/// A paired sheet whose two rasters differed only by rasterization rounding
+/// (within `etchy_core::SIZE_TOLERANCE_PX` per axis): the same sheet size, diffed
+/// over the pixels the two renders share (#262). Mirrors
+/// `etchy_pdf::RoundingCrop`, kept local for the same reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRoundingCrop {
+    pub old: (u32, u32),
+    pub new: (u32, u32),
+    /// The shared region both sides were cropped to before diffing.
+    pub to: (u32, u32),
+}
+
+impl std::fmt::Display for PageRoundingCrop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}x{} px / {}x{} px, diffed over the shared {}x{} px",
+            self.old.0, self.old.1, self.new.0, self.new.1, self.to.0, self.to.1
         )
     }
 }
@@ -195,6 +219,10 @@ pub struct PageRow {
     /// Set when this sheet's paper size changed between revisions (#262): there
     /// is no pixel overlay and the whole page counts as changed.
     pub size_change: Option<PageSizeChange>,
+    /// Set when the two rasters differed only by rasterization rounding and were
+    /// cropped to their shared region before diffing (#262). The page keeps its
+    /// overlay; this only says which pixels were compared.
+    pub rounding_crop: Option<PageRoundingCrop>,
     pub old_img: Option<Image>,
     pub new_img: Option<Image>,
     /// The diff overlay raster (green added / red removed / amber changed on
@@ -224,6 +252,7 @@ impl PageRow {
         new_img: Option<Image>,
         overlay_img: Option<Image>,
         size_change: Option<PageSizeChange>,
+        rounding_crop: Option<PageRoundingCrop>,
     ) -> Self {
         let dims = |i: &Option<Image>| i.as_ref().map(|i| (i.width, i.height));
         let (old_dims, new_dims) = (dims(&old_img), dims(&new_img));
@@ -243,6 +272,7 @@ impl PageRow {
             old_dims,
             new_dims,
             size_change,
+            rounding_crop,
             old_img,
             new_img,
             overlay_img,
@@ -337,9 +367,18 @@ impl PdfView {
 }
 
 /// Rasterize both PDFs at `dpi` (#223: user-settable in Settings > Diff), diff
-/// paired pages, and assemble the view. Fails loud on: unparseable PDF, a page
-/// over the pixel caps at that DPI (before any rendering), a paired page whose
-/// size changed between revisions, or a page that would rasterize to zero pixels.
+/// paired pages, and assemble the view.
+///
+/// Fails loud on: unparseable PDF, a page over the pixel caps at that DPI (before
+/// any rendering), a page count past `etchy_core::MAX_ALIGN_PAGES` (page alignment
+/// is quadratic in the page count, so it is refused before allocating), or a page
+/// that would rasterize to zero pixels.
+///
+/// A paired sheet whose paper size **changed** is NOT a failure (#262): it comes
+/// back as a wholly-changed row carrying a [`PageSizeChange`], with both sides at
+/// their true scale and no overlay. Sizes that differ only by rasterization
+/// rounding are the same sheet: both sides are cropped to their shared region and
+/// diffed normally, reported as a [`PageRoundingCrop`].
 #[cfg(feature = "pdf")]
 pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfView> {
     use anyhow::Context as _;
@@ -352,6 +391,17 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         let dims = etchy_pdf::page_pixel_dims(bytes, dpi)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("reading the {label} PDF"))?;
+        // Page alignment is a DP matrix quadratic in the page count — refuse a
+        // document pair too big for it BEFORE rasterizing a single page (#249).
+        if dims.len() > etchy_core::MAX_ALIGN_PAGES {
+            anyhow::bail!(
+                "the {label} PDF has {} pages, over the {}-page limit etchy will align \
+                 (page alignment cost grows with the square of the page count) — split \
+                 the document, or diff it with the CLI",
+                dims.len(),
+                etchy_core::MAX_ALIGN_PAGES
+            );
+        }
         for (i, (w, h)) in dims.iter().enumerate() {
             let px = u64::from(*w) * u64::from(*h);
             if px == 0 {
@@ -400,7 +450,8 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
     // re-render, and the caps above still bound everything.
     let old_fp: Vec<_> = old_imgs.iter().map(etchy_core::fingerprint).collect();
     let new_fp: Vec<_> = new_imgs.iter().map(etchy_core::fingerprint).collect();
-    let alignment = etchy_core::align_pages(&old_fp, &new_fp);
+    let alignment =
+        etchy_core::align_pages(&old_fp, &new_fp).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut old_imgs: Vec<Option<Image>> = old_imgs.into_iter().map(Some).collect();
     let mut new_imgs: Vec<Option<Image>> = new_imgs.into_iter().map(Some).collect();
     let mut rows = Vec::with_capacity(alignment.matches.len());
@@ -410,20 +461,59 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         let o = plan.old_page.and_then(|p| old_imgs[p - 1].take());
         let n = plan.new_page.and_then(|p| new_imgs[p - 1].take());
         let row = match (o, n) {
-            (Some(o), Some(n)) if o.width != n.width || o.height != n.height => {
-                // The sheet's paper size changed (#262). There is no pixel
-                // correspondence to diff, so the row is wholly changed and says
-                // so — the load keeps going, and neither raster is rescaled.
-                let size_change = PageSizeChange {
-                    old: (o.width, o.height),
-                    new: (n.width, n.height),
-                };
-                PageRow::new(plan, 1.0, Some(o), Some(n), None, Some(size_change))
-            }
             (Some(o), Some(n)) => {
+                let dims = |i: &Image| (i.width, i.height);
+                // A rounding-sized difference is the SAME sheet: crop to the
+                // shared region so the sheet keeps a real, located pixel diff.
+                // Only a genuine resize gives up the overlay (#262).
+                let (to, rounding_crop) = match etchy_core::classify_pair_size(dims(&o), dims(&n)) {
+                    etchy_core::PairSizing::Same => (None, None),
+                    etchy_core::PairSizing::Rounded { to } => (
+                        Some(to),
+                        Some(PageRoundingCrop {
+                            old: dims(&o),
+                            new: dims(&n),
+                            to,
+                        }),
+                    ),
+                    etchy_core::PairSizing::Changed => {
+                        // No pixel correspondence: the row is wholly changed
+                        // and says so — the load keeps going, and neither
+                        // raster is rescaled onto the other's frame.
+                        let size_change = PageSizeChange {
+                            old: dims(&o),
+                            new: dims(&n),
+                        };
+                        rows.push(PageRow::new(
+                            plan,
+                            1.0,
+                            Some(o),
+                            Some(n),
+                            None,
+                            Some(size_change),
+                            None,
+                        ));
+                        continue;
+                    }
+                };
                 // Paired same-size sheet: ALWAYS the full pixel diff — the
                 // fingerprint chose the pairing and nothing else.
-                let diff = etchy_core::diff_images(&o, &n, &Default::default())
+                // Cropped copies only when there is something to crop — the
+                // common path diffs the rasters in place, no clone.
+                let cropped = match to {
+                    Some((w, h)) => {
+                        let crop = |img: &Image| {
+                            etchy_core::crop_top_left(img, w, h).map_err(|e| anyhow::anyhow!("{e}"))
+                        };
+                        Some((crop(&o)?, crop(&n)?))
+                    }
+                    None => None,
+                };
+                let (od, nd) = match &cropped {
+                    Some((oc, nc)) => (oc, nc),
+                    None => (&o, &n),
+                };
+                let diff = etchy_core::diff_images(od, nd, &Default::default())
                     .map_err(|e| anyhow::anyhow!("{e}"))
                     .with_context(|| {
                         format!("diffing {}", row_label(plan.old_page, plan.new_page))
@@ -435,12 +525,13 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
                     Some(n),
                     Some(diff.overlay),
                     None,
+                    rounding_crop,
                 )
             }
             // Unpaired sheet: the whole page appeared or disappeared — carried as
             // an explicit changed row with only its own side's raster.
-            (Some(o), None) => PageRow::new(plan, 1.0, Some(o), None, None, None),
-            (None, Some(n)) => PageRow::new(plan, 1.0, None, Some(n), None, None),
+            (Some(o), None) => PageRow::new(plan, 1.0, Some(o), None, None, None, None),
+            (None, Some(n)) => PageRow::new(plan, 1.0, None, Some(n), None, None, None),
             (None, None) => unreachable!("every plan row names at least one side"),
         };
         rows.push(row);
@@ -504,6 +595,7 @@ mod tests {
                     (None, None) => unreachable!("a step names at least one side"),
                 })
                 .collect(),
+            pairing: etchy_core::Pairing::Content,
         }
     }
 
@@ -618,7 +710,7 @@ mod tests {
 #[cfg(all(test, feature = "pdf"))]
 #[derive(Clone, Copy)]
 pub(crate) struct TestSheet {
-    pub size: (i32, i32),
+    pub size: (f64, f64),
     pub square: (i32, i32),
 }
 
@@ -626,7 +718,16 @@ pub(crate) struct TestSheet {
 #[cfg(all(test, feature = "pdf"))]
 pub(crate) fn test_sheet(x: i32, y: i32) -> TestSheet {
     TestSheet {
-        size: (100, 100),
+        size: (100.0, 100.0),
+        square: (x, y),
+    }
+}
+
+/// A sheet of an arbitrary MediaBox size, in points.
+#[cfg(all(test, feature = "pdf"))]
+pub(crate) fn test_sized_sheet(w: f64, h: f64, x: i32, y: i32) -> TestSheet {
+    TestSheet {
+        size: (w, h),
         square: (x, y),
     }
 }
@@ -756,6 +857,34 @@ mod pdf_tests {
     }
 
     #[test]
+    fn a_rounding_sized_pair_keeps_its_overlay_and_says_it_was_cropped() {
+        // #262 tolerance: the same A4-landscape sheet whose MediaBox is 842 pt on
+        // one side and the exact 841.89 on the other rasterizes a pixel narrower.
+        // Comparing dimensions exactly called that a resize and dropped the
+        // overlay; it must stay a normally-diffed page, with the crop on screen.
+        let old = multi_page_pdf(&[test_sized_sheet(842.0, 595.0, 40, 40)]);
+        let new = multi_page_pdf(&[test_sized_sheet(841.9, 595.0, 300, 300)]);
+        let v = build_pdf_view(&old, &new, 150.0).expect("build");
+        let row = &v.rows[0];
+        assert!(row.size_change.is_none(), "rounding is not a resize");
+        let crop = row.rounding_crop.expect("the crop is reported");
+        assert_eq!(crop.to, (1753, 1239));
+        assert!(
+            row.overlay_img.is_some(),
+            "the sheet keeps its pixel overlay"
+        );
+        assert!(row.changed, "and the moved square is found");
+        assert!(row.changed_fraction > 0.0);
+        // The overlay covers the shared region, not either full raster.
+        let ov = row.overlay_img.as_ref().unwrap();
+        assert_eq!((ov.width, ov.height), crop.to);
+        // Nothing is listed as missing an overlay.
+        assert!(row.overlay_img.is_some());
+        let text = crop.to_string();
+        assert!(text.contains("shared 1753x1239"), "{text}");
+    }
+
+    #[test]
     fn a_mid_document_insertion_keeps_the_other_sheets_paired() {
         // #249: old [A, B, C]; new [A, X, B, C]. Index pairing made every later
         // sheet read as heavily changed; only the inserted sheet is a change.
@@ -799,7 +928,7 @@ mod pdf_tests {
         let old = multi_page_pdf(&[test_sheet(10, 10), test_sheet(60, 60)]);
         let new = multi_page_pdf(&[
             TestSheet {
-                size: (100, 200),
+                size: (100.0, 200.0),
                 square: (10, 10),
             },
             test_sheet(60, 60),

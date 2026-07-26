@@ -76,6 +76,12 @@ pub struct PdfPageReport {
     /// the whole page counts as changed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_change: Option<PdfSizeChange>,
+    /// Present when the two rasters differed only by rasterization rounding and
+    /// were cropped to their shared region before diffing (#262). The page still
+    /// has a real pixel diff and a real overlay — this just says which pixels
+    /// were compared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rounding_crop: Option<PdfRoundingCrop>,
     /// Filename of the overlay PNG written under `--out`, when given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay_png: Option<String>,
@@ -112,12 +118,53 @@ impl fmt::Display for PdfSizeChange {
     }
 }
 
+/// A sheet's rounding crop, in pixels at the diff's DPI (#262).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PdfRoundingCrop {
+    pub old_width: u32,
+    pub old_height: u32,
+    pub new_width: u32,
+    pub new_height: u32,
+    pub diffed_width: u32,
+    pub diffed_height: u32,
+}
+
+impl fmt::Display for PdfRoundingCrop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}x{} px / {}x{} px, diffed over the shared {}x{} px",
+            self.old_width,
+            self.old_height,
+            self.new_width,
+            self.new_height,
+            self.diffed_width,
+            self.diffed_height
+        )
+    }
+}
+
+/// Which rule produced the page pairing (#249).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PdfPairingBasis {
+    /// Plain page-index pairing — nothing was re-paired.
+    Index,
+    /// Content alignment, adopted because it clearly beat index pairing.
+    Content,
+    /// Content alignment was declined for want of clear evidence; index pairing
+    /// was kept. Reported so a declined re-pairing is never silent.
+    Ambiguous,
+}
+
 /// How the two revisions' pages were paired (#249). Always present in the JSON
 /// so a consumer can see the pairing that produced the per-page rows; `identity`
 /// is the plain index pairing with nothing inserted or removed.
 #[derive(Serialize)]
 pub struct PdfAlignmentReport {
     pub identity: bool,
+    /// Which rule chose the pairing.
+    pub basis: PdfPairingBasis,
     /// 1-based new-side page numbers of inserted sheets.
     pub inserted_new_pages: Vec<usize>,
     /// 1-based old-side page numbers of removed sheets.
@@ -184,6 +231,14 @@ impl PdfReport {
                         new_width: c.new.0,
                         new_height: c.new.1,
                     }),
+                    rounding_crop: p.rounding_crop.map(|c| PdfRoundingCrop {
+                        old_width: c.old.0,
+                        old_height: c.old.1,
+                        new_width: c.new.0,
+                        new_height: c.new.1,
+                        diffed_width: c.to.0,
+                        diffed_height: c.to.1,
+                    }),
                     overlay_png: None,
                 }
             })
@@ -199,6 +254,11 @@ impl PdfReport {
             new_pages: diff.new_pages,
             alignment: PdfAlignmentReport {
                 identity: al.is_identity(),
+                basis: match al.pairing {
+                    etchy_core::Pairing::Index => PdfPairingBasis::Index,
+                    etchy_core::Pairing::Content => PdfPairingBasis::Content,
+                    etchy_core::Pairing::Ambiguous => PdfPairingBasis::Ambiguous,
+                },
                 inserted_new_pages: al.inserted_pages(),
                 removed_old_pages: al.removed_pages(),
                 paired: al.paired_count(),
@@ -254,6 +314,10 @@ impl PdfReport {
             out.push_str(&line);
             out.push('\n');
         }
+        for line in self.rounding_crop_lines() {
+            out.push_str(&line);
+            out.push('\n');
+        }
         if let Some(note) = self.noise_floor_line() {
             out.push_str(&note);
             out.push('\n');
@@ -303,9 +367,13 @@ impl PdfReport {
                 p.regions
             ));
         }
-        for line in self.size_change_lines() {
+        for line in self
+            .size_change_lines()
+            .iter()
+            .chain(&self.rounding_crop_lines())
+        {
             out.push('\n');
-            out.push_str(&line);
+            out.push_str(line);
             out.push('\n');
         }
         if let Some(note) = self.noise_floor_line() {
@@ -334,6 +402,25 @@ impl PdfReport {
                     "size change: page {} ({c}) — the sheet's page size changed, so the whole \
                      page counts as changed and it has no pixel overlay",
                     p.page
+                ))
+            })
+            .collect()
+    }
+
+    /// One line per sheet whose two rasters differed only by rasterization
+    /// rounding (#262). The page IS diffed — this says which pixels were compared,
+    /// so the handful of cropped edge pixels is never an unexplained gap.
+    fn rounding_crop_lines(&self) -> Vec<String> {
+        self.pages
+            .iter()
+            .filter_map(|p| {
+                let c = p.rounding_crop?;
+                Some(format!(
+                    "page size rounding: page {} ({c}) — the two renders round to \
+                     within {} px per axis, so it is the same sheet size and was \
+                     diffed over the pixels they share",
+                    p.page,
+                    etchy_core::SIZE_TOLERANCE_PX
                 ))
             })
             .collect()
@@ -445,11 +532,25 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
     let old = read_pdf(&cli.old)?;
     let new = read_pdf(&cli.new)?;
 
-    // Enforce the per-page pixel ceiling BEFORE rasterizing anything.
+    // Enforce the page-count and per-page pixel ceilings BEFORE rasterizing
+    // anything.
     for (label, path, bytes) in [("old", &cli.old, &old), ("new", &cli.new, &new)] {
         let dims = etchy_pdf::page_pixel_dims(bytes, dpi)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("reading {label} PDF {}", path.display()))?;
+        // Page alignment is a DP matrix quadratic in the page count, so a huge
+        // document pair would ask for gigabytes. Fail loud here, naming the input
+        // and the limit, before a single page is rendered (#249).
+        if dims.len() > etchy_core::MAX_ALIGN_PAGES {
+            anyhow::bail!(
+                "{label} PDF {} has {} pages, over the {}-page limit etchy will align \
+                 (page alignment cost grows with the square of the page count) — split \
+                 the document",
+                path.display(),
+                dims.len(),
+                etchy_core::MAX_ALIGN_PAGES
+            );
+        }
         for (i, (w, h)) in dims.iter().enumerate() {
             let px = u64::from(*w) * u64::from(*h);
             // A page that floors to zero pixels would "diff" nothing at all and
@@ -527,7 +628,7 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etchy_core::{Image, ImageDiffResult, ImageDiffStats, PageAlignment, PageMatch};
+    use etchy_core::{Image, ImageDiffResult, ImageDiffStats, PageAlignment, PageMatch, Pairing};
     use etchy_pdf::PageDiff;
 
     /// A paired row: sheet `page` on both sides, with `changed_px` changed pixels.
@@ -563,6 +664,7 @@ mod tests {
                 overlay: Image::new(1, 1, vec![0, 0, 0, 0]).unwrap(),
             }),
             size_change: None,
+            rounding_crop: None,
         }
     }
 
@@ -574,21 +676,17 @@ mod tests {
             new_page,
             diff: None,
             size_change: None,
+            rounding_crop: None,
         }
     }
 
     /// A diff whose pages paired 1:1 by index (the common case).
     fn diff(old_pages: usize, new_pages: usize, pages: Vec<PageDiff>) -> PdfDiff {
-        let matches = (0..old_pages.min(new_pages))
-            .map(|i| PageMatch::Paired { old: i, new: i })
-            .chain((old_pages.min(new_pages)..old_pages).map(|i| PageMatch::OldOnly { old: i }))
-            .chain((old_pages.min(new_pages)..new_pages).map(|i| PageMatch::NewOnly { new: i }))
-            .collect();
         PdfDiff {
             old_pages,
             new_pages,
             pages,
-            alignment: PageAlignment { matches },
+            alignment: PageAlignment::by_index(old_pages, new_pages),
         }
     }
 
@@ -603,7 +701,10 @@ mod tests {
             old_pages,
             new_pages,
             pages,
-            alignment: PageAlignment { matches },
+            alignment: PageAlignment {
+                matches,
+                pairing: Pairing::Content,
+            },
         }
     }
 
@@ -769,6 +870,7 @@ mod tests {
                         old: (1240, 1754),
                         new: (1754, 2480),
                     }),
+                    rounding_crop: None,
                 }],
             ),
             150.0,
@@ -795,6 +897,81 @@ mod tests {
     }
 
     #[test]
+    fn a_rounding_crop_is_reported_and_the_page_still_has_its_diff() {
+        // #262 tolerance: a sheet whose two renders round a pixel apart is the SAME
+        // size, so it keeps its pixel diff — and every format says which pixels
+        // were compared, so the cropped edge is never an unexplained gap.
+        let r = PdfReport::from_diff(
+            &diff(
+                1,
+                1,
+                vec![PageDiff {
+                    rounding_crop: Some(etchy_pdf::RoundingCrop {
+                        old: (1754, 1239),
+                        new: (1753, 1240),
+                        to: (1753, 1239),
+                    }),
+                    ..page(1, 30, 100)
+                }],
+            ),
+            150.0,
+            1,
+        );
+        let p = &r.pages[0];
+        assert_eq!(p.present, Presence::Both);
+        assert!(p.size_change.is_none(), "rounding is not a size change");
+        assert_eq!(p.changed_px, 30, "the page still carries its pixel diff");
+        assert!(r.any_changes);
+        for text in [r.to_summary(), r.to_markdown()] {
+            assert!(
+                text.contains("page size rounding")
+                    && text.contains("1754x1239")
+                    && text.contains("1753x1239"),
+                "the crop is named in every format: {text}"
+            );
+        }
+        let json = r.to_json_pretty();
+        assert!(json.contains("\"diffed_width\": 1753"), "{json}");
+        assert!(json.contains("\"new_height\": 1240"), "{json}");
+        // An uncropped page says nothing about cropping.
+        let clean = PdfReport::from_diff(&diff(1, 1, vec![page(1, 3, 100)]), 150.0, 1);
+        assert!(!clean.to_summary().contains("page size rounding"));
+        assert!(!clean.to_json_pretty().contains("rounding_crop"));
+    }
+
+    #[test]
+    fn a_declined_realignment_is_reported_as_ambiguous() {
+        // The confidence net (#249): when content alignment is not clearly better
+        // than index pairing it is declined — and that has to be visible, or a
+        // silent fallback looks like the alignment simply found nothing.
+        let r = PdfReport::from_diff(
+            &PdfDiff {
+                old_pages: 2,
+                new_pages: 2,
+                pages: vec![page(1, 0, 100), page(2, 5, 100)],
+                alignment: PageAlignment {
+                    matches: PageAlignment::by_index(2, 2).matches,
+                    pairing: Pairing::Ambiguous,
+                },
+            },
+            150.0,
+            1,
+        );
+        assert_eq!(r.alignment.basis, PdfPairingBasis::Ambiguous);
+        for text in [r.to_summary(), r.to_markdown()] {
+            assert!(
+                text.contains("page alignment was ambiguous") && text.contains("index"),
+                "the fallback is stated: {text}"
+            );
+        }
+        assert!(
+            r.to_json_pretty().contains("\"basis\": \"ambiguous\""),
+            "{}",
+            r.to_json_pretty()
+        );
+    }
+
+    #[test]
     fn an_identity_alignment_says_nothing_extra() {
         // The quiet path: same page count, index pairing — the report reads
         // exactly as it always did, with no alignment commentary.
@@ -804,6 +981,7 @@ mod tests {
             1,
         );
         assert!(r.alignment.identity);
+        assert_eq!(r.alignment.basis, PdfPairingBasis::Index);
         assert_eq!(r.alignment.note, None);
         for text in [r.to_summary(), r.to_markdown()] {
             assert!(!text.contains("aligned by page content"), "{text}");
