@@ -16,6 +16,11 @@
 //! only *which* pages pair, never whether a pair is diffed: every paired sheet
 //! gets the full pixel diff, because a fingerprint is lossy and acting on one
 //! would be a silent miss.
+//!
+//! A paired sheet whose **paper size changed** is a diff, not an error (#262):
+//! its two rasters have no pixel correspondence, so it comes back as a wholly
+//! changed page carrying a [`SizeChange`] instead of failing the run. Errors are
+//! reserved for input that cannot be rendered at all.
 
 /// Whether the PDF backend is compiled into this build.
 #[cfg(feature = "pdf")]
@@ -46,7 +51,8 @@ mod imp {
         Load(String),
         /// A PDF parsed but produced no rasterizable pages.
         NoPages,
-        /// A page-pair diff failed (e.g. a page changed size between revisions).
+        /// The raster engine rejected a page pair (a malformed buffer). A page
+        /// whose paper size changed is NOT an error — see [`SizeChange`].
         Engine(EngineError),
         /// PNG encoding of an overlay failed.
         Encode(String),
@@ -118,6 +124,25 @@ mod imp {
             .collect())
     }
 
+    /// A paired sheet whose two sides rasterized to different pixel dimensions —
+    /// the sheet's paper size changed between revisions (#262). Dimensions in
+    /// pixels at the diff's DPI, which is proportional to the paper size.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SizeChange {
+        pub old: (u32, u32),
+        pub new: (u32, u32),
+    }
+
+    impl std::fmt::Display for SizeChange {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{}x{} px -> {}x{} px",
+                self.old.0, self.old.1, self.new.0, self.new.1
+            )
+        }
+    }
+
     /// One row of the merged document: a paired sheet with its pixel diff, or a
     /// sheet that exists in only one revision.
     pub struct PageDiff {
@@ -128,8 +153,13 @@ mod imp {
         /// 1-based page number in the new PDF, when the sheet exists there.
         pub new_page: Option<usize>,
         /// The full pixel diff of a paired sheet. `None` for a sheet that exists
-        /// on one side only (there is nothing to diff against).
+        /// on one side only (nothing to diff against) or a paired sheet whose
+        /// paper size changed (the two rasters have different dimensions, so
+        /// there is no pixel correspondence to diff).
         pub diff: Option<ImageDiffResult>,
+        /// Set when a paired sheet's paper size changed between revisions (#262):
+        /// the page is reported as wholly changed rather than failing the run.
+        pub size_change: Option<SizeChange>,
     }
 
     impl PageDiff {
@@ -195,25 +225,44 @@ mod imp {
         for (row, step) in alignment.matches.iter().enumerate() {
             let page = row + 1;
             pages.push(match *step {
-                PageMatch::Paired { old, new } => PageDiff {
-                    page,
-                    old_page: Some(old + 1),
-                    new_page: Some(new + 1),
-                    // ALWAYS the full pixel diff: the fingerprint chose the
-                    // pairing and nothing more. Matching digests never skip this.
-                    diff: Some(diff_images(&old_imgs[old], &new_imgs[new], opts)?),
-                },
+                PageMatch::Paired { old, new } => {
+                    let (o, n) = (&old_imgs[old], &new_imgs[new]);
+                    // A sheet whose paper size changed has no pixel
+                    // correspondence to diff (#262) — report it as a wholly
+                    // changed page with the two sizes named, and keep going.
+                    // Exit 2 is reserved for input we cannot render at all.
+                    let size_change =
+                        (o.width != n.width || o.height != n.height).then_some(SizeChange {
+                            old: (o.width, o.height),
+                            new: (n.width, n.height),
+                        });
+                    PageDiff {
+                        page,
+                        old_page: Some(old + 1),
+                        new_page: Some(new + 1),
+                        // Otherwise ALWAYS the full pixel diff: the fingerprint
+                        // chose the pairing and nothing more. Matching digests
+                        // never skip this.
+                        diff: match size_change {
+                            Some(_) => None,
+                            None => Some(diff_images(o, n, opts)?),
+                        },
+                        size_change,
+                    }
+                }
                 PageMatch::OldOnly { old } => PageDiff {
                     page,
                     old_page: Some(old + 1),
                     new_page: None,
                     diff: None,
+                    size_change: None,
                 },
                 PageMatch::NewOnly { new } => PageDiff {
                     page,
                     old_page: None,
                     new_page: Some(new + 1),
                     diff: None,
+                    size_change: None,
                 },
             });
         }
@@ -245,7 +294,8 @@ mod imp {
 
 #[cfg(feature = "pdf")]
 pub use imp::{
-    diff_pdfs, encode_png, page_pixel_dims, rasterize, PageDiff, PdfDiff, PdfError, DEFAULT_DPI,
+    diff_pdfs, encode_png, page_pixel_dims, rasterize, PageDiff, PdfDiff, PdfError, SizeChange,
+    DEFAULT_DPI,
 };
 
 #[cfg(test)]
@@ -405,6 +455,53 @@ mod pdf_tests {
         // And the alignment is stated, never silent.
         let note = d.alignment.note().expect("a re-pairing is always reported");
         assert!(note.contains("inserted"), "{note}");
+    }
+
+    #[test]
+    fn a_paper_size_change_is_a_fully_changed_page_not_an_error() {
+        // #262: a sheet resized between revisions is a legitimate revision diff,
+        // not a tool malfunction. It must come back as a fully-changed page (the
+        // run exits 1), never fail the whole document with exit 2.
+        let old = multi_page_pdf(&[sheet(10, 10)]);
+        let new = multi_page_pdf(&[Sheet {
+            size: (100, 200),
+            square: (10, 10),
+        }]);
+        let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default())
+            .expect("a resized sheet is a diff, not an error");
+        assert!(d.any_changes(), "a resized sheet is a change");
+        let row = &d.pages[0];
+        assert!(row.is_paired(), "the sheet still pairs with its original");
+        assert!(row.has_any_change());
+        let sc = row.size_change.expect("the size change is reported");
+        assert_eq!((sc.old, sc.new), ((100, 100), (100, 200)));
+        assert!(
+            row.diff.is_none(),
+            "different dimensions cannot be pixel-diffed"
+        );
+    }
+
+    #[test]
+    fn a_size_change_does_not_stop_the_other_pages_diffing() {
+        // The rest of the document must still be diffed — one resized sheet does
+        // not take the run down with it.
+        let old = multi_page_pdf(&[sheet(10, 10), sheet(60, 60)]);
+        let new = multi_page_pdf(&[
+            Sheet {
+                size: (100, 200),
+                square: (10, 10),
+            },
+            sheet(10, 60),
+        ]);
+        let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
+        assert_eq!(d.pages.len(), 2);
+        assert!(d.pages[0].size_change.is_some());
+        assert!(
+            d.pages[1].diff.is_some(),
+            "page 2 is still pixel-diffed: {:?}",
+            d.pages[1].size_change
+        );
+        assert!(d.pages[1].has_any_change(), "and its change is reported");
     }
 
     #[test]

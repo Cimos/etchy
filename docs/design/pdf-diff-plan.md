@@ -92,7 +92,7 @@ container. Options:
 
 ## 6. Risks
 - **Real-world PDF variety.** The engine is tested only on synthetic single-square PDFs. Real KiCad/Altium schematic exports (fonts, vector strokes, embedded rasters, multiple page sizes) may expose hayro gaps or rasterisation differences. Mitigate with a real fixture (step 5) and a "couldn't rasterise → fail loud" path (TRUST-4).
-- **Same-size requirement.** `diff_images` fails on size mismatch; two PDFs whose same-index pages differ in point-size (e.g. a page resized A4→A3) would error. Decide: fail loud (trust) vs letterbox/scale to match. Recommend **fail loud** for v0.1.0 with a clear message (a resized sheet is itself a meaningful change to flag).
+- **Same-size requirement.** `diff_images` fails on size mismatch; two PDFs whose same-index pages differ in point-size (e.g. a page resized A4→A3) would error. Decide: fail loud (trust) vs letterbox/scale to match. Recommend **fail loud** for v0.1.0 with a clear message (a resized sheet is itself a meaningful change to flag). **Settled 2026-07-26 (#262):** reported as a fully-changed page (exit 1), never rescaled and never an error — see §7.7.
 - **Memory at high DPI** — the cap in §3.5.
 
 ## 7. Decisions — LOCKED (owner, 2026-07-12)
@@ -103,6 +103,11 @@ container. Options:
 5. **DPI:** **one DPI for all sheet sizes** ("same detail everywhere") — text renders equally crisp; larger sheets naturally produce more pixels. Default 150; `--dpi` overrides; ~50 MP/page hard cap fails loud.
 6. **GUI:** **full modes** (Old/New/Overlay/Split/Swipe on raster pages), **native AND wasm from day one**. This makes a **hayro-on-wasm spike a prerequisite** — prove `etchy-pdf` compiles + renders on wasm32 before the GUI build; if wasm is blocked, come back with findings before descoping.
 7. **Page-size mismatch:** fail loud — a resized sheet is itself a change to flag.
+   **Revised 2026-07-26 (owner, #262):** a resized sheet is a **diff, not an
+   error** — reported as a fully-changed page with both sizes named, exit 1. The
+   pair is not pixel-diffed (no pixel correspondence) and has no overlay; the
+   viewer shows both sheets at true scale. Exit 2 stays for unrenderable input,
+   because CI treats it as infrastructure failure rather than a review gate.
 
 ## 8. Execution order
 1. **Spike (prerequisite):** hayro on wasm32 + a real KiCad schematic PDF render (the two flagged risks) + generate the fixture pair.

@@ -71,6 +71,11 @@ pub struct PdfPageReport {
     pub suppressed_px: u64,
     /// Number of sub-floor changed regions the noise floor hid.
     pub suppressed_regions: u32,
+    /// Present when this sheet's paper size changed between revisions (#262):
+    /// the two rasters have different dimensions, so there is no pixel diff and
+    /// the whole page counts as changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_change: Option<PdfSizeChange>,
     /// Filename of the overlay PNG written under `--out`, when given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay_png: Option<String>,
@@ -78,9 +83,32 @@ pub struct PdfPageReport {
 
 impl PdfPageReport {
     /// Includes sub-floor (`suppressed_*`) changes: a change hidden from the
-    /// overlay by the noise floor is still a change (the trust bar).
+    /// overlay by the noise floor is still a change (the trust bar). A resized
+    /// sheet is a change too, even though it has no changed pixels to count.
     fn changed(&self) -> bool {
-        self.present != Presence::Both || self.changed_fraction > 0.0 || self.suppressed_px > 0
+        self.present != Presence::Both
+            || self.size_change.is_some()
+            || self.changed_fraction > 0.0
+            || self.suppressed_px > 0
+    }
+}
+
+/// A sheet's paper-size change, in pixels at the diff's DPI (#262).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PdfSizeChange {
+    pub old_width: u32,
+    pub old_height: u32,
+    pub new_width: u32,
+    pub new_height: u32,
+}
+
+impl fmt::Display for PdfSizeChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}x{} px -> {}x{} px",
+            self.old_width, self.old_height, self.new_width, self.new_height
+        )
     }
 }
 
@@ -150,6 +178,12 @@ impl PdfReport {
                     regions: s.map_or(0, |s| s.regions),
                     suppressed_px: s.map_or(0, |s| s.suppressed_px),
                     suppressed_regions: s.map_or(0, |s| s.suppressed_regions),
+                    size_change: p.size_change.map(|c| PdfSizeChange {
+                        old_width: c.old.0,
+                        old_height: c.old.1,
+                        new_width: c.new.0,
+                        new_height: c.new.1,
+                    }),
                     overlay_png: None,
                 }
             })
@@ -216,6 +250,10 @@ impl PdfReport {
             out.push_str(note);
             out.push('\n');
         }
+        for line in self.size_change_lines() {
+            out.push_str(&line);
+            out.push('\n');
+        }
         if let Some(note) = self.noise_floor_line() {
             out.push_str(&note);
             out.push('\n');
@@ -265,6 +303,11 @@ impl PdfReport {
                 p.regions
             ));
         }
+        for line in self.size_change_lines() {
+            out.push('\n');
+            out.push_str(&line);
+            out.push('\n');
+        }
         if let Some(note) = self.noise_floor_line() {
             out.push('\n');
             out.push_str(&note);
@@ -277,6 +320,23 @@ impl PdfReport {
             "**Result: no differences.**"
         });
         out
+    }
+
+    /// One line per resized sheet, naming both sizes. A resized page reports
+    /// 100% changed with zero changed pixels, which reads as a tool bug unless
+    /// the reason is spelled out — so this is never optional when it applies.
+    fn size_change_lines(&self) -> Vec<String> {
+        self.pages
+            .iter()
+            .filter_map(|p| {
+                let c = p.size_change?;
+                Some(format!(
+                    "size change: page {} ({c}) — the sheet's page size changed, so the whole \
+                     page counts as changed and it has no pixel overlay",
+                    p.page
+                ))
+            })
+            .collect()
     }
 
     /// A note about the noise floor, when it is armed above the default or has
@@ -300,14 +360,31 @@ impl PdfReport {
     /// sheet, or a re-pairing, can never read as "no change".
     fn page_count_line(&self) -> String {
         let changed = self.pages.iter().filter(|p| p.changed()).count();
+        let resized = self
+            .pages
+            .iter()
+            .filter(|p| p.size_change.is_some())
+            .count();
         if self.old_pages == self.new_pages && self.alignment.identity {
+            if resized > 0 {
+                // "N page(s) diffed" would be a lie: a resized sheet has no pixel
+                // diff. Say how many were actually compared pixel-for-pixel.
+                return format!(
+                    "{} page(s) at {} DPI; {} pixel-diffed, {} resized, {} changed",
+                    self.old_pages,
+                    self.dpi,
+                    self.old_pages - resized,
+                    resized,
+                    changed
+                );
+            }
             format!(
                 "{} page(s) diffed at {} DPI; {} changed",
                 self.old_pages, self.dpi, changed
             )
         } else {
             format!(
-                "old {} page(s), new {} — {} sheet(s) paired and diffed at {} DPI; {} changed",
+                "old {} page(s), new {} — {} sheet(s) paired at {} DPI; {} changed",
                 self.old_pages, self.new_pages, self.alignment.paired, self.dpi, changed
             )
         }
@@ -411,14 +488,16 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
             .with_context(|| format!("creating output directory {}", dir.display()))?;
         for p in &diff.pages {
             let Some(d) = &p.diff else {
-                // A sheet that exists on one side only has nothing to diff
-                // against. Say so on stderr — the row is in the report either
-                // way, but a silently absent PNG invites "did it miss it?".
-                eprintln!(
-                    "etchy: no overlay for page {} — it exists in the {} revision only",
-                    p.page,
-                    if p.old_page.is_some() { "old" } else { "new" }
-                );
+                // No pixel diff means no overlay: the sheet exists on one side
+                // only, or its page size changed. Say which on stderr — the row
+                // is in the report either way, but a silently absent PNG invites
+                // "did it miss it?".
+                let why = match (p.size_change, p.old_page.is_some()) {
+                    (Some(c), _) => format!("its page size changed ({c})"),
+                    (None, true) => "it exists in the old revision only".to_string(),
+                    (None, false) => "it exists in the new revision only".to_string(),
+                };
+                eprintln!("etchy: no overlay for page {} — {why}", p.page);
                 continue;
             };
             let name = format!("page-{}.png", p.page);
@@ -483,6 +562,7 @@ mod tests {
                 },
                 overlay: Image::new(1, 1, vec![0, 0, 0, 0]).unwrap(),
             }),
+            size_change: None,
         }
     }
 
@@ -493,6 +573,7 @@ mod tests {
             old_page,
             new_page,
             diff: None,
+            size_change: None,
         }
     }
 
@@ -668,6 +749,49 @@ mod tests {
         assert!(json.contains("\"old_page\": 2"), "{json}");
         // Only the changed rows are marked changed: the re-paired sheets are clean.
         assert_eq!(r.pages.iter().filter(|p| p.changed()).count(), 1);
+    }
+
+    #[test]
+    fn a_page_size_change_is_a_fully_changed_page_with_the_sizes_named() {
+        // #262: a resized sheet is a diff, not an error. The row is wholly
+        // changed and every format says WHY — otherwise a 100%-changed page with
+        // zero changed pixels looks like a bug in the tool.
+        let r = PdfReport::from_diff(
+            &diff(
+                1,
+                1,
+                vec![PageDiff {
+                    page: 1,
+                    old_page: Some(1),
+                    new_page: Some(1),
+                    diff: None,
+                    size_change: Some(etchy_pdf::SizeChange {
+                        old: (1240, 1754),
+                        new: (1754, 2480),
+                    }),
+                }],
+            ),
+            150.0,
+            1,
+        );
+        assert!(r.any_changes, "a resized sheet is a change");
+        let p = &r.pages[0];
+        assert_eq!(
+            p.present,
+            Presence::Both,
+            "the sheet is still on both sides"
+        );
+        assert_eq!(p.changed_fraction, 1.0, "the whole sheet counts as changed");
+        assert!(p.changed());
+        for text in [r.to_summary(), r.to_markdown()] {
+            assert!(
+                text.contains("size change") && text.contains("1240x1754"),
+                "the size change and both sizes are named: {text}"
+            );
+        }
+        let json = r.to_json_pretty();
+        assert!(json.contains("\"old_width\": 1240"), "{json}");
+        assert!(json.contains("\"new_height\": 2480"), "{json}");
     }
 
     #[test]
