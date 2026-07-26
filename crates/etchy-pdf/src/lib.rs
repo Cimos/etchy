@@ -15,12 +15,18 @@
 //! The alignment chosen is always reported ([`PdfDiff::alignment`]) — it decides
 //! only *which* pages pair, never whether a pair is diffed: every paired sheet
 //! gets the full pixel diff, because a fingerprint is lossy and acting on one
-//! would be a silent miss.
+//! would be a silent miss. A re-pairing is adopted only when it clearly beats
+//! plain index pairing; otherwise the alignment falls back to index pairing and
+//! says so, because index pairing is the baseline this must never do worse than.
 //!
-//! A paired sheet whose **paper size changed** is a diff, not an error (#262):
-//! its two rasters have no pixel correspondence, so it comes back as a wholly
-//! changed page carrying a [`SizeChange`] instead of failing the run. Errors are
-//! reserved for input that cannot be rendered at all.
+//! A paired sheet whose **paper size genuinely changed** is a diff, not an error
+//! (#262): its two rasters have no pixel correspondence, so it comes back as a
+//! wholly changed page carrying a [`SizeChange`] instead of failing the run.
+//! Sizes that differ only by rasterization rounding (a couple of pixels per axis,
+//! `etchy_core::SIZE_TOLERANCE_PX`) are the *same* sheet: both sides are cropped
+//! to their shared region, the pair is pixel-diffed normally, and the crop is
+//! reported ([`RoundingCrop`]). Errors are reserved for input that cannot be
+//! rendered at all, or a page count past `etchy_core::MAX_ALIGN_PAGES`.
 
 /// Whether the PDF backend is compiled into this build.
 #[cfg(feature = "pdf")]
@@ -37,8 +43,8 @@ pub fn available() -> bool {
 #[cfg(feature = "pdf")]
 mod imp {
     use etchy_core::{
-        align_pages, diff_images, fingerprint, EngineError, Image, ImageDiffOptions,
-        ImageDiffResult, PageAlignment, PageMatch,
+        align_pages, classify_pair_size, crop_top_left, diff_images, fingerprint, EngineError,
+        Image, ImageDiffOptions, ImageDiffResult, PageAlignment, PageMatch, PairSizing,
     };
     use hayro::hayro_interpret::hayro_syntax::Pdf;
     use hayro::hayro_interpret::InterpreterSettings;
@@ -51,8 +57,10 @@ mod imp {
         Load(String),
         /// A PDF parsed but produced no rasterizable pages.
         NoPages,
-        /// The raster engine rejected a page pair (a malformed buffer). A page
-        /// whose paper size changed is NOT an error — see [`SizeChange`].
+        /// The raster engine rejected a page pair (a malformed buffer), or the
+        /// documents have more pages than page alignment will allocate for
+        /// (`EngineError::TooManyPages`). A page whose paper size changed is NOT
+        /// an error — see [`SizeChange`].
         Engine(EngineError),
         /// PNG encoding of an overlay failed.
         Encode(String),
@@ -124,9 +132,11 @@ mod imp {
             .collect())
     }
 
-    /// A paired sheet whose two sides rasterized to different pixel dimensions —
-    /// the sheet's paper size changed between revisions (#262). Dimensions in
-    /// pixels at the diff's DPI, which is proportional to the paper size.
+    /// A paired sheet whose two sides rasterized to genuinely different pixel
+    /// dimensions — the sheet's paper size changed between revisions (#262).
+    /// Dimensions in pixels at the diff's DPI, which is proportional to the paper
+    /// size. A difference of only a pixel or two per axis is rasterization
+    /// rounding, not this — see [`RoundingCrop`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct SizeChange {
         pub old: (u32, u32),
@@ -139,6 +149,29 @@ mod imp {
                 f,
                 "{}x{} px -> {}x{} px",
                 self.old.0, self.old.1, self.new.0, self.new.1
+            )
+        }
+    }
+
+    /// A paired sheet whose two rasters differed only by sub-pixel rasterization
+    /// rounding (within `etchy_core::SIZE_TOLERANCE_PX` per axis). It is the SAME
+    /// sheet size, so both sides were cropped to `to` and pixel-diffed normally —
+    /// the alternative, calling it a resize, throws the sheet's whole diff away.
+    /// Reported so the few cropped pixels are never an unexplained gap.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct RoundingCrop {
+        pub old: (u32, u32),
+        pub new: (u32, u32),
+        /// The shared region both sides were cropped to before diffing.
+        pub to: (u32, u32),
+    }
+
+    impl std::fmt::Display for RoundingCrop {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{}x{} px / {}x{} px, diffed over the shared {}x{} px",
+                self.old.0, self.old.1, self.new.0, self.new.1, self.to.0, self.to.1
             )
         }
     }
@@ -160,6 +193,10 @@ mod imp {
         /// Set when a paired sheet's paper size changed between revisions (#262):
         /// the page is reported as wholly changed rather than failing the run.
         pub size_change: Option<SizeChange>,
+        /// Set when the two rasters differed only by rasterization rounding and
+        /// were cropped to their shared region before diffing (#262). The sheet
+        /// still has a real pixel diff and a real overlay.
+        pub rounding_crop: Option<RoundingCrop>,
     }
 
     impl PageDiff {
@@ -205,9 +242,23 @@ mod imp {
     }
 
     /// Rasterize both PDFs at `dpi`, align their pages by content, and pixel-diff
-    /// every paired sheet in full. Sheets that exist on one side only come back as
-    /// explicit rows with no diff. A paired sheet whose size changed between
-    /// revisions fails loud (`ImageSizeMismatch`).
+    /// every paired sheet in full.
+    ///
+    /// - Sheets that exist on one side only come back as explicit rows with no
+    ///   diff — a sheet appearing or disappearing is a change, never a skip.
+    /// - A pair whose rasters differ by no more than
+    ///   `etchy_core::SIZE_TOLERANCE_PX` per axis is the same sheet size: both are
+    ///   cropped to their shared region, diffed in full, and the crop is reported
+    ///   as a [`RoundingCrop`] (#262).
+    /// - A pair whose paper size genuinely changed is a **fully changed page**
+    ///   carrying a [`SizeChange`], not an error: the run reports it and keeps
+    ///   going, and the rest of the document still diffs (#262).
+    ///
+    /// # Errors
+    /// [`PdfError::Load`] / [`PdfError::NoPages`] for input that cannot be
+    /// rendered, and [`PdfError::Engine`] for a malformed raster or a page count
+    /// past `etchy_core::MAX_ALIGN_PAGES` (page alignment is quadratic in the page
+    /// count, so it fails loud before allocating).
     pub fn diff_pdfs(
         old: &[u8],
         new: &[u8],
@@ -220,22 +271,41 @@ mod imp {
         // the raster caps the caller enforced still bound everything here.
         let old_fp: Vec<_> = old_imgs.iter().map(fingerprint).collect();
         let new_fp: Vec<_> = new_imgs.iter().map(fingerprint).collect();
-        let alignment = align_pages(&old_fp, &new_fp);
+        let alignment = align_pages(&old_fp, &new_fp)?;
         let mut pages = Vec::with_capacity(alignment.matches.len());
         for (row, step) in alignment.matches.iter().enumerate() {
             let page = row + 1;
             pages.push(match *step {
                 PageMatch::Paired { old, new } => {
                     let (o, n) = (&old_imgs[old], &new_imgs[new]);
-                    // A sheet whose paper size changed has no pixel
+                    let dims = |i: &Image| (i.width, i.height);
+                    let (mut size_change, mut rounding_crop) = (None, None);
+                    // A sheet whose paper size genuinely changed has no pixel
                     // correspondence to diff (#262) — report it as a wholly
                     // changed page with the two sizes named, and keep going.
-                    // Exit 2 is reserved for input we cannot render at all.
-                    let size_change =
-                        (o.width != n.width || o.height != n.height).then_some(SizeChange {
-                            old: (o.width, o.height),
-                            new: (n.width, n.height),
-                        });
+                    // Exit 2 is reserved for input we cannot render at all. A
+                    // rounding-sized difference is the SAME sheet: crop to the
+                    // shared region so the real change is still located.
+                    let diff = match classify_pair_size(dims(o), dims(n)) {
+                        PairSizing::Same => Some(diff_images(o, n, opts)?),
+                        PairSizing::Rounded { to } => {
+                            rounding_crop = Some(RoundingCrop {
+                                old: dims(o),
+                                new: dims(n),
+                                to,
+                            });
+                            let (oc, nc) =
+                                (crop_top_left(o, to.0, to.1)?, crop_top_left(n, to.0, to.1)?);
+                            Some(diff_images(&oc, &nc, opts)?)
+                        }
+                        PairSizing::Changed => {
+                            size_change = Some(SizeChange {
+                                old: dims(o),
+                                new: dims(n),
+                            });
+                            None
+                        }
+                    };
                     PageDiff {
                         page,
                         old_page: Some(old + 1),
@@ -243,11 +313,9 @@ mod imp {
                         // Otherwise ALWAYS the full pixel diff: the fingerprint
                         // chose the pairing and nothing more. Matching digests
                         // never skip this.
-                        diff: match size_change {
-                            Some(_) => None,
-                            None => Some(diff_images(o, n, opts)?),
-                        },
+                        diff,
                         size_change,
+                        rounding_crop,
                     }
                 }
                 PageMatch::OldOnly { old } => PageDiff {
@@ -256,6 +324,7 @@ mod imp {
                     new_page: None,
                     diff: None,
                     size_change: None,
+                    rounding_crop: None,
                 },
                 PageMatch::NewOnly { new } => PageDiff {
                     page,
@@ -263,6 +332,7 @@ mod imp {
                     new_page: Some(new + 1),
                     diff: None,
                     size_change: None,
+                    rounding_crop: None,
                 },
             });
         }
@@ -294,8 +364,8 @@ mod imp {
 
 #[cfg(feature = "pdf")]
 pub use imp::{
-    diff_pdfs, encode_png, page_pixel_dims, rasterize, PageDiff, PdfDiff, PdfError, SizeChange,
-    DEFAULT_DPI,
+    diff_pdfs, encode_png, page_pixel_dims, rasterize, PageDiff, PdfDiff, PdfError, RoundingCrop,
+    SizeChange, DEFAULT_DPI,
 };
 
 #[cfg(test)]
@@ -352,19 +422,30 @@ mod pdf_tests {
         p.diff.as_ref().expect("row is a paired sheet")
     }
 
-    /// A sheet spec for [`multi_page_pdf`]: the MediaBox size in points and the
-    /// filled 20×20 black square's position.
+    /// A sheet spec for [`multi_page_pdf`]: the MediaBox size in points, the
+    /// filled 20×20 square's position, and its grey level (0 = black).
     #[derive(Clone, Copy)]
     struct Sheet {
-        size: (i32, i32),
+        size: (f64, f64),
         square: (i32, i32),
+        grey: f64,
     }
 
-    /// A sheet on the standard 100×100 pt page with its square at (`x`,`y`).
+    /// A sheet on the standard 100×100 pt page with its black square at (`x`,`y`).
     fn sheet(x: i32, y: i32) -> Sheet {
         Sheet {
-            size: (100, 100),
+            size: (100.0, 100.0),
             square: (x, y),
+            grey: 0.0,
+        }
+    }
+
+    /// A sheet of an arbitrary MediaBox size, in points.
+    fn sized_sheet(w: f64, h: f64, x: i32, y: i32) -> Sheet {
+        Sheet {
+            size: (w, h),
+            square: (x, y),
+            grey: 0.0,
         }
     }
 
@@ -385,7 +466,8 @@ mod pdf_tests {
         ];
         for (i, s) in sheets.iter().enumerate() {
             let (x, y) = s.square;
-            let content = format!("0 0 0 rg\n{x} {y} 20 20 re\nf\n");
+            let g = s.grey;
+            let content = format!("{g} {g} {g} rg\n{x} {y} 20 20 re\nf\n");
             objs.push(format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
                  /Contents {} 0 R /Resources << >> >>",
@@ -463,10 +545,7 @@ mod pdf_tests {
         // not a tool malfunction. It must come back as a fully-changed page (the
         // run exits 1), never fail the whole document with exit 2.
         let old = multi_page_pdf(&[sheet(10, 10)]);
-        let new = multi_page_pdf(&[Sheet {
-            size: (100, 200),
-            square: (10, 10),
-        }]);
+        let new = multi_page_pdf(&[sized_sheet(100.0, 200.0, 10, 10)]);
         let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default())
             .expect("a resized sheet is a diff, not an error");
         assert!(d.any_changes(), "a resized sheet is a change");
@@ -482,17 +561,72 @@ mod pdf_tests {
     }
 
     #[test]
+    fn a_one_pixel_rounding_difference_still_produces_a_located_diff() {
+        // #262 tolerance: the SAME A4-landscape sheet, MediaBox [0 0 842 595]
+        // against the exact [0 0 841.89 595.276], rasterizes to 1754x1239 vs
+        // 1753x1240 px at 150 DPI. Comparing dimensions exactly called that a
+        // paper-size change and threw the sheet's whole pixel diff away — the
+        // added part was never located. It must be diffed over the shared region.
+        let old = multi_page_pdf(&[sized_sheet(842.0, 595.0, 40, 40)]);
+        let new = multi_page_pdf(&[sized_sheet(841.89, 595.276, 300, 300)]);
+        let od = page_pixel_dims(&old, 150.0).unwrap()[0];
+        let nd = page_pixel_dims(&new, 150.0).unwrap()[0];
+        assert_ne!(od, nd, "the fixture really does round differently");
+        assert!(
+            od.0.abs_diff(nd.0) <= 2 && od.1.abs_diff(nd.1) <= 2,
+            "{od:?} {nd:?}"
+        );
+        let d = diff_pdfs(&old, &new, 150.0, &ImageDiffOptions::default()).expect("diff");
+        let row = &d.pages[0];
+        assert!(
+            row.size_change.is_none(),
+            "sub-pixel rounding is not a paper-size change: {:?}",
+            row.size_change
+        );
+        let crop = row
+            .rounding_crop
+            .expect("the crop is reported, never silent");
+        assert_eq!(crop.to, (od.0.min(nd.0), od.1.min(nd.1)));
+        let s = &paired(row).stats;
+        assert!(s.added_px > 100, "the moved square is located: {s:?}");
+        assert!(s.removed_px > 100, "and its old position too: {s:?}");
+        assert!(s.regions >= 2, "two disjoint regions, got {}", s.regions);
+        assert!(d.any_changes());
+        // And the crop line names both sizes and the shared region.
+        let text = crop.to_string();
+        assert!(
+            text.contains("shared") && text.contains(&crop.to.0.to_string()),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_rounding_difference_on_an_unchanged_sheet_is_still_no_change() {
+        // The tolerance must not manufacture a diff either. A MediaBox width of
+        // 841.9 pt instead of 842 rounds the raster a pixel narrower without
+        // moving any content, so cropping to the shared region must report
+        // exactly no change — not a 100%-changed resized sheet, and not an error.
+        let old = multi_page_pdf(&[sized_sheet(842.0, 595.0, 40, 40)]);
+        let new = multi_page_pdf(&[sized_sheet(841.9, 595.0, 40, 40)]);
+        let d = diff_pdfs(&old, &new, 150.0, &ImageDiffOptions::default()).expect("diff");
+        let row = &d.pages[0];
+        let crop = row.rounding_crop.expect("the crop still applies");
+        assert_eq!(crop.to, (1753, 1239));
+        assert!(row.size_change.is_none());
+        assert!(
+            !row.has_any_change(),
+            "same content, no change: {:?}",
+            paired(row).stats
+        );
+        assert!(!d.any_changes());
+    }
+
+    #[test]
     fn a_size_change_does_not_stop_the_other_pages_diffing() {
         // The rest of the document must still be diffed — one resized sheet does
         // not take the run down with it.
         let old = multi_page_pdf(&[sheet(10, 10), sheet(60, 60)]);
-        let new = multi_page_pdf(&[
-            Sheet {
-                size: (100, 200),
-                square: (10, 10),
-            },
-            sheet(10, 60),
-        ]);
+        let new = multi_page_pdf(&[sized_sheet(100.0, 200.0, 10, 10), sheet(10, 60)]);
         let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
         assert_eq!(d.pages.len(), 2);
         assert!(d.pages[0].size_change.is_some());
@@ -545,19 +679,20 @@ mod pdf_tests {
 
     #[test]
     fn a_matching_fingerprint_never_skips_the_pixel_diff() {
-        // The fingerprint is a 16x16 digest — lossy by construction. Two sheets
-        // that digest identically must still be diffed pixel by pixel, or a real
-        // change smaller than a digest cell becomes a silent miss.
+        // The fingerprint is a 16x16 ink-coverage digest — lossy by construction.
+        // Recolouring a part changes no cell's coverage at all, so the two sheets
+        // digest IDENTICALLY; they must still be diffed pixel by pixel, or the
+        // recolour becomes a silent miss.
         let old = multi_page_pdf(&[sheet(10, 10)]);
         let new = multi_page_pdf(&[Sheet {
-            size: (100, 100),
-            square: (11, 10),
+            grey: 0.2,
+            ..sheet(10, 10)
         }]);
         let (of, nf) = (
             etchy_core::fingerprint(&rasterize(&old, 72.0).unwrap()[0]),
             etchy_core::fingerprint(&rasterize(&new, 72.0).unwrap()[0]),
         );
-        assert_eq!(of, nf, "a 1 pt nudge is invisible to the digest");
+        assert_eq!(of, nf, "a recolour is invisible to an ink-coverage digest");
         let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
         assert!(
             d.any_changes(),

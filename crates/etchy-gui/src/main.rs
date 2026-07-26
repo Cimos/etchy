@@ -5238,7 +5238,7 @@ impl ViewApp {
         // Textures for the selected page — uploaded once on first draw, cached
         // in the row (never re-uploaded per frame).
         let ctx = ui.ctx().clone();
-        let (old_tex, new_tex, overlay_tex, presence, page_label, size_change) = {
+        let (old_tex, new_tex, overlay_tex, presence, page_label, size_change, rounding_crop) = {
             let pv = self.pdf.as_mut().expect("pdf mode");
             let row = &mut pv.rows[sel];
             (
@@ -5248,6 +5248,7 @@ impl ViewApp {
                 row.presence,
                 row.label(),
                 row.size_change,
+                row.rounding_crop,
             )
         };
 
@@ -5366,6 +5367,15 @@ impl ViewApp {
         if let Some(c) = size_change {
             extra_chips.push(format!(
                 "{page_label} page size changed ({c}) — the whole sheet counts as changed"
+            ));
+        }
+        // The two renders round a pixel apart: the same sheet size, diffed over
+        // the pixels they share (#262). Stated so the cropped edge is never a
+        // silent difference between what is on screen and what was compared.
+        if let Some(c) = rounding_crop {
+            extra_chips.push(format!(
+                "{page_label} page size rounding ({c}) — same sheet size, diffed over \
+                 the shared pixels"
             ));
         }
         self.canvas_trailing(&painter, &response, rect, extra_chips);
@@ -7812,7 +7822,7 @@ mod tests {
         let old = multi_page_pdf(&[test_sheet(10, 10), test_sheet(60, 60)]);
         let new = multi_page_pdf(&[
             TestSheet {
-                size: (100, 200),
+                size: (100.0, 200.0),
                 square: (10, 10),
             },
             test_sheet(10, 60),
