@@ -113,6 +113,76 @@ pub struct ImageDiffResult {
     pub overlay: Image,
 }
 
+/// Per-axis pixel slack that counts as the **same** sheet size (#262).
+///
+/// Rasterizing a page floors `size_in_points × dpi / 72` to whole pixels, so two
+/// exports of the same paper can land a pixel apart on either axis: an A4
+/// landscape `MediaBox [0 0 842 595]` gives 1754×1239 px at 150 DPI while the
+/// exact `[0 0 841.89 595.276]` gives 1753×1240 px. Calling that a paper-size
+/// change would throw away the sheet's entire pixel diff over a rounding
+/// artefact — the second cardinal sin, destroying a precise diff. Two pixels per
+/// axis covers the rounding of both sides at any DPI (each side can only lose
+/// under one pixel to the floor) without letting a real resize through: the
+/// smallest genuine paper step, A4→A3, is hundreds of pixels.
+pub const SIZE_TOLERANCE_PX: u32 = 2;
+
+/// How the two rasters of a paired sheet relate in size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairSizing {
+    /// Identical dimensions — diff as they are.
+    Same,
+    /// Within [`SIZE_TOLERANCE_PX`] on both axes: rasterization rounding, not a
+    /// resize. Crop both sides to `to` with [`crop_top_left`] and diff that, so a
+    /// real change is still found and located.
+    Rounded { to: (u32, u32) },
+    /// A genuine paper-size change (#262). The two rasters have no pixel
+    /// correspondence, so the sheet is reported as wholly changed with both sizes
+    /// named — etchy never rescales a raster onto the other's frame.
+    Changed,
+}
+
+/// Classify a paired sheet's two raster sizes. Pure, so the CLI, the engine and
+/// the viewer all decide the same way.
+pub fn classify_pair_size(old: (u32, u32), new: (u32, u32)) -> PairSizing {
+    let (dw, dh) = (old.0.abs_diff(new.0), old.1.abs_diff(new.1));
+    if dw == 0 && dh == 0 {
+        PairSizing::Same
+    } else if dw <= SIZE_TOLERANCE_PX && dh <= SIZE_TOLERANCE_PX {
+        PairSizing::Rounded {
+            to: (old.0.min(new.0), old.1.min(new.1)),
+        }
+    } else {
+        PairSizing::Changed
+    }
+}
+
+/// Crop a raster to `w × h` from its top-left corner — the corner a rasterizer
+/// anchors a page to, so the shared region of two nearly-identical renders is the
+/// top-left `min × min` block.
+///
+/// # Errors
+/// [`EngineError::ImageSizeMismatch`] if the requested crop does not fit inside
+/// `img`, or is empty: cropping to nothing would silently diff zero pixels.
+pub fn crop_top_left(img: &Image, w: u32, h: u32) -> Result<Image> {
+    if w == 0 || h == 0 || w > img.width || h > img.height {
+        return Err(EngineError::ImageSizeMismatch {
+            ow: img.width,
+            oh: img.height,
+            nw: w,
+            nh: h,
+        });
+    }
+    if w == img.width && h == img.height {
+        return Ok(img.clone());
+    }
+    let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
+    for y in 0..h as usize {
+        let row = y * img.width as usize * 4;
+        rgba.extend_from_slice(&img.rgba[row..row + w as usize * 4]);
+    }
+    Image::new(w, h, rgba)
+}
+
 /// Classification of a single pixel between the two pages.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Class {
@@ -433,5 +503,99 @@ mod tests {
         let r = diff_images(&old, &new, &opts).unwrap();
         assert_eq!(r.stats.regions, 1);
         assert_eq!(r.stats.added_px, 3);
+    }
+
+    #[test]
+    fn identical_dimensions_are_the_same_size() {
+        assert_eq!(
+            classify_pair_size((1754, 1239), (1754, 1239)),
+            PairSizing::Same
+        );
+    }
+
+    #[test]
+    fn a_sub_pixel_rounding_difference_is_not_a_resize() {
+        // #262: the same A4 landscape sheet, MediaBox [0 0 842 595] against the
+        // exact [0 0 841.89 595.276], rasterizes to 1754x1239 vs 1753x1240 px at
+        // 150 DPI. Treating that as a paper-size change discards the sheet's whole
+        // pixel diff over a rounding artefact.
+        assert_eq!(
+            classify_pair_size((1754, 1239), (1753, 1240)),
+            PairSizing::Rounded { to: (1753, 1239) }
+        );
+        // Either direction, and up to the tolerance on both axes at once.
+        assert_eq!(
+            classify_pair_size((1753, 1240), (1754, 1239)),
+            PairSizing::Rounded { to: (1753, 1239) }
+        );
+        assert_eq!(
+            classify_pair_size((100, 100), (102, 98)),
+            PairSizing::Rounded { to: (100, 98) }
+        );
+    }
+
+    #[test]
+    fn a_real_resize_is_still_a_size_change() {
+        // A4 -> A3 at 150 DPI, and the synthetic 100x100 -> 100x200 pt case: both
+        // are hundreds of pixels out, far past any rounding.
+        assert_eq!(
+            classify_pair_size((1240, 1754), (1754, 2480)),
+            PairSizing::Changed
+        );
+        assert_eq!(
+            classify_pair_size((100, 100), (100, 200)),
+            PairSizing::Changed
+        );
+        // One axis inside the tolerance is not enough.
+        assert_eq!(
+            classify_pair_size((100, 100), (101, 140)),
+            PairSizing::Changed
+        );
+        assert_eq!(
+            classify_pair_size((100, 100), (97, 100)),
+            PairSizing::Changed
+        );
+    }
+
+    #[test]
+    fn cropping_keeps_the_top_left_block() {
+        let a = img(4, 3, &[(0, [0, 0, 0]), (3, [0, 0, 0]), (8, [0, 0, 0])]);
+        let c = crop_top_left(&a, 3, 2).unwrap();
+        assert_eq!((c.width, c.height), (3, 2));
+        // Pixel 0 survives; pixel 3 (last column) and 8 (row 3) are cropped away.
+        assert_eq!(&c.rgba[0..3], &[0, 0, 0]);
+        assert!(c.rgba[4..].chunks_exact(4).all(|p| p[0] == 255));
+        // A no-op crop is the same image.
+        assert_eq!(crop_top_left(&a, 4, 3).unwrap(), a);
+    }
+
+    #[test]
+    fn an_impossible_crop_fails_loud() {
+        // Cropping to nothing, or to more than the raster holds, would silently
+        // diff the wrong pixels (or zero of them).
+        let a = img(4, 3, &[]);
+        for (w, h) in [(0, 3), (4, 0), (5, 3), (4, 4)] {
+            assert!(crop_top_left(&a, w, h).is_err(), "{w}x{h} must fail loud");
+        }
+    }
+
+    #[test]
+    fn a_rounded_pair_still_locates_its_change() {
+        // The end of the #262 tolerance path: crop both to the shared size and the
+        // pixel diff finds the added ink, instead of the pair being written off.
+        let old = img(4, 3, &[]);
+        let new = img(3, 4, &[(1, [0, 0, 0])]);
+        let PairSizing::Rounded { to } = classify_pair_size((4, 3), (3, 4)) else {
+            panic!("a 1 px difference per axis is rounding, not a resize");
+        };
+        assert_eq!(to, (3, 3));
+        let (oc, nc) = (
+            crop_top_left(&old, to.0, to.1).unwrap(),
+            crop_top_left(&new, to.0, to.1).unwrap(),
+        );
+        let r = diff_images(&oc, &nc, &ImageDiffOptions::default()).unwrap();
+        assert_eq!(r.stats.added_px, 1, "the added pixel is found");
+        assert_eq!(r.stats.regions, 1);
+        assert_eq!(r.stats.total_px, 9, "over the shared region only");
     }
 }
