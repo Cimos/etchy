@@ -33,20 +33,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has no diff overlay: the viewer shows both sheets side by side at their true
   scale (etchy still never rescales a raster) and the Export tab names the page
   and the reason instead of quietly omitting its PNG.
+  Sizes are compared with a **2 px per-axis tolerance**: flooring
+  `points × dpi / 72` puts two exports of the same paper a pixel apart (an A4
+  landscape `MediaBox [0 0 842 595]` gives 1754×1239 px at 150 DPI, the exact
+  `[0 0 841.89 595.276]` gives 1753×1240), and calling that a resize would throw
+  the sheet's whole pixel diff away. Within the tolerance it is the same sheet:
+  both rasters are cropped to the region they share, the pair is diffed in full,
+  and the crop is reported (`rounding_crop` in the JSON, a "page size rounding"
+  line in the summary/Markdown, a chip in the viewer).
 - **A PDF sheet inserted mid-document no longer desyncs every later page**
   (#249). Pages used to pair strictly by index, so inserting one sheet made every
   following pair compare the wrong sheets — all of them reported as heavily
   changed, drowning the real edit. Pages now pair by **content**: each rasterized
-  page is fingerprinted (a 16×16 luminance digest of the raster already rendered)
-  and the two revisions' page sequences are aligned, so an inserted or removed
-  sheet becomes an explicit `new-only` / `old-only` row and the sheets around it
-  keep pairing with themselves. The alignment is always stated — in the summary,
-  the Markdown table, the JSON (`alignment`), and the viewer — except when it is
-  the plain index pairing, which says nothing extra. The fingerprint only decides
-  *which* pages pair: every paired sheet still gets the full pixel diff (a lossy
-  digest must never stand in for one), and every page of both revisions appears
-  exactly once. Per-page rows now carry `old_page` / `new_page` so the sheet each
-  row compares is explicit.
+  page is fingerprinted (a 16×16 grid of per-cell ink coverage, taken off the
+  raster already rendered) and the two revisions' page sequences are aligned, so an
+  inserted or removed sheet becomes an explicit `new-only` / `old-only` row and the
+  sheets around it keep pairing with themselves. The alignment is always stated —
+  in the summary, the Markdown table, the JSON (`alignment`), and the viewer —
+  except when it is the plain index pairing, which says nothing extra. The
+  fingerprint only decides *which* pages pair: every paired sheet still gets the
+  full pixel diff (a lossy digest must never stand in for one), and every page of
+  both revisions appears exactly once. Per-page rows now carry `old_page` /
+  `new_page` so the sheet each row compares is explicit.
+  Each cell's value is the fraction of it darker than a **fixed absolute**
+  luminance, quantized on a log ladder, and two digests are compared by L1 distance
+  over those per-cell values. That keeps the digest local: ink added anywhere moves
+  only the cells it touches, which is what sparse schematic line art needs. Two
+  ceilings sit on top of it. A re-pairing is adopted only when it beats plain index
+  pairing by a clear margin *and* every pair it chooses is more alike than chance;
+  otherwise the alignment keeps index pairing and says "page alignment was
+  ambiguous, paired by index" (the JSON gains `alignment.basis`). And the page
+  count is capped at **1024 per side** before the alignment matrix is allocated —
+  it is quadratic in the page count, so two 10 000-page PDFs (small files, under
+  every other cap) would otherwise ask for 800 MB and abort the process with no
+  message; over the cap etchy exits 2 naming the input, the count and the limit.
 - **Real-board (Altium) validation fixes** — found by running a full production
   fab pack end-to-end: tool definitions with feed/speed *before* the diameter
   (`T1F00S00C0.00787`) now parse (the whole pack was rejected); Altium's columned
