@@ -38,11 +38,15 @@ pub use geo::{
 };
 pub use geom::CIRCLE_SEGMENTS;
 pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};
-pub use imagediff::{diff_images, Image, ImageDiffOptions, ImageDiffResult, ImageDiffStats};
+pub use imagediff::{
+    classify_pair_size, crop_top_left, diff_images, Image, ImageDiffOptions, ImageDiffResult,
+    ImageDiffStats, PairSizing, SIZE_TOLERANCE_PX,
+};
 pub use model::{pair_layers, same_board_guard, Board, DrillKind, Layer, LayerKind, LayerPairing};
 pub use naming::{classify, drill_kind, file_function, looks_like_gerber, reconcile_kind};
 pub use pagealign::{
-    align_pages, dissimilarity, fingerprint, PageAlignment, PageFingerprint, PageMatch,
+    align_pages, dissimilarity, fingerprint, PageAlignment, PageFingerprint, PageMatch, Pairing,
+    MAX_ALIGN_PAGES,
 };
 pub use placement::{looks_like_placement, resolve_placement};
 pub use report::{DiffReport, LayerReport, LayerStatus, Totals, SCHEMA_VERSION};
