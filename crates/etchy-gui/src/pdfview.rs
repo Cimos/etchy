@@ -10,7 +10,7 @@
 //! a [`PdfView`] simply cannot be constructed ([`build_pdf_view`] fails loud).
 
 use eframe::egui;
-use etchy_core::Image;
+use etchy_core::{Image, PageAlignment, PageMatch};
 
 /// Whether the bytes are a PDF (`%PDF` magic at the start). Routes a loaded file
 /// into PDF mode; mixing a PDF with Gerber input is a loud error upstream.
@@ -58,23 +58,54 @@ impl Presence {
     }
 }
 
-/// The 1-based page numbers of the whole document pair with each page's presence:
-/// pages are paired by index up to `min(old, new)`; the excess side's pages are
-/// explicit `OldOnly` / `NewOnly` entries. Pure → unit-testable.
-pub fn page_plan(old_pages: usize, new_pages: usize) -> Vec<(usize, Presence)> {
-    let paired = old_pages.min(new_pages);
-    (1..=old_pages.max(new_pages))
-        .map(|page| {
-            let presence = if page <= paired {
-                Presence::Both
-            } else if old_pages > new_pages {
-                Presence::OldOnly
-            } else {
-                Presence::NewOnly
+/// One row of the merged document: where the sheet sits in the reading order and
+/// which page of each revision it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PagePlanRow {
+    /// 1-based row number in the merged document.
+    pub row: usize,
+    pub presence: Presence,
+    /// 1-based page in the old PDF, when the sheet exists there.
+    pub old_page: Option<usize>,
+    /// 1-based page in the new PDF, when the sheet exists there.
+    pub new_page: Option<usize>,
+}
+
+/// Turn a content alignment (`etchy_core::pagealign`, #249) into the Pages
+/// panel's rows: paired sheets plus explicit inserted / removed ones, in reading
+/// order. Pure → unit-testable, and available without the `pdf` feature.
+pub fn page_plan(alignment: &PageAlignment) -> Vec<PagePlanRow> {
+    alignment
+        .matches
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let (presence, old_page, new_page) = match *m {
+                PageMatch::Paired { old, new } => (Presence::Both, Some(old + 1), Some(new + 1)),
+                PageMatch::OldOnly { old } => (Presence::OldOnly, Some(old + 1), None),
+                PageMatch::NewOnly { new } => (Presence::NewOnly, None, Some(new + 1)),
             };
-            (page, presence)
+            PagePlanRow {
+                row: i + 1,
+                presence,
+                old_page,
+                new_page,
+            }
         })
         .collect()
+}
+
+/// A page row's label. Page numbers name the revision they belong to, so a sheet
+/// that moved between revisions says so instead of hiding behind a row number
+/// (#249: which sheets were compared must never be guesswork).
+pub fn row_label(old_page: Option<usize>, new_page: Option<usize>) -> String {
+    match (old_page, new_page) {
+        (Some(o), Some(n)) if o == n => format!("page {o}"),
+        (Some(o), Some(n)) => format!("page {n} (was {o})"),
+        (Some(o), None) => format!("page {o}"),
+        (None, Some(n)) => format!("page {n}"),
+        (None, None) => "page ?".to_string(),
+    }
 }
 
 /// Whether a page row counts as changed: any diffed pixels, or the page exists on
@@ -120,8 +151,13 @@ pub fn page_world_bbox(width_px: u32, height_px: u32, dpi: f32) -> [i64; 4] {
 /// source rasters are dropped after upload; the overlay raster is kept for the
 /// per-page PNG export.
 pub struct PageRow {
-    /// 1-based page number.
+    /// 1-based row number in the merged document (its reading order). Equal to
+    /// both sides' page numbers whenever nothing was inserted or removed.
     pub page: usize,
+    /// 1-based page in the old PDF, when the sheet exists there.
+    pub old_page: Option<usize>,
+    /// 1-based page in the new PDF, when the sheet exists there.
+    pub new_page: Option<usize>,
     pub presence: Presence,
     pub changed: bool,
     /// `(added+removed+changed) / total` pixels; 1.0 for an unpaired page.
@@ -153,8 +189,7 @@ impl PageRow {
     /// it over clippy's argument budget — a builder would be pure ceremony here).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        page: usize,
-        presence: Presence,
+        plan: PagePlanRow,
         changed_fraction: f64,
         width: u32,
         height: u32,
@@ -163,9 +198,11 @@ impl PageRow {
         overlay_img: Option<Image>,
     ) -> Self {
         Self {
-            page,
-            presence,
-            changed: row_changed(presence, changed_fraction),
+            page: plan.row,
+            old_page: plan.old_page,
+            new_page: plan.new_page,
+            presence: plan.presence,
+            changed: row_changed(plan.presence, changed_fraction),
             changed_fraction,
             width,
             height,
@@ -176,6 +213,12 @@ impl PageRow {
             new_tex: None,
             overlay_tex: None,
         }
+    }
+
+    /// The row's label — names the page of the revision it belongs to, and says
+    /// so when a sheet moved between revisions.
+    pub fn label(&self) -> String {
+        row_label(self.old_page, self.new_page)
     }
 
     /// Old-side texture, uploaded once on first use; the source raster is dropped
@@ -224,6 +267,10 @@ pub struct PdfView {
     pub order: Vec<usize>,
     /// The selected page (index into `rows`).
     pub selected: usize,
+    /// The page alignment chosen (#249) — `None` when it was the plain index
+    /// pairing. Shown in the viewer whenever it is `Some`: a re-pairing that
+    /// silently changed which sheets were compared is not acceptable.
+    pub alignment_note: Option<String>,
 }
 
 impl PdfView {
@@ -296,22 +343,33 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("rasterizing the new PDF")?;
     let (old_pages, new_pages) = (old_imgs.len(), new_imgs.len());
-    let mut old_it = old_imgs.into_iter();
-    let mut new_it = new_imgs.into_iter();
-    let mut rows = Vec::with_capacity(old_pages.max(new_pages));
-    for (page, presence) in page_plan(old_pages, new_pages) {
-        let (o, n) = (old_it.next(), new_it.next());
+    // Pair the sheets by content off the rasters we already hold (#249) — no
+    // re-render, and the caps above still bound everything.
+    let old_fp: Vec<_> = old_imgs.iter().map(etchy_core::fingerprint).collect();
+    let new_fp: Vec<_> = new_imgs.iter().map(etchy_core::fingerprint).collect();
+    let alignment = etchy_core::align_pages(&old_fp, &new_fp);
+    let mut old_imgs: Vec<Option<Image>> = old_imgs.into_iter().map(Some).collect();
+    let mut new_imgs: Vec<Option<Image>> = new_imgs.into_iter().map(Some).collect();
+    let mut rows = Vec::with_capacity(alignment.matches.len());
+    for plan in page_plan(&alignment) {
+        // Each index appears in exactly one row (the alignment's accounting
+        // invariant), so taking the raster out is safe and avoids a clone.
+        let o = plan.old_page.and_then(|p| old_imgs[p - 1].take());
+        let n = plan.new_page.and_then(|p| new_imgs[p - 1].take());
         let row = match (o, n) {
             (Some(o), Some(n)) => {
-                // Paired page: the pixel diff. A size mismatch (a resized sheet)
-                // fails loud — that is itself a change to flag, never a rescale.
+                // Paired sheet: ALWAYS the full pixel diff — the fingerprint
+                // chose the pairing and nothing else. A size mismatch (a resized
+                // sheet) fails loud: that is itself a change to flag, never a
+                // rescale.
                 let diff = etchy_core::diff_images(&o, &n, &Default::default())
                     .map_err(|e| anyhow::anyhow!("{e}"))
-                    .with_context(|| format!("diffing page {page}"))?;
+                    .with_context(|| {
+                        format!("diffing {}", row_label(plan.old_page, plan.new_page))
+                    })?;
                 let (w, h) = (o.width, o.height);
                 PageRow::new(
-                    page,
-                    presence,
+                    plan,
                     diff.stats.changed_fraction,
                     w,
                     h,
@@ -320,17 +378,17 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
                     Some(diff.overlay),
                 )
             }
-            // Unpaired page: the whole sheet appeared or disappeared — carried as
+            // Unpaired sheet: the whole page appeared or disappeared — carried as
             // an explicit changed row with only its own side's raster.
             (Some(o), None) => {
                 let (w, h) = (o.width, o.height);
-                PageRow::new(page, presence, 1.0, w, h, Some(o), None, None)
+                PageRow::new(plan, 1.0, w, h, Some(o), None, None)
             }
             (None, Some(n)) => {
                 let (w, h) = (n.width, n.height);
-                PageRow::new(page, presence, 1.0, w, h, None, Some(n), None)
+                PageRow::new(plan, 1.0, w, h, None, Some(n), None)
             }
-            (None, None) => unreachable!("page_plan never exceeds max(old, new)"),
+            (None, None) => unreachable!("every plan row names at least one side"),
         };
         rows.push(row);
     }
@@ -344,6 +402,7 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         rows,
         order,
         selected,
+        alignment_note: alignment.note(),
     })
 }
 
@@ -379,30 +438,77 @@ mod tests {
         assert!(!looks_like_pdf(b"  %PDF")); // magic must lead, matching the CLI sniff
     }
 
+    /// Shorthand for an alignment built from `(old, new)` index pairs, where
+    /// `None` marks the missing side.
+    fn alignment(steps: &[(Option<usize>, Option<usize>)]) -> PageAlignment {
+        PageAlignment {
+            matches: steps
+                .iter()
+                .map(|s| match *s {
+                    (Some(old), Some(new)) => PageMatch::Paired { old, new },
+                    (Some(old), None) => PageMatch::OldOnly { old },
+                    (None, Some(new)) => PageMatch::NewOnly { new },
+                    (None, None) => unreachable!("a step names at least one side"),
+                })
+                .collect(),
+        }
+    }
+
     #[test]
-    fn page_plan_pairs_by_index_and_tags_the_excess() {
+    fn page_plan_carries_both_sides_page_numbers() {
+        let plan = page_plan(&alignment(&[(Some(0), Some(0)), (Some(1), Some(1))]));
         assert_eq!(
-            page_plan(2, 2),
-            vec![(1, Presence::Both), (2, Presence::Both)]
-        );
-        // New grew by one page → page 3 is new-only.
-        assert_eq!(
-            page_plan(2, 3),
+            plan,
             vec![
-                (1, Presence::Both),
-                (2, Presence::Both),
-                (3, Presence::NewOnly)
+                PagePlanRow {
+                    row: 1,
+                    presence: Presence::Both,
+                    old_page: Some(1),
+                    new_page: Some(1)
+                },
+                PagePlanRow {
+                    row: 2,
+                    presence: Presence::Both,
+                    old_page: Some(2),
+                    new_page: Some(2)
+                },
             ]
         );
-        // Old had more → the excess is old-only (removed sheets).
-        assert_eq!(
-            page_plan(3, 1),
-            vec![
-                (1, Presence::Both),
-                (2, Presence::OldOnly),
-                (3, Presence::OldOnly)
-            ]
-        );
+        // A trailing append: the excess new sheet is an explicit new-only row.
+        let plan = page_plan(&alignment(&[(Some(0), Some(0)), (None, Some(1))]));
+        assert_eq!(plan[1].presence, Presence::NewOnly);
+        assert_eq!((plan[1].old_page, plan[1].new_page), (None, Some(2)));
+        // Removed sheets are old-only rows.
+        let plan = page_plan(&alignment(&[(Some(0), Some(0)), (Some(1), None)]));
+        assert_eq!(plan[1].presence, Presence::OldOnly);
+        assert_eq!((plan[1].old_page, plan[1].new_page), (Some(2), None));
+    }
+
+    #[test]
+    fn page_plan_keeps_an_inserted_sheet_in_place_and_shifts_the_rest() {
+        // #249: old [A, B, C]; new [A, X, B, C]. The inserted sheet is row 2 and
+        // the later sheets keep pairing with themselves across the shift.
+        let plan = page_plan(&alignment(&[
+            (Some(0), Some(0)),
+            (None, Some(1)),
+            (Some(1), Some(2)),
+            (Some(2), Some(3)),
+        ]));
+        assert_eq!(plan.len(), 4);
+        assert_eq!(plan[1].presence, Presence::NewOnly);
+        assert_eq!((plan[2].old_page, plan[2].new_page), (Some(2), Some(3)));
+        assert_eq!((plan[3].old_page, plan[3].new_page), (Some(3), Some(4)));
+        // Every row is numbered by its place in the merged document.
+        assert_eq!(plan.iter().map(|r| r.row).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn row_labels_name_the_revision_a_page_number_belongs_to() {
+        assert_eq!(row_label(Some(2), Some(2)), "page 2");
+        // A sheet that moved says so — the row number is not a page number.
+        assert_eq!(row_label(Some(2), Some(3)), "page 3 (was 2)");
+        assert_eq!(row_label(Some(4), None), "page 4");
+        assert_eq!(row_label(None, Some(1)), "page 1");
     }
 
     #[test]
@@ -452,23 +558,62 @@ mod tests {
     }
 }
 
+/// Test-support: one synthesized sheet — MediaBox size in points and the
+/// position of its filled 20x20 black square.
+#[cfg(all(test, feature = "pdf"))]
+#[derive(Clone, Copy)]
+pub(crate) struct TestSheet {
+    pub size: (i32, i32),
+    pub square: (i32, i32),
+}
+
+/// A sheet on the standard 100x100 pt page with its square at (`x`,`y`).
+#[cfg(all(test, feature = "pdf"))]
+pub(crate) fn test_sheet(x: i32, y: i32) -> TestSheet {
+    TestSheet {
+        size: (100, 100),
+        square: (x, y),
+    }
+}
+
 /// Test-support (shared with main.rs's export regression test): a minimal
 /// well-formed single-page PDF (100x100 pt MediaBox) with one filled black
 /// square at (`x`,`y`), size 20 — same synthesis as etchy-pdf's tests.
 #[cfg(all(test, feature = "pdf"))]
 pub(crate) fn one_square_pdf(x: i32, y: i32) -> Vec<u8> {
-    let content = format!("0 0 0 rg\n{x} {y} 20 20 re\nf\n");
-    let objs: Vec<String> = vec![
+    multi_page_pdf(&[test_sheet(x, y)])
+}
+
+/// Test-support: a well-formed multi-page PDF, one page per [`TestSheet`].
+#[cfg(all(test, feature = "pdf"))]
+pub(crate) fn multi_page_pdf(sheets: &[TestSheet]) -> Vec<u8> {
+    // Object layout: 1 = catalog, 2 = page tree, then (page, content) pairs.
+    let kids: Vec<String> = (0..sheets.len())
+        .map(|i| format!("{} 0 R", 3 + i * 2))
+        .collect();
+    let mut objs: Vec<String> = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".into(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
-              /Contents 4 0 R /Resources << >> >>"
-            .into(),
         format!(
-            "<< /Length {} >>\nstream\n{content}endstream",
-            content.len()
+            "<< /Type /Pages /Kids [{}] /Count {} >>",
+            kids.join(" "),
+            sheets.len()
         ),
     ];
+    for (i, s) in sheets.iter().enumerate() {
+        let (x, y) = s.square;
+        let content = format!("0 0 0 rg\n{x} {y} 20 20 re\nf\n");
+        objs.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
+             /Contents {} 0 R /Resources << >> >>",
+            s.size.0,
+            s.size.1,
+            4 + i * 2
+        ));
+        objs.push(format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        ));
+    }
     let mut pdf = String::from("%PDF-1.7\n");
     let mut offsets = Vec::with_capacity(objs.len());
     for (i, body) in objs.iter().enumerate() {
@@ -553,5 +698,50 @@ mod pdf_tests {
     #[test]
     fn junk_bytes_fail_loud() {
         assert!(build_pdf_view(b"not a pdf", b"also not", 150.0).is_err());
+    }
+
+    #[test]
+    fn a_mid_document_insertion_keeps_the_other_sheets_paired() {
+        // #249: old [A, B, C]; new [A, X, B, C]. Index pairing made every later
+        // sheet read as heavily changed; only the inserted sheet is a change.
+        let old = multi_page_pdf(&[test_sheet(10, 10), test_sheet(60, 60), test_sheet(10, 60)]);
+        let new = multi_page_pdf(&[
+            test_sheet(10, 10),
+            test_sheet(60, 10),
+            test_sheet(60, 60),
+            test_sheet(10, 60),
+        ]);
+        let v = build_pdf_view(&old, &new, 150.0).expect("build");
+        assert_eq!((v.old_pages, v.new_pages), (3, 4));
+        assert_eq!(v.rows.len(), 4, "every sheet of both revisions gets a row");
+        assert_eq!(v.changed_count(), 1, "only the inserted sheet changed");
+        let ins = &v.rows[1];
+        assert_eq!(ins.presence, Presence::NewOnly);
+        assert_eq!((ins.old_page, ins.new_page), (None, Some(2)));
+        assert!(
+            ins.overlay_img.is_none(),
+            "nothing to diff an insert against"
+        );
+        // The shifted sheets pair with themselves and read as unchanged.
+        assert_eq!((v.rows[2].old_page, v.rows[2].new_page), (Some(2), Some(3)));
+        assert!(!v.rows[2].changed);
+        assert_eq!(v.rows[2].label(), "page 3 (was 2)");
+        // The viewer states the alignment it chose — never a silent re-pairing.
+        let note = v.alignment_note.expect("a re-pairing is always reported");
+        assert!(note.contains("inserted"), "{note}");
+        // Every page of both revisions is accounted for exactly once.
+        let olds: Vec<usize> = v.rows.iter().filter_map(|r| r.old_page).collect();
+        let news: Vec<usize> = v.rows.iter().filter_map(|r| r.new_page).collect();
+        assert_eq!(olds, vec![1, 2, 3]);
+        assert_eq!(news, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn an_unchanged_pair_reports_no_realignment() {
+        let pdf = multi_page_pdf(&[test_sheet(10, 10), test_sheet(60, 60)]);
+        let v = build_pdf_view(&pdf, &pdf, 150.0).expect("build");
+        assert_eq!(v.alignment_note, None, "the identity says nothing extra");
+        assert_eq!(v.changed_count(), 0);
+        assert_eq!(v.rows[1].label(), "page 2");
     }
 }

@@ -49,8 +49,16 @@ impl fmt::Display for Presence {
 /// 1.0 — the whole sheet appeared or disappeared, which is a change.
 #[derive(Serialize)]
 pub struct PdfPageReport {
-    /// 1-based page number.
+    /// 1-based row number in the merged document (its reading order). With an
+    /// inserted or removed sheet this is neither side's page number — those are
+    /// `old_page` / `new_page`.
     pub page: usize,
+    /// 1-based page number in the old PDF; absent for an inserted sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_page: Option<usize>,
+    /// 1-based page number in the new PDF; absent for a removed sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_page: Option<usize>,
     pub present: Presence,
     pub added_px: u64,
     pub removed_px: u64,
@@ -76,6 +84,24 @@ impl PdfPageReport {
     }
 }
 
+/// How the two revisions' pages were paired (#249). Always present in the JSON
+/// so a consumer can see the pairing that produced the per-page rows; `identity`
+/// is the plain index pairing with nothing inserted or removed.
+#[derive(Serialize)]
+pub struct PdfAlignmentReport {
+    pub identity: bool,
+    /// 1-based new-side page numbers of inserted sheets.
+    pub inserted_new_pages: Vec<usize>,
+    /// 1-based old-side page numbers of removed sheets.
+    pub removed_old_pages: Vec<usize>,
+    /// How many sheets paired — i.e. got a full pixel diff.
+    pub paired: usize,
+    /// The one-line statement of the alignment; absent for the identity, where
+    /// there is nothing to explain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// The whole-document PDF diff report (JSON schema v1 for PDF inputs).
 #[derive(Serialize)]
 pub struct PdfReport {
@@ -89,52 +115,46 @@ pub struct PdfReport {
     pub min_region_px: u32,
     pub old_pages: usize,
     pub new_pages: usize,
+    pub alignment: PdfAlignmentReport,
     pub pages: Vec<PdfPageReport>,
 }
 
 impl PdfReport {
-    /// Build the report from an engine diff: paired pages carry their pixel
-    /// stats; extra pages on either side are appended as explicit
-    /// `old-only` / `new-only` rows with 1-based numbering.
+    /// Build the report from an engine diff. The engine hands back one row per
+    /// sheet of the merged document in reading order — paired sheets carry their
+    /// pixel stats, inserted / removed sheets are explicit `new-only` /
+    /// `old-only` rows sitting where they actually occur (#249).
     pub fn from_diff(diff: &PdfDiff, dpi: f32, min_region_px: u32) -> Self {
-        let mut pages: Vec<PdfPageReport> = diff
+        let pages: Vec<PdfPageReport> = diff
             .pages
             .iter()
-            .map(|p| PdfPageReport {
-                page: p.page,
-                present: Presence::Both,
-                added_px: p.diff.stats.added_px,
-                removed_px: p.diff.stats.removed_px,
-                changed_px: p.diff.stats.changed_px,
-                total_px: p.diff.stats.total_px,
-                changed_fraction: p.diff.stats.changed_fraction,
-                regions: p.diff.stats.regions,
-                suppressed_px: p.diff.stats.suppressed_px,
-                suppressed_regions: p.diff.stats.suppressed_regions,
-                overlay_png: None,
+            .map(|p| {
+                let present = match (p.old_page, p.new_page) {
+                    (Some(_), Some(_)) => Presence::Both,
+                    (Some(_), None) => Presence::OldOnly,
+                    _ => Presence::NewOnly,
+                };
+                let s = p.diff.as_ref().map(|d| d.stats);
+                PdfPageReport {
+                    page: p.page,
+                    old_page: p.old_page,
+                    new_page: p.new_page,
+                    present,
+                    added_px: s.map_or(0, |s| s.added_px),
+                    removed_px: s.map_or(0, |s| s.removed_px),
+                    changed_px: s.map_or(0, |s| s.changed_px),
+                    total_px: s.map_or(0, |s| s.total_px),
+                    // An undiffed sheet is wholly a change: it appeared or
+                    // disappeared, so the whole page is the difference.
+                    changed_fraction: s.map_or(1.0, |s| s.changed_fraction),
+                    regions: s.map_or(0, |s| s.regions),
+                    suppressed_px: s.map_or(0, |s| s.suppressed_px),
+                    suppressed_regions: s.map_or(0, |s| s.suppressed_regions),
+                    overlay_png: None,
+                }
             })
             .collect();
-        let paired = diff.old_pages.min(diff.new_pages);
-        let (extra, presence) = if diff.old_pages > diff.new_pages {
-            (diff.old_pages, Presence::OldOnly)
-        } else {
-            (diff.new_pages, Presence::NewOnly)
-        };
-        for page in (paired + 1)..=extra {
-            pages.push(PdfPageReport {
-                page,
-                present: presence,
-                added_px: 0,
-                removed_px: 0,
-                changed_px: 0,
-                total_px: 0,
-                changed_fraction: 1.0,
-                regions: 0,
-                suppressed_px: 0,
-                suppressed_regions: 0,
-                overlay_png: None,
-            });
-        }
+        let al = &diff.alignment;
         PdfReport {
             schema_version: PDF_SCHEMA_VERSION,
             tool_version: env!("CARGO_PKG_VERSION"),
@@ -143,6 +163,13 @@ impl PdfReport {
             min_region_px,
             old_pages: diff.old_pages,
             new_pages: diff.new_pages,
+            alignment: PdfAlignmentReport {
+                identity: al.is_identity(),
+                inserted_new_pages: al.inserted_pages(),
+                removed_old_pages: al.removed_pages(),
+                paired: al.paired_count(),
+                note: al.note(),
+            },
             pages,
         }
     }
@@ -151,17 +178,29 @@ impl PdfReport {
         serde_json::to_string_pretty(self).expect("PdfReport serializes")
     }
 
-    /// The `--format summary` terminal table.
+    /// The `--format summary` terminal table. The `old`/`new` columns spell out
+    /// which sheet of each revision the row compares, so a re-pairing is legible
+    /// rather than implied by the row number.
     pub fn to_summary(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "{:<6} {:<9} {:>10} {:>10} {:>10} {:>9} {:>8}\n",
-            "page", "present", "added_px", "removed_px", "changed_px", "changed%", "regions"
+            "{:<6} {:>4} {:>4} {:<9} {:>10} {:>10} {:>10} {:>9} {:>8}\n",
+            "page",
+            "old",
+            "new",
+            "present",
+            "added_px",
+            "removed_px",
+            "changed_px",
+            "changed%",
+            "regions"
         ));
         for p in &self.pages {
             out.push_str(&format!(
-                "{:<6} {:<9} {:>10} {:>10} {:>10} {:>8.3}% {:>8}\n",
+                "{:<6} {:>4} {:>4} {:<9} {:>10} {:>10} {:>10} {:>8.3}% {:>8}\n",
                 p.page,
+                side(p.old_page),
+                side(p.new_page),
                 p.present,
                 p.added_px,
                 p.removed_px,
@@ -173,6 +212,10 @@ impl PdfReport {
         out.push('\n');
         out.push_str(&self.page_count_line());
         out.push('\n');
+        if let Some(note) = &self.alignment.note {
+            out.push_str(note);
+            out.push('\n');
+        }
         if let Some(note) = self.noise_floor_line() {
             out.push_str(&note);
             out.push('\n');
@@ -189,11 +232,18 @@ impl PdfReport {
     pub fn to_markdown(&self) -> String {
         let mut out = String::from("## etchy PDF diff\n\n");
         out.push_str(&self.page_count_line());
-        out.push_str("\n\n");
+        out.push('\n');
+        if let Some(note) = &self.alignment.note {
+            out.push('\n');
+            out.push_str(note);
+            out.push('\n');
+        }
+        out.push('\n');
         out.push_str(
-            "| page | present | added px | removed px | changed px | changed % | regions |\n",
+            "| page | old | new | present | added px | removed px | changed px | changed % \
+             | regions |\n",
         );
-        out.push_str("|---:|---|---:|---:|---:|---:|---:|\n");
+        out.push_str("|---:|---:|---:|---|---:|---:|---:|---:|---:|\n");
         for p in &self.pages {
             // Bold the page number of changed rows so they stand out in a
             // PR-comment render without any decoration.
@@ -203,8 +253,10 @@ impl PdfReport {
                 p.page.to_string()
             };
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {:.3}% | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {:.3}% | {} |\n",
                 page,
+                side(p.old_page),
+                side(p.new_page),
                 p.present,
                 p.added_px,
                 p.removed_px,
@@ -245,31 +297,27 @@ impl PdfReport {
     }
 
     /// The page-count sentence — prominent in every format so an added or removed
-    /// sheet can never read as "no change".
+    /// sheet, or a re-pairing, can never read as "no change".
     fn page_count_line(&self) -> String {
-        let paired = self.old_pages.min(self.new_pages);
-        if self.old_pages == self.new_pages {
-            let changed = self.pages.iter().filter(|p| p.changed()).count();
+        let changed = self.pages.iter().filter(|p| p.changed()).count();
+        if self.old_pages == self.new_pages && self.alignment.identity {
             format!(
                 "{} page(s) diffed at {} DPI; {} changed",
-                paired, self.dpi, changed
+                self.old_pages, self.dpi, changed
             )
         } else {
-            let (extra, side) = if self.old_pages > self.new_pages {
-                (self.old_pages, "old-only (removed)")
-            } else {
-                (self.new_pages, "new-only (added)")
-            };
-            let list = ((paired + 1)..=extra)
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
             format!(
-                "old {} page(s), new {} — pages 1–{} diffed at {} DPI; page(s) {} {}",
-                self.old_pages, self.new_pages, paired, self.dpi, list, side
+                "old {} page(s), new {} — {} sheet(s) paired and diffed at {} DPI; {} changed",
+                self.old_pages, self.new_pages, self.alignment.paired, self.dpi, changed
             )
         }
     }
+}
+
+/// A page-number cell: the 1-based number, or `-` for the side that has no such
+/// sheet. Never blank — an empty cell reads as a missing value, not as absence.
+fn side(page: Option<usize>) -> String {
+    page.map_or_else(|| "-".to_string(), |p| p.to_string())
 }
 
 /// Read one PDF input, enforcing the shared per-file byte cap before it hits RAM.
@@ -362,8 +410,19 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating output directory {}", dir.display()))?;
         for p in &diff.pages {
+            let Some(d) = &p.diff else {
+                // A sheet that exists on one side only has nothing to diff
+                // against. Say so on stderr — the row is in the report either
+                // way, but a silently absent PNG invites "did it miss it?".
+                eprintln!(
+                    "etchy: no overlay for page {} — it exists in the {} revision only",
+                    p.page,
+                    if p.old_page.is_some() { "old" } else { "new" }
+                );
+                continue;
+            };
             let name = format!("page-{}.png", p.page);
-            let png = etchy_pdf::encode_png(&p.diff.overlay).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let png = etchy_pdf::encode_png(&d.overlay).map_err(|e| anyhow::anyhow!("{e}"))?;
             let path = dir.join(&name);
             std::fs::write(&path, png).with_context(|| format!("writing {}", path.display()))?;
             eprintln!("etchy: wrote {}", path.display());
@@ -389,9 +448,10 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etchy_core::{Image, ImageDiffResult, ImageDiffStats};
+    use etchy_core::{Image, ImageDiffResult, ImageDiffStats, PageAlignment, PageMatch};
     use etchy_pdf::PageDiff;
 
+    /// A paired row: sheet `page` on both sides, with `changed_px` changed pixels.
     fn page(page: usize, changed_px: u64, total_px: u64) -> PageDiff {
         page_with_suppressed(page, changed_px, total_px, 0, 0)
     }
@@ -406,7 +466,9 @@ mod tests {
         let changed_fraction = changed_px as f64 / total_px as f64;
         PageDiff {
             page,
-            diff: ImageDiffResult {
+            old_page: Some(page),
+            new_page: Some(page),
+            diff: Some(ImageDiffResult {
                 stats: ImageDiffStats {
                     width: 10,
                     height: 10,
@@ -420,15 +482,47 @@ mod tests {
                     suppressed_regions,
                 },
                 overlay: Image::new(1, 1, vec![0, 0, 0, 0]).unwrap(),
-            },
+            }),
         }
     }
 
+    /// An unpaired row: a sheet present in one revision only.
+    fn unpaired(page: usize, old_page: Option<usize>, new_page: Option<usize>) -> PageDiff {
+        PageDiff {
+            page,
+            old_page,
+            new_page,
+            diff: None,
+        }
+    }
+
+    /// A diff whose pages paired 1:1 by index (the common case).
     fn diff(old_pages: usize, new_pages: usize, pages: Vec<PageDiff>) -> PdfDiff {
+        let matches = (0..old_pages.min(new_pages))
+            .map(|i| PageMatch::Paired { old: i, new: i })
+            .chain((old_pages.min(new_pages)..old_pages).map(|i| PageMatch::OldOnly { old: i }))
+            .chain((old_pages.min(new_pages)..new_pages).map(|i| PageMatch::NewOnly { new: i }))
+            .collect();
         PdfDiff {
             old_pages,
             new_pages,
             pages,
+            alignment: PageAlignment { matches },
+        }
+    }
+
+    /// A diff with an explicit alignment (for the re-pairing cases).
+    fn aligned_diff(
+        old_pages: usize,
+        new_pages: usize,
+        matches: Vec<PageMatch>,
+        pages: Vec<PageDiff>,
+    ) -> PdfDiff {
+        PdfDiff {
+            old_pages,
+            new_pages,
+            pages,
+            alignment: PageAlignment { matches },
         }
     }
 
@@ -461,7 +555,19 @@ mod tests {
     fn an_added_page_is_listed_explicitly_in_every_format() {
         // old has 1 page, new has 3 → pages 2 and 3 are new-only, and a page
         // appearing IS a change even when the paired page is identical.
-        let r = PdfReport::from_diff(&diff(1, 3, vec![page(1, 0, 100)]), 150.0, 1);
+        let r = PdfReport::from_diff(
+            &diff(
+                1,
+                3,
+                vec![
+                    page(1, 0, 100),
+                    unpaired(2, None, Some(2)),
+                    unpaired(3, None, Some(3)),
+                ],
+            ),
+            150.0,
+            1,
+        );
         assert!(r.any_changes, "a page appearing is a change");
         assert_eq!(r.pages.len(), 3);
         assert_eq!(r.pages[1].present, Presence::NewOnly);
@@ -473,17 +579,114 @@ mod tests {
                 "new-only must be legible: {text}"
             );
         }
-        assert!(r.to_summary().contains("pages 1–1 diffed"));
-        assert!(r.to_summary().contains("2, 3"));
+        let summary = r.to_summary();
+        assert!(
+            summary.contains("old 1 page(s), new 3"),
+            "counts are spelled out: {summary}"
+        );
+        assert!(
+            summary.contains("1 sheet(s) paired"),
+            "how many sheets were actually diffed: {summary}"
+        );
+        assert!(
+            summary.contains("2 sheets inserted at new pages 2, 3"),
+            "the alignment names the inserted sheets: {summary}"
+        );
     }
 
     #[test]
     fn a_removed_page_is_old_only() {
-        let r = PdfReport::from_diff(&diff(2, 1, vec![page(1, 0, 100)]), 150.0, 1);
+        let r = PdfReport::from_diff(
+            &diff(2, 1, vec![page(1, 0, 100), unpaired(2, Some(2), None)]),
+            150.0,
+            1,
+        );
         assert!(r.any_changes, "a page disappearing is a change");
         assert_eq!(r.pages[1].present, Presence::OldOnly);
         assert!(r.to_summary().contains("old-only"));
         assert!(r.to_json_pretty().contains("\"old-only\""));
+        assert!(r.to_summary().contains("1 sheet removed at old page 2"));
+    }
+
+    #[test]
+    fn an_inserted_sheet_sits_mid_document_and_the_alignment_is_reported() {
+        // #249: old [A, B, C]; new [A, X, B, C]. The inserted sheet is row 2 and
+        // the later sheets pair across a page-number shift — which every format
+        // must state, since which sheets were compared is not the row number.
+        let r = PdfReport::from_diff(
+            &aligned_diff(
+                3,
+                4,
+                vec![
+                    PageMatch::Paired { old: 0, new: 0 },
+                    PageMatch::NewOnly { new: 1 },
+                    PageMatch::Paired { old: 1, new: 2 },
+                    PageMatch::Paired { old: 2, new: 3 },
+                ],
+                vec![
+                    page(1, 0, 100),
+                    unpaired(2, None, Some(2)),
+                    PageDiff {
+                        page: 3,
+                        old_page: Some(2),
+                        new_page: Some(3),
+                        ..page(3, 0, 100)
+                    },
+                    PageDiff {
+                        page: 4,
+                        old_page: Some(3),
+                        new_page: Some(4),
+                        ..page(4, 0, 100)
+                    },
+                ],
+            ),
+            150.0,
+            1,
+        );
+        assert!(r.any_changes, "an inserted sheet is a change");
+        assert_eq!(r.pages[1].present, Presence::NewOnly);
+        assert_eq!((r.pages[1].old_page, r.pages[1].new_page), (None, Some(2)));
+        assert_eq!(
+            (r.pages[2].old_page, r.pages[2].new_page),
+            (Some(2), Some(3))
+        );
+        // Every format states the alignment chosen — never silently re-paired.
+        for text in [r.to_summary(), r.to_markdown()] {
+            assert!(
+                text.contains("aligned by page content")
+                    && text.contains("1 sheet inserted at new page 2"),
+                "the alignment must be reported: {text}"
+            );
+        }
+        let json = r.to_json_pretty();
+        assert!(json.contains("\"identity\": false"), "{json}");
+        assert!(
+            json.contains("\"inserted_new_pages\": [\n      2\n    ]"),
+            "{json}"
+        );
+        assert!(json.contains("\"paired\": 3"), "{json}");
+        assert!(json.contains("\"old_page\": 2"), "{json}");
+        // Only the changed rows are marked changed: the re-paired sheets are clean.
+        assert_eq!(r.pages.iter().filter(|p| p.changed()).count(), 1);
+    }
+
+    #[test]
+    fn an_identity_alignment_says_nothing_extra() {
+        // The quiet path: same page count, index pairing — the report reads
+        // exactly as it always did, with no alignment commentary.
+        let r = PdfReport::from_diff(
+            &diff(2, 2, vec![page(1, 0, 100), page(2, 4, 100)]),
+            150.0,
+            1,
+        );
+        assert!(r.alignment.identity);
+        assert_eq!(r.alignment.note, None);
+        for text in [r.to_summary(), r.to_markdown()] {
+            assert!(!text.contains("aligned by page content"), "{text}");
+        }
+        assert!(r
+            .to_summary()
+            .contains("2 page(s) diffed at 150 DPI; 1 changed"));
     }
 
     #[test]

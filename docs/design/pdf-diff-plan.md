@@ -9,7 +9,7 @@ grounded in a full read of the current code (paths + line refs below).
 **The engine is done and unit-tested — only the CLI wiring is missing.**
 
 - `etchy-core::imagediff` (`crates/etchy-core/src/imagediff.rs`): `diff_images(old, new, opts) -> ImageDiffResult { stats, overlay }`. `Image { width, height, rgba }`. Per-pixel classify (added/removed/changed) + connected-component region count + a brand-coloured overlay `Image`. Fails loud on size mismatch. `ImageDiffOptions { ink_threshold, change_threshold, min_region_px }`.
-- `etchy-pdf` (`crates/etchy-pdf/src/lib.rs`, feature `pdf`, off by default, pure-Rust **hayro** — *not* pdfium): `rasterize(bytes, dpi) -> Vec<Image>` (all pages), `diff_pdfs(old, new, dpi, opts) -> PdfDiff`, `encode_png(&Image) -> Vec<u8>`, `available() -> bool`, `DEFAULT_DPI = 150.0`. `PdfDiff { old_pages, new_pages, pages: Vec<PageDiff{page, diff: ImageDiffResult}> }` with `any_changes()`. Pages paired **by index** up to `min(len)`; extra pages reported via the counts, not diffed.
+- `etchy-pdf` (`crates/etchy-pdf/src/lib.rs`, feature `pdf`, off by default, pure-Rust **hayro** — *not* pdfium): `rasterize(bytes, dpi) -> Vec<Image>` (all pages), `diff_pdfs(old, new, dpi, opts) -> PdfDiff`, `encode_png(&Image) -> Vec<u8>`, `available() -> bool`, `DEFAULT_DPI = 150.0`. `PdfDiff { old_pages, new_pages, pages: Vec<PageDiff{page, old_page, new_page, diff: Option<ImageDiffResult>}>, alignment }` with `any_changes()`. Pages pair **by content** (#249, see §3.4); a sheet on one side only is a row with no diff.
 
 **Missing (the whole task):**
 - `etchy-cli` has **no `etchy-pdf` dependency, no `pdf` feature, and no `.pdf` detection**. Its pipeline is Gerber/Excellon/placement-only and everything funnels through `board_from_files()` → `(Board, GerberFormat)` → `DiffReport`. PDF produces none of those types, so it needs a **parallel branch**, not a slot in the existing path.
@@ -57,10 +57,17 @@ PdfReport {
 - The copper gates `--fail-on-area` / `--fail-on-regions` / `--gate-layers` are mm²/layer concepts — **not applicable to pixels**. For v0.1.0: passing them alongside a PDF input is a loud "not valid for PDF" error (don't silently ignore). A pixel-fraction gate (`--fail-on-changed-fraction <f>`) is a clean later addition (Decision Q2).
 
 ### 3.4 Page-count mismatch (a trust concern)
-The engine pairs by index and only *counts* extra pages. That must not read as
-"no change". Plan:
-- Surface prominently in every format: "old 4 pages, new 5 — pages 1–4 diffed; **page 5 is new-only**".
+- Surface prominently in every format: "old 4 page(s), new 5 — 4 sheet(s) paired and diffed; **page 5 is new-only**".
 - Treat any old-only/new-only page as a **change** for the exit code (a page appearing/disappearing is a diff). `any_changes()` already returns true when page counts differ — good; the summary must make it legible.
+
+**Superseded 2026-07-26 (#249):** pages no longer pair by index. Each rasterized
+page is fingerprinted (`etchy_core::pagealign`, a 16×16 luminance digest of the
+raster already rendered) and the two sequences are sequence-aligned, so a sheet
+inserted or removed mid-document is an explicit row and the sheets around it keep
+pairing with themselves. The chosen alignment is reported in every format unless
+it is the identity. Invariants: the fingerprint decides only *which* pages pair
+(every pair still gets the full pixel diff), every page appears exactly once, and
+the alignment is deterministic.
 
 ### 3.5 DPI
 - `--dpi <f32>` (default `DEFAULT_DPI` = 150). Higher DPI = crisper diff but more memory/time. Note a **DoS/size ceiling**: a large schematic at high DPI is a big raster — cap the rendered pixel area (or DPI) and fail loud if exceeded, consistent with the gerber per-file caps (CORE-7). (Decision Q5 — cap value.)

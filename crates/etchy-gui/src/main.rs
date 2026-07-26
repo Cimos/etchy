@@ -5232,7 +5232,7 @@ impl ViewApp {
         // Textures for the selected page — uploaded once on first draw, cached
         // in the row (never re-uploaded per frame).
         let ctx = ui.ctx().clone();
-        let (old_tex, new_tex, overlay_tex, presence, page_no) = {
+        let (old_tex, new_tex, overlay_tex, presence, page_label) = {
             let pv = self.pdf.as_mut().expect("pdf mode");
             let row = &mut pv.rows[sel];
             (
@@ -5240,7 +5240,7 @@ impl ViewApp {
                 row.new_texture(&ctx),
                 row.overlay_texture(&ctx),
                 row.presence,
-                row.page,
+                row.label(),
             )
         };
 
@@ -5249,7 +5249,7 @@ impl ViewApp {
             painter.text(
                 target.center(),
                 egui::Align2::CENTER_CENTER,
-                format!("page {page_no} does not exist in the {side} revision"),
+                format!("{page_label} does not exist in the {side} revision"),
                 egui::FontId::proportional(15.0),
                 C_COPPER,
             );
@@ -5327,13 +5327,15 @@ impl ViewApp {
         let mut extra_chips: Vec<String> = Vec::new();
         {
             let pv = self.pdf.as_ref().expect("pdf mode");
-            extra_chips.push(format!(
-                "page {page_no} · {summary}",
-                summary = pv.summary()
-            ));
+            extra_chips.push(format!("{page_label} · {summary}", summary = pv.summary()));
+            // A content re-pairing (#249) changed WHICH sheets were compared —
+            // always on screen, never inferred from the row order.
+            if let Some(note) = &pv.alignment_note {
+                extra_chips.push(note.clone());
+            }
         }
         if let Some(tag) = presence.tag() {
-            extra_chips.push(format!("page {page_no} is {tag}"));
+            extra_chips.push(format!("{page_label} is {tag}"));
         }
         self.canvas_trailing(&painter, &response, rect, extra_chips);
     }
@@ -5351,6 +5353,11 @@ impl ViewApp {
                 .weak()
                 .small(),
         );
+        // The alignment chosen (#249) sits with the page list, in copper, because
+        // it changes which sheets each row compares.
+        if let Some(note) = &pv.alignment_note {
+            ui.label(egui::RichText::new(note).small().color(C_COPPER));
+        }
         ui.separator();
         let order = pv.order.clone();
         let mut select: Option<usize> = None;
@@ -5358,7 +5365,7 @@ impl ViewApp {
             let pv = self.pdf.as_ref().expect("pdf mode");
             for idx in order {
                 let row = &pv.rows[idx];
-                let name = format!("page {}", row.page);
+                let name = row.label();
                 let label = if row.changed {
                     egui::RichText::new(&name).strong()
                 } else {
@@ -5420,7 +5427,7 @@ impl ViewApp {
                 pv.rows
                     .iter()
                     .filter(|r| r.presence != pdfview::Presence::Both)
-                    .map(|r| format!("page {} ({})", r.page, r.presence.tag().unwrap_or("")))
+                    .map(|r| format!("{} ({})", r.label(), r.presence.tag().unwrap_or("")))
                     .collect::<Vec<_>>(),
                 pv.dpi,
             ),
