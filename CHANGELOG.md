@@ -21,6 +21,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default binaries stay lean. CLI wiring lands next.
 
 ### Fixed
+- **A PDF sheet inserted mid-document no longer desyncs every later page**
+  (#249). Pages used to pair strictly by index, so inserting one sheet made every
+  following pair compare the wrong sheets — all of them reported as heavily
+  changed, drowning the real edit. Pages now pair by **content**: each rasterized
+  page is fingerprinted (a 16×16 luminance digest of the raster already rendered)
+  and the two revisions' page sequences are aligned, so an inserted or removed
+  sheet becomes an explicit `new-only` / `old-only` row and the sheets around it
+  keep pairing with themselves. The alignment is always stated — in the summary,
+  the Markdown table, the JSON (`alignment`), and the viewer — except when it is
+  the plain index pairing, which says nothing extra. The fingerprint only decides
+  *which* pages pair: every paired sheet still gets the full pixel diff (a lossy
+  digest must never stand in for one), and every page of both revisions appears
+  exactly once. Per-page rows now carry `old_page` / `new_page` so the sheet each
+  row compares is explicit.
 - **Real-board (Altium) validation fixes** — found by running a full production
   fab pack end-to-end: tool definitions with feed/speed *before* the diameter
   (`T1F00S00C0.00787`) now parse (the whole pack was rejected); Altium's columned

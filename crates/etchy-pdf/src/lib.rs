@@ -6,10 +6,16 @@
 //!
 //! With `--features pdf`: [`rasterize`] renders each page of a PDF to an RGBA
 //! [`etchy_core::Image`] via hayro (no C++/PDFium), and [`diff_pdfs`] pairs the two
-//! revisions' pages by index and runs `etchy_core`'s raster diff on each. Page
-//! pairing is by index — etchy diffs same-document revisions and does not realign
-//! inserted or deleted sheets (it reports the page-count change instead); a page
-//! whose size changed fails loud, mirroring the geometry same-board guard.
+//! revisions' pages and runs `etchy_core`'s raster diff on each pair.
+//!
+//! Pages pair by **content**, not by index (#249): each rasterized page is
+//! digested to a cheap fingerprint (`etchy_core::pagealign`) and the two
+//! sequences are aligned, so a sheet inserted or removed mid-document becomes an
+//! explicit inserted / removed row instead of desynchronising every later pair.
+//! The alignment chosen is always reported ([`PdfDiff::alignment`]) — it decides
+//! only *which* pages pair, never whether a pair is diffed: every paired sheet
+//! gets the full pixel diff, because a fingerprint is lossy and acting on one
+//! would be a silent miss.
 
 /// Whether the PDF backend is compiled into this build.
 #[cfg(feature = "pdf")]
@@ -25,7 +31,10 @@ pub fn available() -> bool {
 
 #[cfg(feature = "pdf")]
 mod imp {
-    use etchy_core::{diff_images, EngineError, Image, ImageDiffOptions, ImageDiffResult};
+    use etchy_core::{
+        align_pages, diff_images, fingerprint, EngineError, Image, ImageDiffOptions,
+        ImageDiffResult, PageAlignment, PageMatch,
+    };
     use hayro::hayro_interpret::hayro_syntax::Pdf;
     use hayro::hayro_interpret::InterpreterSettings;
     use hayro::render_pdf;
@@ -109,34 +118,66 @@ mod imp {
             .collect())
     }
 
-    /// One page-pair's diff, tagged with its 1-based page number.
+    /// One row of the merged document: a paired sheet with its pixel diff, or a
+    /// sheet that exists in only one revision.
     pub struct PageDiff {
+        /// 1-based row number in the merged document (the order a reader sees).
         pub page: usize,
-        pub diff: ImageDiffResult,
+        /// 1-based page number in the old PDF, when the sheet exists there.
+        pub old_page: Option<usize>,
+        /// 1-based page number in the new PDF, when the sheet exists there.
+        pub new_page: Option<usize>,
+        /// The full pixel diff of a paired sheet. `None` for a sheet that exists
+        /// on one side only (there is nothing to diff against).
+        pub diff: Option<ImageDiffResult>,
     }
 
-    /// The whole-document diff: per-paired-page results plus each side's page count
-    /// (they can differ — an added/removed sheet — which the caller surfaces).
-    pub struct PdfDiff {
-        pub old_pages: usize,
-        pub new_pages: usize,
-        pub pages: Vec<PageDiff>,
-    }
+    impl PageDiff {
+        /// Whether both revisions carry this sheet.
+        pub fn is_paired(&self) -> bool {
+            self.old_page.is_some() && self.new_page.is_some()
+        }
 
-    impl PdfDiff {
-        /// Any pixel change on any paired page, or a page-count change. Uses raw
-        /// presence ([`etchy_core::ImageDiffStats::has_any_change`]), not `changed_fraction`,
-        /// so a change hidden by the noise floor still counts — the floor never
-        /// causes a silent "no differences" (the trust bar).
-        pub fn any_changes(&self) -> bool {
-            self.old_pages != self.new_pages
-                || self.pages.iter().any(|p| p.diff.stats.has_any_change())
+        /// Whether this row is a change. A row with no pixel diff is a change by
+        /// construction (a sheet appeared or disappeared), and a diffed row uses
+        /// raw presence ([`etchy_core::ImageDiffStats::has_any_change`]) rather
+        /// than `changed_fraction`, so a change hidden by the noise floor still
+        /// counts — the floor never causes a silent "no differences".
+        pub fn has_any_change(&self) -> bool {
+            match &self.diff {
+                Some(d) => d.stats.has_any_change(),
+                None => true,
+            }
         }
     }
 
-    /// Rasterize both PDFs at `dpi` and diff their pages pairwise by index. Extra
-    /// pages on either side are reported via the page counts, not diffed. A paired
-    /// page whose size changed between revisions fails loud (`ImageSizeMismatch`).
+    /// The whole-document diff: one row per sheet of the merged document, each
+    /// side's page count, and the page alignment that produced the pairing.
+    pub struct PdfDiff {
+        pub old_pages: usize,
+        pub new_pages: usize,
+        /// Every sheet of both revisions, exactly once, in merged reading order.
+        pub pages: Vec<PageDiff>,
+        /// How the two revisions' pages were paired (#249). Callers must surface
+        /// [`PageAlignment::note`] whenever it is `Some` — a re-pairing that
+        /// silently changed which sheets were compared is not acceptable.
+        pub alignment: PageAlignment,
+    }
+
+    impl PdfDiff {
+        /// Any pixel change on any paired sheet, any inserted/removed sheet, or a
+        /// page-count change.
+        pub fn any_changes(&self) -> bool {
+            self.old_pages != self.new_pages
+                || !self.alignment.is_identity()
+                || self.pages.iter().any(|p| p.has_any_change())
+        }
+    }
+
+    /// Rasterize both PDFs at `dpi`, align their pages by content, and pixel-diff
+    /// every paired sheet in full. Sheets that exist on one side only come back as
+    /// explicit rows with no diff. A paired sheet whose size changed between
+    /// revisions fails loud (`ImageSizeMismatch`).
     pub fn diff_pdfs(
         old: &[u8],
         new: &[u8],
@@ -145,16 +186,42 @@ mod imp {
     ) -> Result<PdfDiff, PdfError> {
         let old_imgs = rasterize(old, dpi)?;
         let new_imgs = rasterize(new, dpi)?;
-        let paired = old_imgs.len().min(new_imgs.len());
-        let mut pages = Vec::with_capacity(paired);
-        for i in 0..paired {
-            let diff = diff_images(&old_imgs[i], &new_imgs[i], opts)?;
-            pages.push(PageDiff { page: i + 1, diff });
+        // Fingerprints come off the rasters we already hold — no re-render, and
+        // the raster caps the caller enforced still bound everything here.
+        let old_fp: Vec<_> = old_imgs.iter().map(fingerprint).collect();
+        let new_fp: Vec<_> = new_imgs.iter().map(fingerprint).collect();
+        let alignment = align_pages(&old_fp, &new_fp);
+        let mut pages = Vec::with_capacity(alignment.matches.len());
+        for (row, step) in alignment.matches.iter().enumerate() {
+            let page = row + 1;
+            pages.push(match *step {
+                PageMatch::Paired { old, new } => PageDiff {
+                    page,
+                    old_page: Some(old + 1),
+                    new_page: Some(new + 1),
+                    // ALWAYS the full pixel diff: the fingerprint chose the
+                    // pairing and nothing more. Matching digests never skip this.
+                    diff: Some(diff_images(&old_imgs[old], &new_imgs[new], opts)?),
+                },
+                PageMatch::OldOnly { old } => PageDiff {
+                    page,
+                    old_page: Some(old + 1),
+                    new_page: None,
+                    diff: None,
+                },
+                PageMatch::NewOnly { new } => PageDiff {
+                    page,
+                    old_page: None,
+                    new_page: Some(new + 1),
+                    diff: None,
+                },
+            });
         }
         Ok(PdfDiff {
             old_pages: old_imgs.len(),
             new_pages: new_imgs.len(),
             pages,
+            alignment,
         })
     }
 
@@ -230,6 +297,191 @@ mod pdf_tests {
         pdf.into_bytes()
     }
 
+    /// The pixel diff of a row the test expects to be paired.
+    fn paired(p: &PageDiff) -> &etchy_core::ImageDiffResult {
+        p.diff.as_ref().expect("row is a paired sheet")
+    }
+
+    /// A sheet spec for [`multi_page_pdf`]: the MediaBox size in points and the
+    /// filled 20×20 black square's position.
+    #[derive(Clone, Copy)]
+    struct Sheet {
+        size: (i32, i32),
+        square: (i32, i32),
+    }
+
+    /// A sheet on the standard 100×100 pt page with its square at (`x`,`y`).
+    fn sheet(x: i32, y: i32) -> Sheet {
+        Sheet {
+            size: (100, 100),
+            square: (x, y),
+        }
+    }
+
+    /// Build a well-formed multi-page PDF, one `Sheet` per page. Offsets in the
+    /// xref table come from the real byte positions so hayro parses it straight.
+    fn multi_page_pdf(sheets: &[Sheet]) -> Vec<u8> {
+        // Object layout: 1 = catalog, 2 = page tree, then (page, content) pairs.
+        let kids: Vec<String> = (0..sheets.len())
+            .map(|i| format!("{} 0 R", 3 + i * 2))
+            .collect();
+        let mut objs: Vec<String> = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {} >>",
+                kids.join(" "),
+                sheets.len()
+            ),
+        ];
+        for (i, s) in sheets.iter().enumerate() {
+            let (x, y) = s.square;
+            let content = format!("0 0 0 rg\n{x} {y} 20 20 re\nf\n");
+            objs.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
+                 /Contents {} 0 R /Resources << >> >>",
+                s.size.0,
+                s.size.1,
+                4 + i * 2
+            ));
+            objs.push(format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ));
+        }
+        let mut pdf = String::from("%PDF-1.7\n");
+        let mut offsets = Vec::with_capacity(objs.len());
+        for (i, body) in objs.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{body}\nendobj\n", i + 1));
+        }
+        let xref_pos = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n", objs.len() + 1));
+        pdf.push_str("0000000000 65535 f \n");
+        for off in &offsets {
+            pdf.push_str(&format!("{off:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF",
+            objs.len() + 1
+        ));
+        pdf.into_bytes()
+    }
+
+    #[test]
+    fn a_mid_document_insertion_does_not_desync_the_later_pages() {
+        // #249: old [A, B, C]; new [A, X, B, C] — one sheet inserted at page 2.
+        // Index pairing compares B↔X and C↔B and reports every later sheet as
+        // heavily changed, drowning the real change. Content alignment must pair
+        // A↔A, B↔B, C↔C and report X as an inserted sheet.
+        let old = multi_page_pdf(&[sheet(10, 10), sheet(60, 60), sheet(10, 60)]);
+        let new = multi_page_pdf(&[sheet(10, 10), sheet(60, 10), sheet(60, 60), sheet(10, 60)]);
+        let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
+        assert!(d.any_changes(), "an inserted sheet is a change");
+        let mis_paired = d
+            .pages
+            .iter()
+            .filter(|p| p.diff.as_ref().is_some_and(|r| r.stats.has_any_change()))
+            .count();
+        assert_eq!(
+            mis_paired, 0,
+            "the sheets that did not change must pair with themselves"
+        );
+        // Four rows: the three original sheets, paired, plus the inserted one.
+        assert_eq!(d.pages.len(), 4);
+        assert_eq!(d.alignment.inserted_pages(), vec![2], "new page 2 inserted");
+        assert!(d.alignment.removed_pages().is_empty());
+        let ins = &d.pages[1];
+        assert_eq!((ins.old_page, ins.new_page), (None, Some(2)));
+        assert!(!ins.is_paired() && ins.has_any_change() && ins.diff.is_none());
+        // The later sheets pair with themselves, one page number apart.
+        assert_eq!(
+            (d.pages[2].old_page, d.pages[2].new_page),
+            (Some(2), Some(3))
+        );
+        assert_eq!(
+            (d.pages[3].old_page, d.pages[3].new_page),
+            (Some(3), Some(4))
+        );
+        // And the alignment is stated, never silent.
+        let note = d.alignment.note().expect("a re-pairing is always reported");
+        assert!(note.contains("inserted"), "{note}");
+    }
+
+    #[test]
+    fn a_removed_sheet_mid_document_realigns_the_rest() {
+        let old = multi_page_pdf(&[sheet(10, 10), sheet(60, 10), sheet(60, 60)]);
+        let new = multi_page_pdf(&[sheet(10, 10), sheet(60, 60)]);
+        let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
+        assert_eq!(d.alignment.removed_pages(), vec![2]);
+        assert_eq!(d.pages.len(), 3);
+        assert_eq!((d.pages[1].old_page, d.pages[1].new_page), (Some(2), None));
+        assert_eq!(
+            (d.pages[2].old_page, d.pages[2].new_page),
+            (Some(3), Some(2))
+        );
+        assert!(
+            !d.pages[2]
+                .diff
+                .as_ref()
+                .expect("paired")
+                .stats
+                .has_any_change(),
+            "the surviving sheet pairs with itself"
+        );
+    }
+
+    #[test]
+    fn every_page_of_both_revisions_is_accounted_for_exactly_once() {
+        // Trust invariant: the alignment may never drop a sheet. Whatever it
+        // chooses, each side's pages come out complete and in order.
+        let old = multi_page_pdf(&[sheet(10, 10), sheet(60, 10), sheet(60, 60), sheet(10, 60)]);
+        let new = multi_page_pdf(&[sheet(30, 30), sheet(10, 10), sheet(60, 60)]);
+        let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
+        let olds: Vec<usize> = d.pages.iter().filter_map(|p| p.old_page).collect();
+        let news: Vec<usize> = d.pages.iter().filter_map(|p| p.new_page).collect();
+        assert_eq!(olds, vec![1, 2, 3, 4], "every old page, once, in order");
+        assert_eq!(news, vec![1, 2, 3], "every new page, once, in order");
+        // Row numbers are 1-based and contiguous over the merged document.
+        let rows: Vec<usize> = d.pages.iter().map(|p| p.page).collect();
+        assert_eq!(rows, (1..=d.pages.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_matching_fingerprint_never_skips_the_pixel_diff() {
+        // The fingerprint is a 16x16 digest — lossy by construction. Two sheets
+        // that digest identically must still be diffed pixel by pixel, or a real
+        // change smaller than a digest cell becomes a silent miss.
+        let old = multi_page_pdf(&[sheet(10, 10)]);
+        let new = multi_page_pdf(&[Sheet {
+            size: (100, 100),
+            square: (11, 10),
+        }]);
+        let (of, nf) = (
+            etchy_core::fingerprint(&rasterize(&old, 72.0).unwrap()[0]),
+            etchy_core::fingerprint(&rasterize(&new, 72.0).unwrap()[0]),
+        );
+        assert_eq!(of, nf, "a 1 pt nudge is invisible to the digest");
+        let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
+        assert!(
+            d.any_changes(),
+            "the pixel diff must still run on an identically-digested pair"
+        );
+        assert!(d.pages[0].has_any_change());
+    }
+
+    #[test]
+    fn an_unchanged_multi_page_document_reports_no_realignment() {
+        // The quiet path: same sheets, same order — the alignment is the identity
+        // and says nothing extra, so the report reads exactly as it always did.
+        let pdf = multi_page_pdf(&[sheet(10, 10), sheet(60, 10), sheet(60, 60)]);
+        let d = diff_pdfs(&pdf, &pdf, 72.0, &ImageDiffOptions::default()).expect("diff");
+        assert!(!d.any_changes());
+        assert!(d.alignment.is_identity());
+        assert_eq!(d.alignment.note(), None);
+        assert_eq!(d.pages.len(), 3);
+        assert!(d.pages.iter().all(|p| p.is_paired()));
+    }
+
     #[test]
     fn rasterizes_a_page_to_expected_pixels() {
         let pdf = one_square_pdf(10, 10);
@@ -246,7 +498,7 @@ mod pdf_tests {
         assert_eq!(d.old_pages, 1);
         assert_eq!(d.new_pages, 1);
         assert!(!d.any_changes(), "a PDF against itself has no diff");
-        assert_eq!(d.pages[0].diff.stats.changed_fraction, 0.0);
+        assert_eq!(paired(&d.pages[0]).stats.changed_fraction, 0.0);
     }
 
     #[test]
@@ -256,7 +508,7 @@ mod pdf_tests {
         let new = one_square_pdf(60, 60);
         let d = diff_pdfs(&old, &new, 72.0, &ImageDiffOptions::default()).expect("diff");
         assert!(d.any_changes());
-        let s = &d.pages[0].diff.stats;
+        let s = &paired(&d.pages[0]).stats;
         assert!(s.added_px > 100, "new square painted, got {}", s.added_px);
         assert!(s.removed_px > 100, "old square gone, got {}", s.removed_px);
         assert!(s.regions >= 2, "two disjoint squares, got {}", s.regions);
@@ -286,7 +538,7 @@ mod pdf_tests {
             ..Default::default()
         };
         let d = diff_pdfs(&old, &new, 72.0, &opts).expect("diff");
-        let s = &d.pages[0].diff.stats;
+        let s = &paired(&d.pages[0]).stats;
         assert_eq!(
             s.added_px, 0,
             "everything below the floor, hidden from tallies"
@@ -307,7 +559,7 @@ mod pdf_tests {
             &ImageDiffOptions::default(),
         )
         .unwrap();
-        let png = encode_png(&d.pages[0].diff.overlay).expect("encode");
+        let png = encode_png(&paired(&d.pages[0]).overlay).expect("encode");
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']), "PNG magic");
         assert!(png.len() > 100);
     }
