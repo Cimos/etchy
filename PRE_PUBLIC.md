@@ -16,27 +16,25 @@ excludes `deploy/feedback/` screenshots and uploads.
 
 ## 1. Blockers — must resolve before flipping visibility
 
-- [ ] **Confidential customer board named in docs prose (history too).** The
-      board *files* are not committed, but several docs name an
-      employer-confidential CubePilot board and its internals: **FMU
-      REV_67A/REV_67B**, **CubeOrange+**, part number **290-00146**,
-      **MotionJigController**, plus absolute local paths. Locations:
-      `docs/HANDOFF.md`, `CHANGELOG.md`, `docs/PERF_GPU_TRANSFORM.md`,
-      `docs/future/ADAPTIVE_TESSELLATION.md`, `docs/review/CODE_REVIEW_2026-06-25.md`,
-      `docs/superpowers/specs/2026-06-20-fmu-review-issues-plan.md`,
-      `docs/ROADMAP.md`. **Owner decision + action:** scrub/genericise these
-      (e.g. "a real 24-layer Altium board"), and because they're in past
-      commits, **rewrite history** (`git filter-repo`) so the names don't
-      survive. Coordinate the rewrite — the repo has open PRs/branches and is
-      worked from multiple worktrees.
-      Sweep to confirm clean:
-      `grep -rin -E 'fmu|cubeorange|290-00146|motionjig|Desktop/|ProductionFiles' docs/ *.md`
-- [ ] **Committed feedback PII (history too).** `deploy/feedback/m1-seed.jsonl`
-      (git-tracked, whitelisted past the `*.jsonl` ignore) contains internal LAN
-      IPs (`10.10.10.123`, `10.10.10.194`), User-Agent strings, and tester names
-      ("Robbie", "SM"). No board images. **Action:** scrub the `ip`/`ua`/`name`
-      fields or drop the file, and rewrite history since it's in past commits.
-      Decide whether the seed feedback needs to ship at all.
+- [ ] **Confidential customer board identifiers — working tree done ✅, history
+      still to rewrite.** The board *files* were never committed, but docs prose
+      and a few code comments named a confidential customer board, its revisions,
+      a part number, a second internal board, and absolute local paths. All of
+      that is now generic in the current tree ("the real board", "rev A"/"rev B",
+      `<local-path>/…`), and the one board-specific review spec was deleted
+      (see #264 — the term list is deliberately kept there, not in this file).
+      **Still to do:** the identifiers survive in **past commits**, so history
+      must be rewritten (`git filter-repo`) before the flip. Coordinate the
+      rewrite — the repo has open PRs/branches and is worked from multiple
+      worktrees. To re-check the tree, take the term list from #264 as `$TERMS`
+      and run `grep -rinE "$TERMS" docs/ crates/ deploy/ *.md`.
+- [ ] **Committed feedback PII — working tree done ✅, history still to rewrite.**
+      `deploy/feedback/m1-seed.jsonl` (git-tracked, whitelisted past the `*.jsonl`
+      ignore) carried internal LAN IPs, User-Agent strings and tester names. Those
+      fields are removed and the demo URL is genericised; the feedback text is
+      kept. No board images were ever committed, and live feedback logs stay
+      gitignored. **Still to do:** the original values are in past commits — same
+      history rewrite as above.
 
 ## 2. Standard OSS files — done this pass ✅ / one decision left
 
@@ -64,8 +62,9 @@ excludes `deploy/feedback/` screenshots and uploads.
       `docs/superpowers/{plans,specs}/` tree read as private dev/session
       artifacts (name a person, reference "this box"/localhost/the feedback-loop
       tooling). None are linked from the README, but all become public. Decide
-      per doc: keep, move out of the published tree, or prune. (HANDOFF.md and
-      the fmu-review spec also carry the §1 confidential content.)
+      per doc: keep, move out of the published tree, or prune. (HANDOFF.md still
+      walks through staging a private board locally — the identifiers are gone,
+      but the procedure is internal-facing.)
 - [ ] **Confirm demo board publish rights.** Mad_RP2040 fab pack is your own
       already-public board — confirm the source repo's licence covers
       redistributing the bundled copy (provenance note now in place).
@@ -110,8 +109,10 @@ excludes `deploy/feedback/` screenshots and uploads.
 ```sh
 # secrets / private data
 git grep -nE 'BEGIN [A-Z ]*PRIVATE KEY|ghp_|github_pat_|AKIA[0-9A-Z]{16}'
-grep -rin -E 'fmu|cubeorange|290-00146|motionjig|Desktop/|ProductionFiles' docs/ *.md
-git grep -nE '10\.10\.10\.|192\.168\.|/home/[a-z]+/'   # LAN IPs / user paths
+# board identifiers: TERMS='term1|term2|…' from #264 (not listed here on purpose)
+grep -rinE "$TERMS" docs/ crates/ deploy/ *.md
+# private-range LAN IPs / user paths (a few version-string false positives are normal)
+git grep -nE '\b(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)[0-9]{1,3}\.[0-9]{1,3}\b|/home/[a-z]+/'
 # confirm no board/feedback data is tracked
 git ls-files | grep -iE 'deploy/feedback/(screenshots|uploads)|\.(gbr|drl)$' || echo "clean"
 cargo deny check licenses
