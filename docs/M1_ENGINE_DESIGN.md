@@ -32,7 +32,7 @@ Overlay::<i64>::with_contours(&subj, &clip).overlay(OverlayRule::Difference, Fil
 **Overflow:** i64 nm spans ±9.2e9 m (coords trivially safe). Area via integer
 shoelace overflows i64 on the cross-product sum → accumulate the doubled signed
 area in **i128** (exact), halve at the end. Report `area_nm2: i128` (exact,
-canonical) + `area_mm2: f64` (derived, lossy, display/threshold convenience).
+the source of truth) + `area_mm2: f64` (derived, lossy, display/threshold convenience).
 
 ## Module layout (`crates/etchy-core/src/`)
 
