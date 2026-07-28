@@ -5203,17 +5203,23 @@ impl ViewApp {
         let rect = response.rect;
         painter.rect_filled(rect, 0.0, self.canvas_color());
 
-        // The selected page's world bbox (nm, via DPI). Fit frames the page.
-        let (sel, bb, dpi) = {
+        // The selected page's world bboxes (nm, via DPI). `bb` is what Fit frames
+        // (the union of the two sides); each side also draws at its OWN size, so a
+        // resized sheet (#262) is never stretched onto the other side's frame.
+        let (sel, bb, bb_old, bb_new, dpi) = {
             let pv = self.pdf.as_ref().expect("pdf mode");
             let row = &pv.rows[pv.selected];
             (
                 pv.selected,
-                pdfview::page_world_bbox(row.width, row.height, pv.dpi),
+                row.fit_bbox(pv.dpi),
+                row.old_bbox(pv.dpi),
+                row.new_bbox(pv.dpi),
                 pv.dpi,
             )
         };
         let _ = dpi;
+        let bb_old = bb_old.unwrap_or(bb);
+        let bb_new = bb_new.unwrap_or(bb);
         if !self.cam.fitted {
             fit(&mut self.cam, bb, rect);
             self.cam.fitted = true;
@@ -5232,7 +5238,7 @@ impl ViewApp {
         // Textures for the selected page — uploaded once on first draw, cached
         // in the row (never re-uploaded per frame).
         let ctx = ui.ctx().clone();
-        let (old_tex, new_tex, overlay_tex, presence, page_no) = {
+        let (old_tex, new_tex, overlay_tex, presence, page_label, size_change, rounding_crop) = {
             let pv = self.pdf.as_mut().expect("pdf mode");
             let row = &mut pv.rows[sel];
             (
@@ -5240,7 +5246,9 @@ impl ViewApp {
                 row.new_texture(&ctx),
                 row.overlay_texture(&ctx),
                 row.presence,
-                row.page,
+                row.label(),
+                row.size_change,
+                row.rounding_crop,
             )
         };
 
@@ -5249,42 +5257,54 @@ impl ViewApp {
             painter.text(
                 target.center(),
                 egui::Align2::CENTER_CENTER,
-                format!("page {page_no} does not exist in the {side} revision"),
+                format!("{page_label} does not exist in the {side} revision"),
                 egui::FontId::proportional(15.0),
                 C_COPPER,
             );
         };
+        // Each side draws in its own world bbox, so a resized sheet shows both
+        // sheets at true scale instead of one stretched onto the other.
         let draw_side = |painter: &egui::Painter,
                          clip: Rect,
                          target: Rect,
                          tex: Option<egui::TextureId>,
+                         side_bb: [i64; 4],
                          side: &str| match tex {
-            Some(id) => draw_page_image(painter, &self.cam, clip, target, bb, id),
+            Some(id) => draw_page_image(painter, &self.cam, clip, target, side_bb, id),
             None => missing_note(painter, target, side),
         };
 
         match self.mode {
-            Mode::Old => draw_side(&painter, rect, rect, old_tex, "old"),
-            Mode::New => draw_side(&painter, rect, rect, new_tex, "new"),
+            Mode::Old => draw_side(&painter, rect, rect, old_tex, bb_old, "old"),
+            Mode::New => draw_side(&painter, rect, rect, new_tex, bb_new, "new"),
             Mode::Overlay => match overlay_tex {
                 Some(id) => draw_page_image(&painter, &self.cam, rect, rect, bb, id),
+                None if size_change.is_some() => {
+                    // Resized sheet (#262): the two rasters have no pixel
+                    // correspondence, so there IS no overlay. Show both sides
+                    // instead of an empty canvas; the chips carry the reason.
+                    let (lr, rr, div_x) = split_rects(rect, 0.5, 6.0);
+                    draw_side(&painter, lr, lr, old_tex, bb_old, "old");
+                    draw_side(&painter, rr, rr, new_tex, bb_new, "new");
+                    self.draw_split_chrome(&painter, rect, lr, rr, div_x, false, false);
+                }
                 None => {
                     // Unpaired page: there is no diff to overlay — show the side
                     // that exists, with the trust note carried by the chips below.
-                    let (tex, side) = if presence == pdfview::Presence::OldOnly {
-                        (old_tex, "new")
+                    let (tex, side_bb, side) = if presence == pdfview::Presence::OldOnly {
+                        (old_tex, bb_old, "new")
                     } else {
-                        (new_tex, "old")
+                        (new_tex, bb_new, "old")
                     };
-                    draw_side(&painter, rect, rect, tex, side);
+                    draw_side(&painter, rect, rect, tex, side_bb, side);
                 }
             },
             Mode::Split => {
                 // Side-by-side halves, one shared camera, each projected into its
                 // own sub-rect (a full page per side) — same as the board split.
                 let (lr, rr, div_x) = split_rects(rect, 0.5, 6.0);
-                draw_side(&painter, lr, lr, old_tex, "old");
-                draw_side(&painter, rr, rr, new_tex, "new");
+                draw_side(&painter, lr, lr, old_tex, bb_old, "old");
+                draw_side(&painter, rr, rr, new_tex, bb_new, "new");
                 self.draw_split_chrome(&painter, rect, lr, rr, div_x, false, false);
             }
             Mode::Swipe => {
@@ -5292,8 +5312,8 @@ impl ViewApp {
                 // full-canvas rect and only the clip differs, so the divider
                 // bisects a single sheet (#61 pattern).
                 let (lr, rr, div_x) = swipe_rects(rect, self.swipe_frac);
-                draw_side(&painter, lr, rect, old_tex, "old");
-                draw_side(&painter, rr, rect, new_tex, "new");
+                draw_side(&painter, lr, rect, old_tex, bb_old, "old");
+                draw_side(&painter, rr, rect, new_tex, bb_new, "new");
                 self.draw_split_chrome(&painter, rect, lr, rr, div_x, true, swipe_hot);
             }
         }
@@ -5301,11 +5321,16 @@ impl ViewApp {
         // Mode note (top-right), matching the board canvas' language: Old/New and
         // the raw Split/Swipe views are NOT the computed diff — say so (#91).
         let mode_note = match self.mode {
-            Mode::Old => Some("showing OLD page"),
-            Mode::New => Some("showing NEW page"),
-            Mode::Split => Some("raw pages: OLD (left) | NEW (right) — diff applies in Overlay"),
-            Mode::Swipe => Some("raw pages, swipe OLD / NEW — diff applies in Overlay"),
-            Mode::Overlay => None,
+            Mode::Old => Some("showing OLD page".to_string()),
+            Mode::New => Some("showing NEW page".to_string()),
+            Mode::Split => {
+                Some("raw pages: OLD (left) | NEW (right) — diff applies in Overlay".to_string())
+            }
+            Mode::Swipe => Some("raw pages, swipe OLD / NEW — diff applies in Overlay".to_string()),
+            // A resized sheet has no overlay to show, so Overlay falls back to the
+            // two raw pages — never leave that unexplained (#262).
+            Mode::Overlay => size_change
+                .map(|c| format!("page size changed ({c}) — no pixel overlay, showing both pages")),
         };
         if let Some(note) = mode_note {
             painter.text(
@@ -5316,9 +5341,10 @@ impl ViewApp {
                 C_COPPER,
             );
         }
-        if self.mode == Mode::Overlay {
+        if self.mode == Mode::Overlay && size_change.is_none() {
             // The overlay raster's colours are baked by the engine (brand green /
-            // red / amber) — legend those, not the user's board diff colours.
+            // red / amber) — legend those, not the user's board diff colours. A
+            // resized sheet shows raw pages, so there is nothing to legend.
             pdf_legend(&painter, rect);
         }
 
@@ -5327,13 +5353,30 @@ impl ViewApp {
         let mut extra_chips: Vec<String> = Vec::new();
         {
             let pv = self.pdf.as_ref().expect("pdf mode");
-            extra_chips.push(format!(
-                "page {page_no} · {summary}",
-                summary = pv.summary()
-            ));
+            extra_chips.push(format!("{page_label} · {summary}", summary = pv.summary()));
+            // A content re-pairing (#249) changed WHICH sheets were compared —
+            // always on screen, never inferred from the row order.
+            if let Some(note) = &pv.alignment_note {
+                extra_chips.push(note.clone());
+            }
         }
         if let Some(tag) = presence.tag() {
-            extra_chips.push(format!("page {page_no} is {tag}"));
+            extra_chips.push(format!("{page_label} is {tag}"));
+        }
+        // Why a 100%-changed page shows no diff overlay (#262).
+        if let Some(c) = size_change {
+            extra_chips.push(format!(
+                "{page_label} page size changed ({c}) — the whole sheet counts as changed"
+            ));
+        }
+        // The two renders round a pixel apart: the same sheet size, diffed over
+        // the pixels they share (#262). Stated so the cropped edge is never a
+        // silent difference between what is on screen and what was compared.
+        if let Some(c) = rounding_crop {
+            extra_chips.push(format!(
+                "{page_label} page size rounding ({c}) — same sheet size, diffed over \
+                 the shared pixels"
+            ));
         }
         self.canvas_trailing(&painter, &response, rect, extra_chips);
     }
@@ -5351,6 +5394,11 @@ impl ViewApp {
                 .weak()
                 .small(),
         );
+        // The alignment chosen (#249) sits with the page list, in copper, because
+        // it changes which sheets each row compares.
+        if let Some(note) = &pv.alignment_note {
+            ui.label(egui::RichText::new(note).small().color(C_COPPER));
+        }
         ui.separator();
         let order = pv.order.clone();
         let mut select: Option<usize> = None;
@@ -5358,7 +5406,7 @@ impl ViewApp {
             let pv = self.pdf.as_ref().expect("pdf mode");
             for idx in order {
                 let row = &pv.rows[idx];
-                let name = format!("page {}", row.page);
+                let name = row.label();
                 let label = if row.changed {
                     egui::RichText::new(&name).strong()
                 } else {
@@ -5378,6 +5426,21 @@ impl ViewApp {
                                         C_ADDED
                                     };
                                     ui.label(egui::RichText::new(tag).small().color(col));
+                                }
+                                // A resized sheet is wholly changed with no changed
+                                // pixels behind it — label the reason, not "100%"
+                                // (#262).
+                                None if row.size_change.is_some() => {
+                                    ui.label(
+                                        egui::RichText::new("page size changed")
+                                            .small()
+                                            .color(C_COPPER),
+                                    )
+                                    .on_hover_text(format!(
+                                        "{} — the whole sheet counts as changed and it has \
+                                         no pixel overlay",
+                                        row.size_change.expect("checked above")
+                                    ));
                                 }
                                 None if row.changed => {
                                     ui.label(
@@ -5407,21 +5470,18 @@ impl ViewApp {
     }
 
     /// The Export tab in PDF mode (#63): per-page diff-overlay PNGs through the
-    /// same exportio download/save path as the board exports. Only paired pages
-    /// have an overlay; unpaired pages are named so their absence is explicit.
+    /// same exportio download/save path as the board exports. Only same-size
+    /// paired pages have an overlay; every page without one is named with its
+    /// reason so an absent PNG is never a silent gap.
     fn pdf_export_panel_ui(&mut self, ui: &mut egui::Ui) {
-        let (names, unpaired, dpi) = match &self.pdf {
+        let (names, no_overlay, dpi) = match &self.pdf {
             Some(pv) => (
                 pv.rows
                     .iter()
                     .filter(|r| r.overlay_img.is_some() && r.changed)
                     .map(|r| format!("page-{}.png", r.page))
                     .collect::<Vec<_>>(),
-                pv.rows
-                    .iter()
-                    .filter(|r| r.presence != pdfview::Presence::Both)
-                    .map(|r| format!("page {} ({})", r.page, r.presence.tag().unwrap_or("")))
-                    .collect::<Vec<_>>(),
+                pdf_no_overlay_reasons(pv),
                 pv.dpi,
             ),
             None => return,
@@ -5453,16 +5513,12 @@ impl ViewApp {
                 );
             }
             Self::export_file_list(ui, &names);
-            if !unpaired.is_empty() {
+            if !no_overlay.is_empty() {
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(format!(
-                        "No overlay for unpaired {}: a sheet that exists on one side \
-                         only has nothing to diff against.",
-                        unpaired.join(", ")
-                    ))
-                    .weak()
-                    .small(),
+                    egui::RichText::new(format!("No overlay for {}.", no_overlay.join("; ")))
+                        .weak()
+                        .small(),
                 );
             }
             ui.add_space(6.0);
@@ -5504,6 +5560,29 @@ impl ViewApp {
     }
 }
 
+/// Why a page has no overlay PNG to export, one entry per such page. Pure over
+/// the view so it is unit-testable: an absent PNG must always come with a stated
+/// reason, never read as a page the tool quietly skipped.
+fn pdf_no_overlay_reasons(pv: &PdfView) -> Vec<String> {
+    pv.rows
+        .iter()
+        .filter(|r| r.overlay_img.is_none())
+        .map(|r| match (r.size_change, r.presence.tag()) {
+            (Some(c), _) => format!(
+                "{}: its page size changed ({c}), so there is no pixel diff to overlay",
+                r.label()
+            ),
+            (None, Some(tag)) => format!(
+                "{} ({tag}): a sheet that exists on one side only has nothing to diff against",
+                r.label()
+            ),
+            // Not reachable today (a same-size pair always gets an overlay), but
+            // silence here would be exactly the gap this list exists to close.
+            (None, None) => format!("{}: no diff overlay was produced", r.label()),
+        })
+        .collect()
+}
+
 /// The PDF-mode export file set (#222 regression seam): one `page-N.png` per
 /// CHANGED paired page — the exact list the Export tab previews. Pure over the
 /// view, so a changed pair provably yields a non-empty set in tests.
@@ -5511,7 +5590,9 @@ fn build_pdf_export(pv: &PdfView) -> anyhow::Result<Vec<exportio::ExportFile>> {
     let mut files = Vec::new();
     for row in &pv.rows {
         let Some(img) = &row.overlay_img else {
-            continue; // unpaired page: nothing to diff against, named in the UI
+            // No overlay: an unpaired sheet or a resized one. Both are named in
+            // the Export tab by pdf_no_overlay_reasons, so nothing is silent.
+            continue;
         };
         if !row.changed {
             continue;
@@ -7726,6 +7807,39 @@ mod tests {
         assert!(files[0].content.starts_with(&[0x89, b'P', b'N', b'G']));
         let same = crate::pdfview::build_pdf_view(&old, &old, 150.0).expect("view");
         assert!(super::build_pdf_export(&same).expect("list").is_empty());
+        assert!(
+            super::pdf_no_overlay_reasons(&pv).is_empty(),
+            "a normal pair has an overlay for every page"
+        );
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn a_resized_sheet_exports_no_png_but_is_named_with_its_reason() {
+        // #262: the Export path must neither panic on a page without an overlay
+        // nor drop it silently — the tab names it and says why.
+        use crate::pdfview::{build_pdf_view, multi_page_pdf, test_sheet, TestSheet};
+        let old = multi_page_pdf(&[test_sheet(10, 10), test_sheet(60, 60)]);
+        let new = multi_page_pdf(&[
+            TestSheet {
+                size: (100.0, 200.0),
+                square: (10, 10),
+            },
+            test_sheet(10, 60),
+        ]);
+        let pv = build_pdf_view(&old, &new, 150.0).expect("a resized sheet still loads");
+        let files = super::build_pdf_export(&pv).expect("export list");
+        assert_eq!(
+            files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["page-2.png"],
+            "only the diffable changed page has an overlay PNG"
+        );
+        let reasons = super::pdf_no_overlay_reasons(&pv);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(
+            reasons[0].contains("page size changed") && reasons[0].contains("208x208"),
+            "the reason names the size change: {reasons:?}"
+        );
     }
 
     #[test]

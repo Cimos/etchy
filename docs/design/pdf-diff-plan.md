@@ -9,7 +9,7 @@ grounded in a full read of the current code (paths + line refs below).
 **The engine is done and unit-tested — only the CLI wiring is missing.**
 
 - `etchy-core::imagediff` (`crates/etchy-core/src/imagediff.rs`): `diff_images(old, new, opts) -> ImageDiffResult { stats, overlay }`. `Image { width, height, rgba }`. Per-pixel classify (added/removed/changed) + connected-component region count + a brand-coloured overlay `Image`. Fails loud on size mismatch. `ImageDiffOptions { ink_threshold, change_threshold, min_region_px }`.
-- `etchy-pdf` (`crates/etchy-pdf/src/lib.rs`, feature `pdf`, off by default, pure-Rust **hayro** — *not* pdfium): `rasterize(bytes, dpi) -> Vec<Image>` (all pages), `diff_pdfs(old, new, dpi, opts) -> PdfDiff`, `encode_png(&Image) -> Vec<u8>`, `available() -> bool`, `DEFAULT_DPI = 150.0`. `PdfDiff { old_pages, new_pages, pages: Vec<PageDiff{page, diff: ImageDiffResult}> }` with `any_changes()`. Pages paired **by index** up to `min(len)`; extra pages reported via the counts, not diffed.
+- `etchy-pdf` (`crates/etchy-pdf/src/lib.rs`, feature `pdf`, off by default, pure-Rust **hayro** — *not* pdfium): `rasterize(bytes, dpi) -> Vec<Image>` (all pages), `diff_pdfs(old, new, dpi, opts) -> PdfDiff`, `encode_png(&Image) -> Vec<u8>`, `available() -> bool`, `DEFAULT_DPI = 150.0`. `PdfDiff { old_pages, new_pages, pages: Vec<PageDiff{page, old_page, new_page, diff: Option<ImageDiffResult>}>, alignment }` with `any_changes()`. Pages pair **by content** (#249, see §3.4); a sheet on one side only is a row with no diff.
 
 **Missing (the whole task):**
 - `etchy-cli` has **no `etchy-pdf` dependency, no `pdf` feature, and no `.pdf` detection**. Its pipeline is Gerber/Excellon/placement-only and everything funnels through `board_from_files()` → `(Board, GerberFormat)` → `DiffReport`. PDF produces none of those types, so it needs a **parallel branch**, not a slot in the existing path.
@@ -57,10 +57,38 @@ PdfReport {
 - The copper gates `--fail-on-area` / `--fail-on-regions` / `--gate-layers` are mm²/layer concepts — **not applicable to pixels**. For v0.1.0: passing them alongside a PDF input is a loud "not valid for PDF" error (don't silently ignore). A pixel-fraction gate (`--fail-on-changed-fraction <f>`) is a clean later addition (Decision Q2).
 
 ### 3.4 Page-count mismatch (a trust concern)
-The engine pairs by index and only *counts* extra pages. That must not read as
-"no change". Plan:
-- Surface prominently in every format: "old 4 pages, new 5 — pages 1–4 diffed; **page 5 is new-only**".
+- Surface prominently in every format: "old 4 page(s), new 5 — 4 sheet(s) paired and diffed; **page 5 is new-only**".
 - Treat any old-only/new-only page as a **change** for the exit code (a page appearing/disappearing is a diff). `any_changes()` already returns true when page counts differ — good; the summary must make it legible.
+
+**Superseded 2026-07-13 (#249):** pages no longer pair by index. Each rasterized
+page is fingerprinted (`etchy_core::pagealign`, a 16×16 **ink-coverage** digest of
+the raster already rendered) and the two sequences are sequence-aligned, so a sheet
+inserted or removed mid-document is an explicit row and the sheets around it keep
+pairing with themselves. The chosen alignment is reported in every format unless
+it is the identity. Invariants: the fingerprint decides only *which* pages pair
+(every pair still gets the full pixel diff), every page appears exactly once, and
+the alignment is deterministic.
+
+The digest must be **local and absolute** — each cell records the fraction of
+itself darker than a fixed luminance, quantized on a log ladder, and two digests
+are compared by L1 distance over those per-cell values. A first attempt compared
+each cell against the *page mean*; on sparse line art (i.e. every schematic sheet)
+adding one small part lowered the mean and flipped dozens of untouched cells, so
+an edited sheet scored further from itself than from a different sheet — the
+alignment then unpaired it and its real change was never located. Any digest here
+must satisfy: ink added or removed anywhere changes the digest only near that ink.
+
+Two ceilings sit on top of it:
+- **Confidence net.** A re-pairing is adopted only when it beats plain index
+  pairing by `ALIGN_MARGIN` *and* every pair it chooses is more alike than chance.
+  Otherwise the alignment falls back to index pairing and says so ("page alignment
+  was ambiguous, paired by index"). Index pairing is the well-understood baseline;
+  content alignment must be a strict improvement on it, never a regression.
+- **Page-count cap.** The alignment is a DP matrix quadratic in the page count, so
+  `MAX_ALIGN_PAGES` (1024 per side, ≈ 8.4 MB of matrix — safe on 32-bit wasm too)
+  is checked *before* allocating and fails loud, naming the input and the limit.
+  Two 10 000-page PDFs, small files under every other cap, otherwise asked for
+  800 MB and aborted the process with no message at all.
 
 ### 3.5 DPI
 - `--dpi <f32>` (default `DEFAULT_DPI` = 150). Higher DPI = crisper diff but more memory/time. Note a **DoS/size ceiling**: a large schematic at high DPI is a big raster — cap the rendered pixel area (or DPI) and fail loud if exceeded, consistent with the gerber per-file caps (CORE-7). (Decision Q5 — cap value.)
@@ -85,7 +113,7 @@ container. Options:
 
 ## 6. Risks
 - **Real-world PDF variety.** The engine is tested only on synthetic single-square PDFs. Real KiCad/Altium schematic exports (fonts, vector strokes, embedded rasters, multiple page sizes) may expose hayro gaps or rasterisation differences. Mitigate with a real fixture (step 5) and a "couldn't rasterise → fail loud" path (TRUST-4).
-- **Same-size requirement.** `diff_images` fails on size mismatch; two PDFs whose same-index pages differ in point-size (e.g. a page resized A4→A3) would error. Decide: fail loud (trust) vs letterbox/scale to match. Recommend **fail loud** for v0.1.0 with a clear message (a resized sheet is itself a meaningful change to flag).
+- **Same-size requirement.** `diff_images` fails on size mismatch; two PDFs whose same-index pages differ in point-size (e.g. a page resized A4→A3) would error. Decide: fail loud (trust) vs letterbox/scale to match. Recommend **fail loud** for v0.1.0 with a clear message (a resized sheet is itself a meaningful change to flag). **Settled 2026-07-13 (#262):** a *genuine* resize is reported as a fully-changed page (exit 1), never rescaled and never an error; a difference within `SIZE_TOLERANCE_PX` is rasterization rounding, so both sides are cropped to their shared region and diffed normally — see §7.7.
 - **Memory at high DPI** — the cap in §3.5.
 
 ## 7. Decisions — LOCKED (owner, 2026-07-12)
@@ -96,6 +124,19 @@ container. Options:
 5. **DPI:** **one DPI for all sheet sizes** ("same detail everywhere") — text renders equally crisp; larger sheets naturally produce more pixels. Default 150; `--dpi` overrides; ~50 MP/page hard cap fails loud.
 6. **GUI:** **full modes** (Old/New/Overlay/Split/Swipe on raster pages), **native AND wasm from day one**. This makes a **hayro-on-wasm spike a prerequisite** — prove `etchy-pdf` compiles + renders on wasm32 before the GUI build; if wasm is blocked, come back with findings before descoping.
 7. **Page-size mismatch:** fail loud — a resized sheet is itself a change to flag.
+   **Revised 2026-07-13 (owner, #262):** a resized sheet is a **diff, not an
+   error** — reported as a fully-changed page with both sizes named, exit 1. The
+   pair is not pixel-diffed (no pixel correspondence) and has no overlay; the
+   viewer shows both sheets at true scale. Exit 2 stays for unrenderable input,
+   because CI treats it as infrastructure failure rather than a review gate.
+
+   "Resized" means resized *beyond rasterization rounding*. Flooring
+   `points × dpi / 72` to whole pixels puts two exports of the same paper up to a
+   pixel apart per axis (`MediaBox [0 0 842 595]` → 1754×1239 px at 150 DPI; the
+   exact `[0 0 841.89 595.276]` → 1753×1240 px), and treating that as a resize
+   discards the sheet's whole pixel diff. Within `SIZE_TOLERANCE_PX` (2 px per
+   axis) it is the **same** sheet: both rasters are cropped to the region they
+   share, the pair is diffed normally, and the crop is reported in every format.
 
 ## 8. Execution order
 1. **Spike (prerequisite):** hayro on wasm32 + a real KiCad schematic PDF render (the two flagged risks) + generate the fixture pair.

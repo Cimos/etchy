@@ -82,6 +82,20 @@ pub enum EngineError {
         expected: usize,
     },
 
+    /// Too many pages to align. The page-alignment DP matrix is quadratic in the
+    /// page count, so a pair of huge documents (small files, under every other
+    /// cap) would ask for gigabytes and abort the process. Fail loud *before*
+    /// allocating, mirroring the per-file and per-page ceilings (#249).
+    #[error(
+        "too many pages to align: old {old} page(s), new {new} \
+         — etchy aligns at most {limit} pages per side"
+    )]
+    TooManyPages {
+        old: usize,
+        new: usize,
+        limit: usize,
+    },
+
     /// A single layer emitted more objects than the engine will process. Guards
     /// against a tiny file amplifying (many arcs / region loops / polarity spans)
     /// into millions of contours — a CPU/RAM exhaustion DoS. Fail loud rather
