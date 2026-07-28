@@ -44,7 +44,7 @@ numbered requirements with their source and current status.
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| IN-1 | Gerber RS-274X and X2 parse on real fab output (Altium + KiCad exports validated; FMU real-board fixes in the corpus). | Spike 2, #145 | ✅ |
+| IN-1 | Gerber RS-274X and X2 parse on real fab output (Altium + KiCad exports validated; real-board fixes in the corpus). | Spike 2, #145 | ✅ |
 | IN-2 | Excellon drill parse, including headerless files, inline formats, R codes; phantom-hole and tool-line traps covered by tests. | #62, #144 | ✅ |
 | IN-3 | Pick-and-place centroid diff: moved/rotated/added/removed parts as geometry (`LayerKind::Placement`). | #115/#141 | ✅ |
 | IN-4 | Filename classification types every copper layer as **Copper** — including KiCad `.gl<n>` inner copper, mapped **ordinally** (`.gl2`→Inner 1) so cross-scheme pairing (`.gl2` ≡ `In1_Cu` ≡ `.g1`) works. Genuinely unknown files fall to Other. | #176 | ✅ |
@@ -148,7 +148,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | PERF-3 | The optional GPU transform path stays **off by default**: it draws true-scale with no marker LOD, which violates TRUST-2 for tiny diffs. Do not enable it as a perf fix. | #106/#117 decision | standing |
 | PERF-4 | Per-layer parallel diff (rayon); render never re-triangulates on camera or colour changes. | M3 | ✅ |
 | PERF-5 | Adaptive flash tessellation (fewer segments for tiny pads) is accepted future work. | #94 | 📋 |
-| PERF-6 | The polarity-span accumulation stays O(spans·N) — the known-safe form. The proposed batch rewrite reintroduced the FMU trace-voids bug; quadratic is inherent here. Post-1.0 design task. | #79 | 📋 |
+| PERF-6 | The polarity-span accumulation stays O(spans·N) — the known-safe form. The proposed batch rewrite reintroduced the real-board trace-voids bug; quadratic is inherent here. Post-1.0 design task. | #79 | 📋 |
 
 ## 11. Known open defects
 

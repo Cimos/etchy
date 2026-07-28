@@ -118,7 +118,7 @@ LOD and draws only base boards (finding A5).
   Fix: pass slices to `diff_layer`; `Arc` the `LayerView` geometry. **This also fixes the
   memory spike from the new parallel diff (below).**
 - **P4 (DONE) — Per-layer parallelism.** ✅ Shipped in **PR #77**: rayon across layers,
-  ~3.84s→3.06s (~20%) on the 26-layer FMU board, deterministic, wasm stays serial.
+  ~3.84s→3.06s (~20%) on the real 26-layer board, deterministic, wasm stays serial.
   Trade-off: peak RSS 122MB→404MB (concurrent scratch) — P3 is the follow-up that brings
   it back down. (i_overlay's `allow_multithreading` is OFF; left off deliberately to
   avoid nesting under rayon.)

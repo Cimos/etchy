@@ -173,4 +173,4 @@ Revisit only if demand appears; each was explicitly deferred in discovery:
 - Smooth (interactive) on a 16-layer dense board.
 - `cargo install`-free: a colleague installs a binary / runs the container and gets
   a diff in < 2 minutes.
-- Adopted in at least one real CI pipeline (dogfooded on a CubePilot board repo).
+- Adopted in at least one real CI pipeline (dogfooded on a private board repo).

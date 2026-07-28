@@ -23,7 +23,7 @@ merged into a single row (count noted).
 | Mode buttons (overlay/before/after) too small to click | larger hit-targets; later the segmented top bar (GUI-4) | ✅ |
 | Layer sidebar icons read as meaningless boxes; mm² clutters the sidebar | layer-list redesign #114 → VIEW-11 (Δ% inline, mm² on hover, square swatches) | ✅ |
 | Red/green overlap hard to see — needs a distinct treatment | overlap/polarity render fixes; base blending (VIEW-5) | ✅ |
-| "Some traces missing on layers" (possible correctness bug) | the missing-traces investigations → polarity fixes on the FMU corpus (#145); guarded by TRUST-5 | ✅ |
+| "Some traces missing on layers" (possible correctness bug) | the missing-traces investigations → polarity fixes on the real-board corpus (#145); guarded by TRUST-5 | ✅ |
 | Ingest drill + pick-and-place files | scope decision → Excellon (#62) + P&P (#115) shipped (SCOPE-2, IN-2/IN-3) | ✅ |
 | Keyboard shortcuts for modes (big shared screens) | mode hotkeys 1–5/O/B/A → KEY-4 | ✅ |
 | Per-layer change % in the sidebar | #114 → VIEW-11 | ✅ |

@@ -173,7 +173,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Native egui GUI** (`etchy-gui <old> <new>`): changed-first layer list +
     pan/zoom canvas (added green / removed red, base toggle, Overlay/Before/After),
     with a WSL software-GL/X11 fallback so it launches out-of-the-box.
-  - Validated end-to-end on a real **Altium** board (MotionJigController A↔B):
+  - Validated end-to-end on a second real **Altium** board (revs A↔B):
     16 layers, all features exercised; `diff(A,A)=∅`; A↔B yields a full diff.
 
 ### Notes

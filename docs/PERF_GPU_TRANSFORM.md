@@ -5,7 +5,7 @@
 ## Problem
 
 On dense boards with many layers visible, the egui viewer is sluggish to pan and
-zoom. Field feedback on the FMU REV_67A→REV_67B board (24+ layers, ~hundreds of
+zoom. Field feedback on the real board (rev A→rev B, 24+ layers, ~hundreds of
 thousands of triangles):
 
 - "Noticeably slower. Might be the larger layers?"
@@ -33,7 +33,7 @@ per-frame **transform + mesh rebuild + re-upload** is the remaining bottleneck.
 
 ## Goal
 
-Smooth pan/zoom on dense multi-layer boards (target: 60 fps on the FMU board with all
+Smooth pan/zoom on dense multi-layer boards (target: 60 fps on the real board with all
 layers visible), with **no visual change** versus the current CPU renderer.
 
 ### Non-goals
@@ -144,9 +144,9 @@ current CPU path** — see below.
 ## Testing & verification
 
 - **Visual parity**: headless screenshots (Playwright, `shot.py`) of the GPU path vs the
-  CPU path on the FMU board and the public Mad_RP2040 — must be pixel-equivalent
+  CPU path on the real board and the public Mad_RP2040 — must be pixel-equivalent
   (overlay, before, after; dark + light; dimming on/off).
-- **Perf**: frame-time / fps measurement on the FMU board, all layers visible, during a
+- **Perf**: frame-time / fps measurement on the real board, all layers visible, during a
   scripted pan/zoom — before vs after. Target ≥60 fps (or a clear multiple of current).
 - **Unit tests**: the pure coordinate/uniform helpers (local-origin rebasing,
   camera→uniform, precision bound).
@@ -154,7 +154,7 @@ current CPU path** — see below.
 
 ## Rollout
 
-1. **Spike** (timeboxed): GPU-transform base copper for Overlay mode only on the FMU
+1. **Spike** (timeboxed): GPU-transform base copper for Overlay mode only on the real
    board; measure the fps win to confirm the approach pays off before building it out.
 2. If the spike wins: complete Before/After, dimming/colour baking, precision handling,
    fallback, parity + perf tests.
