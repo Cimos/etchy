@@ -6134,7 +6134,7 @@ fn transform_cache(
     focus: f32,
 ) -> (Vec<Shape>, usize) {
     // Merge everything into ONE mesh (per-vertex colour preserves the LOD fade)
-    // instead of one Mesh+Shape per region — the FMU top-copper layer was ~5.5k
+    // instead of one Mesh+Shape per region — a real board's top-copper layer was ~5.5k
     // mesh allocations per frame; this makes it one. Off-screen items are culled
     // before their vertices are built (cheaper when zoomed in). Items are pushed
     // base → outline → diff, so draw order within the single mesh stays correct.

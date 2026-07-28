@@ -1152,7 +1152,7 @@ mod tests {
         // Gerber polarity paints in ORDER: dark pad → clear punches a hole → a
         // later dark pad inside the hole must REPAINT (survive). A single
         // all-dark − all-clear pass erases that later pad (it's lumped into "dark"
-        // and subtracted by the clear) — the FMU "trace-shaped voids" bug.
+        // and subtracted by the clear) — the real-board "trace-shaped voids" bug.
         // 10×10 (100) − 4×4 clear (16) + 2×2 dark inside (4) = 88 mm².
         let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,10X10*%\n%ADD11R,4X4*%\n%ADD12R,2X2*%\n\
                  D10*\nX5000000Y5000000D03*\n\
@@ -1222,7 +1222,7 @@ mod tests {
 
     #[test]
     fn coordinate_mismatch_warns_only_on_difference() {
-        // The real FMU case: REV4 inches@2.5 vs REV67 mm@4.4.
+        // The real-board case: rev A inches@2.5 vs rev B mm@4.4.
         let a = GerberFormat {
             units: Units::Inches,
             int_digits: 2,
