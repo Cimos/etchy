@@ -25,9 +25,10 @@ swatch opens its colour picker; Esc backs out of the Colours window; dropped the
 "input:" dropdown prefix; adaptive base-copper LOD when zoomed out. **Simon chose "PR/
 commit trail is enough"** — no separate tracking issues opened for these.
 
-**⏳ Performance (#9/#10) — DESIGN STAGE, no code yet.** Dense multi-layer boards (real-board,
-24+ layers) are slow to pan/zoom. The base-LOD shipped in #74 **did not help at working
-zoom** (Simon confirmed "no real change") — LOD only removes already-sub-pixel features.
+**⏳ Performance (#9/#10) — DESIGN STAGE, no code yet.** Dense multi-layer boards (the
+real board, 24+ layers) are slow to pan/zoom. The base-LOD shipped in #74 **did not help
+at working zoom** (Simon confirmed "no real change") — LOD only removes already-sub-pixel
+features.
 Root cause: `transform_cache` re-runs the world→screen transform of every visible
 triangle on the CPU every frame (scales with layers, not zoom). **Decision: deeper
 engine work — GPU-side transform.** Design doc **`docs/PERF_GPU_TRANSFORM.md`** + **PR
@@ -45,12 +46,12 @@ this session after his sign-off.
 SVG/PNG + copper-area · #57 UI polish/top-bar) → **Phase 5** (#62 drill parsing).
 Follow-up: #68 (feedback widget → pre-filled GitHub issue).
 
-**Live demo (this box):** the web viewer is served on **`localhost:8080`** showing the
-**confidential real-board rev B → rev B** board (24/26 layers changed). That board is
+**Live demo (this box):** the web viewer is served on **`localhost:8080`** showing a
+**confidential real board, rev A → rev B** (24/26 layers changed). That board is
 staged into the gitignored `crates/etchy-gui/assets/demo/{old,new}` and **must never be
-committed** — to rebuild: copy `…/Desktop/redacted real-board-revB/real-board-revA` and
-`real-board_rev A_B` into `assets/demo/{old,new}`, set the labels in `main.rs` (~line 191) to
-`real-board rev B`/`real-board rev B`, `bash deploy/setup.sh --build-only --serve-dir <dir>`, serve
+committed** — to rebuild: copy `<local-path>/rev-a` and `<local-path>/rev-b` into
+`assets/demo/{old,new}`, set the labels in `main.rs` (~line 191) to `rev A`/`rev B`,
+`bash deploy/setup.sh --build-only --serve-dir <dir>`, serve
 with `ETCHY_BIND=127.0.0.1 python3 <dir>/etchy-server.py 8080 <dir>`, then **restore**:
 `git checkout -- crates/etchy-gui/assets/demo && git clean -fd crates/etchy-gui/assets/demo`
 and revert the label edit. The committed demo board is the public Mad_RP2040.
@@ -71,7 +72,7 @@ fmt clean). Integrates, this session:
   fix), and **#66 (pour-clearances regression fix** — #48's winding normalization had
   over-applied in `push()` and filled filled-region holes solid; now `wind()` is
   applied only to the macro Outline primitive, regions keep their holes). Visually
-  verified on the real-board board (junctions solid; pours render with clearances).
+  verified on the real board (junctions solid; pours render with clearances).
 - **#49 Phase 1 (#64):** measure-tool upgrades (crosshairs, sticky, off-line copper-chip
   label, mm/inch/mil units, Ctrl+M, Esc-clear, right/middle-drag pan in measure mode)
   + grid overlay (toggle, spacing, snap-to-grid with live cursor snap).
@@ -146,23 +147,23 @@ be captured. (See `~/.claude` memory `verify-native-gui-visuals`.)
   branches (the 7 squash-merged docs/landing PRs + `gui-web-wasm`) and `gui-brand-theme`
   — its one unique commit (the GUI brand/theme design spec) was salvaged into this
   branch first (`de859e7`). Remotes left: `main`, `gui-web-wasm-v2`, `feedback-widget`.
-- **Private LAN review demo (NOT committed) — a real production board real-board REV_4 vs rev A.** Built
-  the web viewer for a co-worker to review on the office LAN. How it was made, for next
-  time:
-  - Source packs: `…/files/Production/a real production board/real-board_REV_4.zip` and
-    `real-board_rev A.zip` (both pack their files as `real-board_REV_4.*`, so layers pair by name).
+- **Private LAN review demo (NOT committed) — a real production board, rev A vs rev B.**
+  Built the web viewer for a co-worker to review on the office LAN. How it was made, for
+  next time:
+  - Source packs: `<local-path>/rev-a.zip` and `<local-path>/rev-b.zip` (both pack their
+    files under the same base name, so layers pair by name).
   - **Stage only the electrical layers** into `assets/demo/{old,new}` —
-    `GTL GBL G1..G6 GTS GBS GTO GBO GTP GBP TXT`. A rev A drawing/dimension layer spans
+    `GTL GBL G1..G6 GTS GBS GTO GBO GTP GBP TXT`. A rev B drawing/dimension layer spans
     to ~131mm (vs the ~34mm board) and trips the same-board guard, so the full pack
     won't diff; the 14 electrical layers do.
-  - Set the web labels locally to `real-board REV_4` / `real-board rev A` (**kept local — not
+  - Set the web labels locally to `rev A` / `rev B` (**kept local — not
     committed**; the repo keeps the generic non-confidential labels). `trunk build
     --release --filehash false`, deploy to the Windows serve dir, serve with
     `deploy/demo/etchy-server.py` on `0.0.0.0:8080`.
-  - **Feedback given:** Simon confirmed REV_4-vs-rev A is the intended comparison — it
+  - **Feedback given:** Simon confirmed rev A vs rev B is the intended comparison — it
     is a near-total redesign (all 14 layers changed, ~+1120 / −638 mm², ~5,900/6,580
-    regions; expected for a rev 4 -> 67 gap). He had the demo **stopped** after review;
-    relaunch on request.
+    regions; expected for a revision gap that wide). He had the demo **stopped** after
+    review; relaunch on request.
 - **Env note:** the office machine now drives reviews through the `feedback-loop` tool
   (`~/UbuntuProjects/feedback-loop`, SessionStart hook) and the merged `~/.claude/CLAUDE.md`
   agreements (Cimos identity, no AI attribution, never the word "canonical").
@@ -172,7 +173,7 @@ be captured. (See `~/.claude` memory `verify-native-gui-visuals`.)
 - Native viewer: `cargo run --release -p etchy-gui -- <old-dir> <new-dir>` (WSL: `DISPLAY=:0 LIBGL_ALWAYS_SOFTWARE=1`).
 - Web demo: `bash deploy/setup.sh` → http://localhost:8080 (needs a demo board staged in the gitignored `crates/etchy-gui/assets/demo/{old,new}`).
 - CLI: `etchy --format <summary|json|md> old/ new/` (exit 0 no-diff / 1 diff / 2 error).
-- **Confidential:** the a real production board real-board board lives only in the gitignored `assets/demo/` — never commit it. Local review feedback (`deploy/feedback/*.jsonl` + screenshots) is gitignored too.
+- **Confidential:** the real production board lives only in the gitignored `assets/demo/` — never commit it. Local review feedback (`deploy/feedback/*.jsonl` + screenshots) is gitignored too.
 
 ## Done (M1 viewer + M2 start)
 G1 units-mismatch warning · G2 sequential polarity · G7a/G5 layer list + grouping · G7b hotkeys + Ctrl/Shift-scroll pan · G9 zoom true-scale fade + noise slider · G7c branding · G1b warning chip · G10 board outline · G3 base levels + configurable colours · per-layer colours (all kinds) · dark/light mode · G6 world-space tessellation cache · **perf: one merged mesh/frame + off-screen cull** · M2: `--format md` + `action.yml` GitHub Action (script-injection-hardened). Landing site salvaged from #7; tabbed install from #9.
@@ -209,9 +210,9 @@ llvmpipe and won't fully match the GPU web build.
 
 ## Remaining roadmap
 - **Finalize PR #10 (now MERGEABLE — conflicts resolved, #7/#9 closed).** The one gate
-  left is the PUBLIC non-confidential demo board: commit one (replace the gitignored real-board
-  embed in `demo_diff()`), have `setup.sh` stage it, then add **web CI** — CI can't build
-  the wasm until a committable board exists, so the two are coupled. Mad_RP2040 is the
+  left is the PUBLIC non-confidential demo board: commit one (replace the gitignored
+  real-board embed in `demo_diff()`), have `setup.sh` stage it, then add **web CI** — CI
+  can't build the wasm until a committable board exists, so the two are coupled. Mad_RP2040 is the
   likely board (already the site's public example). Then merge. Native CI (`ci.yml`,
   build+test+clippy on 3 OSes) already passes and is board-independent.
 - **M2** finish: release binaries (cargo-dist) so `action.yml` doesn't build from source; docs.

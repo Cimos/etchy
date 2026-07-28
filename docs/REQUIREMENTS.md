@@ -44,7 +44,7 @@ numbered requirements with their source and current status.
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| IN-1 | Gerber RS-274X and X2 parse on real fab output (Altium + KiCad exports validated; real-board real-board fixes in the corpus). | Spike 2, #145 | ✅ |
+| IN-1 | Gerber RS-274X and X2 parse on real fab output (Altium + KiCad exports validated; real-board fixes in the corpus). | Spike 2, #145 | ✅ |
 | IN-2 | Excellon drill parse, including headerless files, inline formats, R codes; phantom-hole and tool-line traps covered by tests. | #62, #144 | ✅ |
 | IN-3 | Pick-and-place centroid diff: moved/rotated/added/removed parts as geometry (`LayerKind::Placement`). | #115/#141 | ✅ |
 | IN-4 | Filename classification types every copper layer as **Copper** — including KiCad `.gl<n>` inner copper, mapped **ordinally** (`.gl2`→Inner 1) so cross-scheme pairing (`.gl2` ≡ `In1_Cu` ≡ `.g1`) works. Genuinely unknown files fall to Other. | #176 | ✅ |

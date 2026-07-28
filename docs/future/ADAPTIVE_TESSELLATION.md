@@ -16,7 +16,7 @@ Two variants exist; this doc is the **canonical** one (changes the resolved geom
 so it speeds the *diff* too). The **render-only** variant already shipped (PR #95, the
 faint base mesh only, no diff impact, ~2.2× pan) and does NOT need any of this.
 
-## Measured benefit (real-board 26-layer board, vs fixed 64-gon)
+## Measured benefit (real 26-layer board, vs fixed 64-gon)
 
 | | Result |
 |---|---|

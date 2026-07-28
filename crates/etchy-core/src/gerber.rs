@@ -1222,7 +1222,7 @@ mod tests {
 
     #[test]
     fn coordinate_mismatch_warns_only_on_difference() {
-        // The real real-board case: REV4 inches@2.5 vs rev A mm@4.4.
+        // The real-board case: rev A inches@2.5 vs rev B mm@4.4.
         let a = GerberFormat {
             units: Units::Inches,
             int_digits: 2,
