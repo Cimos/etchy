@@ -57,6 +57,16 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The PDF path is behind an off-by-default feature, so `--workspace` alone
+      # never compiles the etchy-pdf engine tests or the PDF CLI contract tests
+      # (the exit-1-not-2 assertion for a resized sheet lives there). Run them
+      # explicitly or they silently do not run at all.
+      - name: Test (pdf feature)
+        run: |
+          set -euo pipefail
+          cargo test --workspace --features pdf
+          cargo test -p etchy-cli --features pdf
+
       - name: rustfmt
         run: cargo fmt --all --check
 
