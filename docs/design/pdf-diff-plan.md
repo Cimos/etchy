@@ -60,7 +60,7 @@ PdfReport {
 - Surface prominently in every format: "old 4 page(s), new 5 — 4 sheet(s) paired and diffed; **page 5 is new-only**".
 - Treat any old-only/new-only page as a **change** for the exit code (a page appearing/disappearing is a diff). `any_changes()` already returns true when page counts differ — good; the summary must make it legible.
 
-**Superseded 2026-07-26 (#249):** pages no longer pair by index. Each rasterized
+**Superseded 2026-07-13 (#249):** pages no longer pair by index. Each rasterized
 page is fingerprinted (`etchy_core::pagealign`, a 16×16 **ink-coverage** digest of
 the raster already rendered) and the two sequences are sequence-aligned, so a sheet
 inserted or removed mid-document is an explicit row and the sheets around it keep
