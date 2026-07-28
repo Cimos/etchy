@@ -58,7 +58,7 @@ per format.
 ## Round 3 — Architecture direction + workflow
 
 **Invocation (all four first-class): CLI two paths/zips · CLI two git refs · desktop pick/drag · CI on every PR.**
-Note: "CLI two git refs" + "KiCad first-class" + open-source ⇒ the canonical
+Note: "CLI two git refs" + "KiCad first-class" + open-source ⇒ the standard
 workflow "diff my .kicad_pcb across commits" is important; KiCad repos commit
 source, not Gerbers — bridged via `kicad-cli` plotting (see Round 4 discussion).
 

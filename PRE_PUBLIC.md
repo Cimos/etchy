@@ -16,25 +16,38 @@ excludes `deploy/feedback/` screenshots and uploads.
 
 ## 1. Blockers — must resolve before flipping visibility
 
-- [ ] **Confidential customer board identifiers — working tree done ✅, history
-      still to rewrite.** The board *files* were never committed, but docs prose
-      and a few code comments named a confidential customer board, its revisions,
-      a part number, a second internal board, and absolute local paths. All of
-      that is now generic in the current tree ("the real board", "rev A"/"rev B",
+- [x] **Confidential customer board identifiers — working tree ✅, history ✅.**
+      The board *files* were never committed, but docs prose and a few code
+      comments named a confidential customer board, its revisions, a part number,
+      a second internal board, and absolute local paths. All of that is now
+      generic in the current tree ("the real board", "rev A"/"rev B",
       `<local-path>/…`), and the one board-specific review spec was deleted
       (see #264 — the term list is deliberately kept there, not in this file).
-      **Still to do:** the identifiers survive in **past commits**, so history
-      must be rewritten (`git filter-repo`) before the flip. Coordinate the
-      rewrite — the repo has open PRs/branches and is worked from multiple
-      worktrees. To re-check the tree, take the term list from #264 as `$TERMS`
-      and run `grep -rinE "$TERMS" docs/ crates/ deploy/ *.md`.
-- [ ] **Committed feedback PII — working tree done ✅, history still to rewrite.**
+      History was rewritten with `git filter-repo` on 2026-07-13 (content, commit
+      messages, and the board-named file purged from every commit) and
+      force-pushed across all branches and tags. Verified from a fresh clone:
+      zero hits in blobs, commit messages, paths and ref names. GitHub PR/issue
+      titles, bodies and comments were scrubbed through the API in the same pass.
+      To re-check, take the term list from #264 as `$TERMS` and run
+      `grep -rinE "$TERMS" docs/ crates/ deploy/ *.md`.
+- [x] **Committed feedback PII — working tree ✅, history ✅.**
       `deploy/feedback/m1-seed.jsonl` (git-tracked, whitelisted past the `*.jsonl`
       ignore) carried internal LAN IPs, User-Agent strings and tester names. Those
       fields are removed and the demo URL is genericised; the feedback text is
       kept. No board images were ever committed, and live feedback logs stay
-      gitignored. **Still to do:** the original values are in past commits — same
-      history rewrite as above.
+      gitignored. The original values were removed from past commits by the same
+      history rewrite.
+- [ ] **Ask GitHub to garbage-collect the pre-rewrite objects — OWNER ACTION,
+      still open.** A history rewrite plus force-push makes the old commits
+      unreachable, but it does **not** delete them from GitHub: they remain
+      retrievable by SHA through the REST API (verified — a pre-rewrite commit
+      still served its old `docs/HANDOFF.md` with the identifiers in it) until
+      GitHub garbage-collects the repository. Old SHAs are discoverable from PR
+      timelines and the events API, so this matters at the moment of going public,
+      not before. Open a GitHub Support request asking them to run `gc` on
+      `Cimos/etchy` (only the owner can), and confirm an old SHA 404s before
+      flipping visibility. The alternative, if Support is slow, is to publish from
+      a fresh repository containing only the rewritten history.
 
 ## 2. Standard OSS files — done this pass ✅ / one decision left
 

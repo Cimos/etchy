@@ -1,4 +1,4 @@
-# Future work — adaptive flash tessellation (#94, canonical variant)
+# Future work — adaptive flash tessellation (#94, geometry variant)
 
 **Status:** FUTURE / deferred. **Prerequisite:** tessellation-robust region count
 (PR #96 / `region_count_above`) must be merged first. **Researched:** 2026-06-25 (a
@@ -12,7 +12,7 @@ dominant cost in the per-frame transform, the GPU upload, and the boolean diff. 
 the segment count **adaptive** (scale with radius under the existing ~1µm sagitta
 tolerance, like arcs already do) cuts that.
 
-Two variants exist; this doc is the **canonical** one (changes the resolved geometry,
+Two variants exist; this doc is the **geometry** one (changes the resolved geometry,
 so it speeds the *diff* too). The **render-only** variant already shipped (PR #95, the
 faint base mesh only, no diff impact, ~2.2× pan) and does NOT need any of this.
 

@@ -91,7 +91,7 @@ inputs ──▶ front-end ──▶ graphics-state ──▶ polygonize ──�
 5. **Measure.** `changed_area_mm2 = area(added)+area(removed)`; cluster difference
    polygons into ranked **regions** (heatmap) via `rstar` proximity + `petgraph`
    connected-components, ranked by `geo` area/centroid.
-6. **Render.** SVG (canonical, resolution-independent) for the overlay; PNG derived
+6. **Render.** SVG (the source of truth, resolution-independent) for the overlay; PNG derived
    from the SVG (single source of truth) or drawn directly; assemble HTML + JSON.
 
 ### Coordinate model (a deliberate correctness decision)
@@ -122,7 +122,7 @@ also makes diffs **deterministic** (stable CI output), which the trust bar requi
 
 - **HTML** — one self-contained file (compile-time `askama` template; base64 images
   + inline SVG). The shareable/PR-attachable artifact.
-- **SVG** — per-layer overlay files, canonical & resolution-independent.
+- **SVG** — per-layer overlay files, the source of truth, resolution-independent.
 - **JSON** — versioned (`schema_version`), `schemars`-validated; the integration
   backbone. Stable fields: per-layer `{kind, added_area_mm2, removed_area_mm2,
   region_count, regions:[{bbox,area,centroid}]}`, board totals, tool version,
@@ -189,7 +189,7 @@ so HTML/SVG/JSON cannot disagree.
 2. **`i_overlay` vs `geo` BooleanOps** — bench both on a real dense pour before
    locking (speed vs maturity; `i_overlay`'s vendor benchmarks need independent
    confirmation).
-3. **SVG-canonical + `resvg`-derived PNG** (single source of truth) vs direct
+3. **SVG as the source of truth + `resvg`-derived PNG** (single source of truth) vs direct
    `tiny-skia` raster (speed) — pick after measuring.
 4. **`askama` vs `maud`** for the report (template files vs templates-as-Rust).
 5. **`hayro` watch** — resolved: `hayro` proved out and shipped in `etchy-pdf`,
