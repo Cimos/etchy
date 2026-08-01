@@ -89,14 +89,14 @@
   <section id="overview">
     <span class="eyebrow">Overview</span>
     <h2>What etchy is</h2>
-    <p>etchy is a fast, open-source PCB visual &amp; geometric diff tool, written in Rust. Point it at two directories of Gerber/Excellon files (an “old” and a “new” revision) and it computes, per layer, exactly what copper/mask/silk/paste was <span style="color:var(--added)">added</span> and <span style="color:var(--removed)">removed</span> — as measured areas and region counts, with a native viewer to see it.</p>
+    <p>etchy is a fast, open-source PCB visual &amp; geometric diff tool, written in Rust. Point it at two directories of Gerber/Excellon files (an “old” and a “new” revision) and it computes, per layer, exactly what copper/mask/silk/paste was <span style="color:var(--added)">added</span> and <span style="color:var(--removed)">removed</span> — as measured areas and region counts, with a desktop viewer (and a browser build of the same viewer) to see it.</p>
     <p>It compares <strong>revisions of the same board</strong> using absolute coordinates — no auto-alignment — and fails loud rather than emit a wrong-but-quiet diff.</p>
   </section>
 
   <section id="install">
     <span class="eyebrow">Install</span>
-    <h2>Install <span class="soon">at first release</span></h2>
-    <p>etchy ships as a single self-contained binary per OS, a Cargo crate, and a distroless container — pick your platform. (Distribution lands with the first release; the commands below are the planned form.)</p>
+    <h2>Install</h2>
+    <p>The <code class="inline">etchy</code> CLI ships as a single self-contained binary per OS, plus a distroless container. Grab the archive for your platform from <a href="https://github.com/Cimos/etchy/releases">Releases</a> — the commands below name the current release, so swap the version if you take a later one.</p>
 
     <div class="insttabs">
       <input type="radio" name="inst" id="i-win" class="i-radio" checked>
@@ -111,39 +111,92 @@
         <label for="i-cargo">Cargo</label>
         <label for="i-ctr">Container</label>
       </div>
-      <div class="i-panel p-win"><pre class="code"><span class="c"># PowerShell — download etchy.exe, then add it to your PATH</span>
-Invoke-WebRequest https://github.com/Cimos/etchy/releases/latest/download/etchy-x86_64-pc-windows-msvc.exe -OutFile etchy.exe</pre></div>
+      <div class="i-panel p-win"><pre class="code"><span class="c"># PowerShell — unpack the archive, then add the folder to your PATH</span>
+Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.1.0-rc1/etchy-v0.1.0-rc1-windows-x86_64.zip -OutFile etchy.zip
+Expand-Archive etchy.zip -DestinationPath .
+.\etchy-v0.1.0-rc1-windows-x86_64\etchy.exe --version</pre></div>
       <div class="i-panel p-lin"><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
-curl -L https://github.com/Cimos/etchy/releases/latest/download/etchy-x86_64-unknown-linux-musl -o etchy
-chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre></div>
-      <div class="i-panel p-mac"><pre class="code"><span class="c"># Apple Silicon (use x86_64-apple-darwin on Intel)</span>
-curl -L https://github.com/Cimos/etchy/releases/latest/download/etchy-aarch64-apple-darwin -o etchy
-chmod +x etchy &amp;&amp; sudo mv etchy /usr/local/bin/</pre></div>
-      <div class="i-panel p-cargo"><pre class="code">cargo install etchy</pre></div>
-      <div class="i-panel p-ctr"><pre class="code">docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy /work/old /work/new</pre></div>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0-rc1/etchy-v0.1.0-rc1-linux-x86_64.tar.gz
+tar xzf etchy-v0.1.0-rc1-linux-x86_64.tar.gz
+sudo mv etchy-v0.1.0-rc1-linux-x86_64/etchy /usr/local/bin/</pre></div>
+      <div class="i-panel p-mac"><pre class="code"><span class="c"># Apple Silicon — use …-macos-x86_64.tar.gz on Intel</span>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0-rc1/etchy-v0.1.0-rc1-macos-aarch64.tar.gz
+tar xzf etchy-v0.1.0-rc1-macos-aarch64.tar.gz
+sudo mv etchy-v0.1.0-rc1-macos-aarch64/etchy /usr/local/bin/</pre></div>
+      <div class="i-panel p-cargo"><pre class="code"><span class="c"># from a clone — etchy is not on crates.io yet</span>
+git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy
+cargo install --path crates/etchy-cli --features pdf</pre></div>
+      <div class="i-panel p-ctr"><pre class="code"><span class="c"># distroless, ~11 MB, no shell or libc inside; build it from the repo</span>
+docker build -t etchy .
+docker run --rm -v "$PWD:/work" etchy --format summary -- /work/old /work/new</pre></div>
     </div>
 
-    <p>Build from source today: <code class="inline">git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy &amp;&amp; cargo build --release</code> → <code class="inline">target/release/etchy</code>.</p>
+    <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS).</p>
+    <p>The <strong>desktop viewer is a second binary</strong> and is not in the release archives — build it from a clone with <code class="inline">cargo build --release -p etchy-gui</code>, then run <code class="inline">etchy-gui &lt;old&gt; &lt;new&gt;</code>. The same viewer also builds to WebAssembly and runs in a browser; see <code class="inline">deploy/</code> in the repo.</p>
   </section>
 
   <section id="cli">
     <span class="eyebrow">CLI usage</span>
     <h2>Run a diff</h2>
     <p>Point etchy at two directories of fab output. Layers are paired by filename, so both revisions must use the same Gerber filenames.</p>
-    <pre class="code"><span class="k">etchy</span> &lt;old&gt; &lt;new&gt;          <span class="c"># human-readable per-layer summary</span>
-<span class="k">etchy</span> &lt;old&gt; &lt;new&gt; --json   <span class="c"># machine-readable report on stdout</span></pre>
-    <p>The summary lists each layer with changed area (mm²) and region counts:</p>
-    <pre class="code"><span class="k">$</span> etchy revA/ revB/
-layer            status      added_mm2  removed_mm2  +regions  -regions
-top-copper       <span class="add">changed</span>      19.60342      0.00000       100         0
-inner-copper1    <span class="rem">changed</span>       0.00000     19.60342         0       100
+    <pre class="code"><span class="k">etchy</span> &lt;old&gt; &lt;new&gt;                  <span class="c"># human-readable per-layer summary</span>
+<span class="k">etchy</span> &lt;old&gt; &lt;new&gt; --format json    <span class="c"># machine-readable report on stdout</span></pre>
+    <p>The summary lists each layer with changed area (mm²) and region counts. This is the real output on the two board revisions bundled in the repo:</p>
+    <pre class="code"><span class="k">$</span> etchy crates/etchy-gui/assets/demo/old crates/etchy-gui/assets/demo/new
+layer            status           added_mm2  removed_mm2  +regions  -regions
+top-copper       changed           <span class="add">80.16495</span>    <span class="rem">127.98536</span>       133       121
+inner-copper1    changed            <span class="add">6.47136</span>     <span class="rem">67.29263</span>        46        82
+inner-copper2    changed           <span class="add">11.24153</span>     <span class="rem">95.33530</span>        57        86
+bottom-copper    changed           <span class="add">72.85102</span>     <span class="rem">91.27871</span>       642       494
 …
-2 of 22 layer(s) changed; total <span class="add">+19.60</span> / <span class="rem">-19.60</span> mm² (100+/100-)
+top-silk         unchanged          0.00000      0.00000         0         0
+outline          unchanged          0.00000      0.00000         0         0
+
+10 of 13 layer(s) changed; total <span class="add">+264.02884</span> mm² / <span class="rem">-397.96791</span> mm² (979+/851- regions)
 result: differences found</pre>
+
+    <h3 style="font-size:17px;margin:22px 0 4px">Every flag</h3>
+    <table>
+      <tr><th>Flag</th><th>What it does</th></tr>
+      <tr><td><code>&lt;OLD&gt; &lt;NEW&gt;</code></td><td>The two revisions. Either two directories of Gerber / Excellon / centroid files, two <code>.pdf</code> files, or two git refs.</td></tr>
+      <tr><td><code>[SUBDIR]</code></td><td>With git refs, the subdirectory in the repo where the fab files live (default: the repo root). Its presence implies <code>--git</code>.</td></tr>
+      <tr><td><code>--git</code></td><td>Read the committed files at each ref instead of the working tree — no checkout. Git mode is always explicit, so a mistyped directory stays a loud “not a directory” error instead of being read as a ref.</td></tr>
+      <tr><td><code>--format &lt;FORMAT&gt;</code></td><td><code>summary</code> (default) for the terminal, <code>json</code> for the versioned report, <code>md</code> for GitHub Markdown — a CI step summary or a PR comment.</td></tr>
+      <tr><td><code>--json</code></td><td>Deprecated alias for <code>--format json</code>. Still works.</td></tr>
+      <tr><td><code>--svg &lt;DIR&gt;</code></td><td>Write one SVG overlay per changed layer into this directory (<code>00-top-copper.svg</code>, <code>01-inner-copper1.svg</code>, …). Created if missing.</td></tr>
+      <tr><td><code>--html &lt;FILE&gt;</code></td><td>Write a single self-contained HTML report: totals, warnings, and every changed layer's overlay inlined. No external assets, so it travels as one file.</td></tr>
+      <tr><td><code>--fail-on-area &lt;MM2&gt;</code></td><td>CI gate: exit 1 only when the changed area on the gated layers exceeds this many mm². With neither threshold set, any change on the gated layers fails.</td></tr>
+      <tr><td><code>--fail-on-regions &lt;N&gt;</code></td><td>CI gate on the changed region count instead. Set both and either one being exceeded fails.</td></tr>
+      <tr><td><code>--gate-layers &lt;SPEC&gt;</code></td><td>Which layers the gate looks at: <code>all</code> (default), or a comma list of <code>copper</code>, <code>mask</code>, <code>silk</code>, <code>paste</code>, <code>drill</code>, <code>outline</code>, <code>documentation</code>, <code>other</code>. An unknown name is a loud error, never a silently disarmed gate.</td></tr>
+      <tr><td><code>--dpi &lt;DPI&gt;</code></td><td>PDF inputs only: rasterization resolution, default 150. Higher is crisper but costs memory and time (per-page pixel area is capped).</td></tr>
+      <tr><td><code>--out &lt;DIR&gt;</code></td><td>PDF inputs only: write one overlay PNG per diffed page (<code>page-&lt;n&gt;.png</code>) into this directory.</td></tr>
+      <tr><td><code>--min-region-px &lt;N&gt;</code></td><td>PDF inputs only: keep changed regions under N connected pixels out of the overlay as likely anti-aliasing noise. Default 1, which hides nothing. Anything hidden is still counted and still reported — the floor can never produce a silent “no differences”.</td></tr>
+    </table>
+
+    <h3 style="font-size:17px;margin:22px 0 4px">Reports and exports</h3>
+    <p>One run can write every output at once — they all come from the same diff computation, so the picture and the numbers can't disagree:</p>
+    <pre class="code"><span class="k">etchy</span> old/ new/ --html diff.html --svg overlays/ --format json &gt; diff.json</pre>
+
+    <h3 style="font-size:17px;margin:22px 0 4px">Diff two commits, no checkout</h3>
+    <p>Give etchy two git refs and it reads the committed fab files straight out of the object store. A third argument scopes it to the subdirectory the Gerbers live in:</p>
+    <pre class="code"><span class="k">etchy</span> v1.0 HEAD fab/          <span class="c"># &lt;refA&gt; &lt;refB&gt; [subdir]</span>
+<span class="k">etchy</span> --git v1.0 HEAD          <span class="c"># whole repo; prints a scoping note</span></pre>
+
+    <h3 style="font-size:17px;margin:22px 0 4px">Schematic PDFs</h3>
+    <p>Hand etchy two <code class="inline">.pdf</code> files instead of two directories and it does a page-by-page pixel diff, reporting added / removed / changed pixels and a changed-region count per page. Pages pair by <em>content</em>, not index, so inserting one sheet shows up as a single extra row rather than making every later page look rewritten.</p>
+    <pre class="code"><span class="k">$</span> etchy old.pdf new.pdf --out overlays/
+etchy: wrote overlays/page-1.png
+page    old  new present     added_px removed_px changed_px  changed%  regions
+1         1    1 both        230          0         66    0.014%        3
+
+1 page(s) diffed at 150 DPI; 1 changed
+result: differences found</pre>
+    <p>The PDF path lives behind the <code class="inline">pdf</code> cargo feature so its rasterizer stays out of a plain build — but the release binaries and the container are built with it on, so a downloaded etchy already has it. From source, add <code class="inline">--features pdf</code>. It is pure Rust: no PDFium, no C++ toolchain.</p>
+
     <p><strong>Exit codes</strong> — designed for CI. These three are the whole contract:</p>
     <table>
       <tr><th>Code</th><th>Meaning</th></tr>
-      <tr><td><code>0</code></td><td>No differences — the two revisions are identical</td></tr>
+      <tr><td><code>0</code></td><td>Nothing to block on — either the two revisions are identical, or a gate is configured and the change came in under it</td></tr>
       <tr><td><code>1</code></td><td>Differences found — the revisions differ (the normal “what changed” result)</td></tr>
       <tr><td><code>2</code></td><td>Error — a comparison couldn't be made: the inputs aren't the <strong>same board</strong> (extents mismatch — etchy compares revisions of one board, not two different boards), a layer failed to parse, or files are missing</td></tr>
     </table>
@@ -157,13 +210,14 @@ result: differences found</pre>
       <li><strong>Layer pairing.</strong> Layers are matched by filename and classified by kind (top/inner/bottom copper, mask, silk, paste, drill, outline).</li>
       <li><strong>Polygon boolean.</strong> Each layer is turned into polygons; the diff is a per-layer boolean: <code class="inline">added = new − old</code>, <code class="inline">removed = old − new</code>.</li>
       <li><strong>Magnitudes.</strong> From that one computation it reports changed <strong>area</strong> (mm²) and the <strong>number of regions</strong> added/removed per layer — the numbers you can threshold on in CI.</li>
+      <li><strong>Dense boards.</strong> Layers are diffed in parallel, and each layer carries a hard ceiling on how much geometry it will take in, so a malformed or hostile file fails with an error instead of eating the machine.</li>
     </ul>
   </section>
 
   <section id="json">
     <span class="eyebrow">JSON output</span>
     <h2>Machine-readable report</h2>
-    <p><code class="inline">--json</code> emits a versioned report to stdout — totals plus a per-layer array:</p>
+    <p><code class="inline">--format json</code> emits a versioned report to stdout — totals, a per-layer array, any warnings, and the CI gate's verdict. <code class="inline">schema_version</code> is the integration contract: it only changes when the shape does.</p>
     <pre class="code">{
   <span class="k">"schema_version"</span>: 1,
   <span class="k">"tool_version"</span>: "0.1.0",
@@ -182,27 +236,63 @@ result: differences found</pre>
       <span class="k">"added_area_nm2"</span>: "19603417231600", <span class="k">"removed_area_nm2"</span>: "0",
       <span class="k">"added_regions"</span>: 100, <span class="k">"removed_regions"</span>: 0
     }
-  ]
+  ],
+  <span class="k">"warnings"</span>: [],
+  <span class="k">"gate"</span>: {
+    <span class="k">"configured"</span>: false, <span class="k">"passed"</span>: false, <span class="k">"scope"</span>: "all layers",
+    <span class="k">"changed_area_mm2"</span>: 39.20, <span class="k">"changed_regions"</span>: 200
+  }
 }</pre>
-    <p>Areas are given both as mm² (float) and exact nm² (integer string, for lossless thresholds). <code class="inline">status</code> is <code class="inline">changed</code> or <code class="inline">unchanged</code>.</p>
+    <p>Areas are given both as mm² (float) and exact nm² (integer string, for lossless thresholds). <code class="inline">status</code> is <code class="inline">changed</code> or <code class="inline">unchanged</code>. <code class="inline">gate</code> reports what the CI thresholds looked at and how it ruled, so a pipeline can log the verdict without re-deriving it. A PDF diff reports per-page rows instead of layers, plus how the two revisions' pages were paired.</p>
   </section>
 
   <section id="ci">
     <span class="eyebrow">CI usage</span>
-    <h2>Gate a pull request <span class="soon">roadmap</span></h2>
-    <p>Today, the exit code already gates a build (1 = changes). Per-layer thresholds and inline PR comments are on the roadmap.</p>
-    <pre class="code"><span class="c"># fail the job when the board changed</span>
-- name: PCB diff
-  run: etchy old/ new/        <span class="c"># exit 1 → step fails on any change</span>
-
-<span class="c"># coming: thresholds + PR comments</span>
-- run: etchy old/ new/ --fail-on copper-area=5mm2</pre>
+    <h2>Gate a pull request</h2>
+    <p>The exit code alone already gates a build — any change is exit 1, so the step fails:</p>
+    <pre class="code">- name: PCB diff
+  run: etchy old/ new/        <span class="c"># exit 1 → step fails on any change</span></pre>
+    <p>That is usually too blunt: a moved silkscreen label shouldn't block a board review. Gate on the <strong>magnitude</strong> and <strong>location</strong> of the change instead. Below, only copper counts, and only if more than 0.5 mm² of it moved:</p>
+    <pre class="code">- name: PCB diff
+  run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
+    <p>The gate names its verdict on stderr — <code class="inline">etchy: gate FAIL — copper: changed 552.6209 mm², 1661 regions</code> — and repeats it in the JSON, so why a build passed or failed is on the record. When a gate is configured and the change comes in under it, etchy exits 0 even though it found differences. That is the point of the gate.</p>
+    <p><strong>Or add the Action.</strong> Five lines, and every pull request that touches Gerbers gets a layer-by-layer table posted as a sticky comment (edited in place on each push, not re-posted):</p>
+    <pre class="code">- uses: Cimos/etchy@main
+  with:
+    old: fab/rev-a
+    new: fab/rev-b
+    comment: true</pre>
+    <p>The job needs <code class="inline">pull-requests: write</code>; etchy supplies its own token. Set <code class="inline">fail-on-diff: false</code> to report without failing the step, and read <code class="inline">outputs.changed</code> to branch on the result. Nothing leaves the runner — no service, no upload — so it works the same on a self-hosted or air-gapped runner. The Action compiles etchy on the runner, so budget a build the first time; the full recipe is in <code class="inline">docs/ci-recipes/etchy-pr-diff.yml</code>.</p>
+    <p>Feeding a CI step summary or another tool by hand instead? <code class="inline">--format md</code> writes the same table as GitHub Markdown, and <code class="inline">--format json</code> gives the numbers.</p>
   </section>
 
   <section id="viewer">
     <span class="eyebrow">The viewer</span>
     <h2>See the diff</h2>
-    <p>The native desktop viewer (egui) opens the diff visually: a changed-layers-first list, with <strong>overlay</strong> (added green / removed red), <strong>before</strong> (old), and <strong>after</strong> (new) modes, plus pan / zoom / fit.</p>
+    <p><code class="inline">etchy-gui &lt;old&gt; &lt;new&gt;</code> opens the same diff on screen. It is a separate binary from the CLI, built from a clone (<code class="inline">cargo build --release -p etchy-gui</code>), and the identical code also compiles to WebAssembly and runs in a browser — same layout, same behaviour, no install.</p>
+
+    <h3 style="font-size:17px;margin:18px 0 4px">Modes</h3>
+    <p>The top bar carries the board labels and a mode segment:</p>
+    <ul>
+      <li><strong>Overlay</strong> — one board with the diff drawn on it: <span style="color:var(--added)">added</span> green, <span style="color:var(--removed)">removed</span> red, unchanged copper faint behind them.</li>
+      <li><strong>Old</strong> / <strong>New</strong> — one revision at a time, no diff colouring.</li>
+      <li><strong>Split</strong> — the two whole boards side by side through one shared camera, so pan and zoom stay locked together.</li>
+      <li><strong>Swipe</strong> — a draggable curtain over a single board: old to the left of the divider, new to the right. The divider travels edge to edge and dragging it never pans the board.</li>
+    </ul>
+
+    <h3 style="font-size:17px;margin:18px 0 4px">Panels</h3>
+    <p>A slim activity rail (flip it to either side in Settings) opens docked panels:</p>
+    <ul>
+      <li><strong>Layers</strong> — rows grouped by family (copper, soldermask, silkscreen, paste, drill, mechanical), changed ones first, each with a colour swatch and its changed share as a percentage; hover for the mm² split. <strong>Eyes are the only visibility control</strong> — selecting a row highlights it without hiding anything and without moving the camera. A <strong>Focus</strong> slider dims every visible layer you haven't selected, from “all equal” up to “selected layer only”, so you can bury a busy board without hiding it.</li>
+      <li><strong>Measure</strong> — the ruler between the panel tabs is a plain tool toggle, not a panel (<code class="inline">Ctrl+M</code> does the same). Two clicks make a measurement; it stays drawn on the board with the distance, ΔX, ΔY and angle until you clear it. Units are mm / mil / inch.</li>
+      <li><strong>Export</strong> — export the current layer or every changed layer, with the exact file list shown before it writes: index-prefixed SVGs plus <code class="inline">areas.csv</code>, the same code path the CLI uses. In PDF mode it exports the changed pages' overlay PNGs instead. Native writes an <code class="inline">etchy-export/</code> folder next to the input and reports the absolute path; the browser build downloads a multi-file set as one zip.</li>
+      <li><strong>Settings</strong> — a gear at the bottom of the rail, not a floating window: theme and rail side, base-copper opacity, the minimum-area noise filter, PDF resolution, grid spacing and colours, measure units and snapping, per-tool input presets (Altium or KiCad mouse and key conventions), per-layer colours, and a hotkey editor where every action can be rebound.</li>
+    </ul>
+
+    <h3 style="font-size:17px;margin:18px 0 4px">Getting boards in, and around them</h3>
+    <p>Open old / Open new take a folder, a <code class="inline">.zip</code>, or a drag-and-drop. The wheel zooms at the cursor, left-drag pans in every preset, and <code class="inline">F</code> fits the whole board — the only thing that ever reframes the camera. A grid-snapped crosshair reads out live coordinates.</p>
+    <p><strong>Schematic PDFs open here too</strong>: pass two PDFs and you get the page list with the same modes and per-page overlays. The rasterization resolution is a setting (150 / 200 / 300 DPI), and changing it re-renders the loaded pair.</p>
+    <p>Status chips sit bottom-left and only appear when they have something to say — the coordinate readout, how many regions the noise filter is hiding and below what size, and a note when only one of several layers is on screen. That stack is the trust rule made visible: nothing the viewer suppresses goes unaccounted for.</p>
   </section>
 
   <section id="trust">
@@ -211,8 +301,10 @@ result: differences found</pre>
     <ul>
       <li><strong>Fail loud, never wrong-but-quiet.</strong> Mismatched boards error rather than diff.</li>
       <li><strong>Same-board revisions only.</strong> No registration / auto-alignment — by design.</li>
-      <li><strong>Inputs:</strong> Gerber RS-274X/X2, Excellon drill. Schematic-PDF page diff is planned.</li>
-      <li><strong>Non-goals:</strong> native CAD ingestion (KiCad/Altium/IPC-2581/ODB++), net/connectivity diff, BOM/component diff, DRC. etchy diffs fab output — it isn't an ECAD review tool.</li>
+      <li><strong>Inputs:</strong> Gerber RS-274X/X2, Excellon drill, pick-and-place centroid files (moved, rotated, added and removed parts diff as placement geometry — not as a BOM), and schematic PDFs page by page.</li>
+      <li><strong>Nothing is hidden silently.</strong> A real change too small to draw to scale becomes a fixed-size marker dot rather than disappearing, and anything the noise filter suppresses is counted and shown on screen.</li>
+      <li><strong>Non-goals:</strong> net/connectivity diff, BOM/component diff, DRC, and Altium / IPC-2581 / ODB++ ingestion. etchy diffs fab output — it isn't an ECAD review tool.</li>
+      <li><strong>One exception, later:</strong> reading KiCad <code class="inline">.kicad_pcb</code> files directly is accepted for after 1.0, so KiCad users can skip the Gerber export. KiCad <em>schematic</em> diff stays out — that's connectivity, a different tool.</li>
     </ul>
   </section>
   </main>
