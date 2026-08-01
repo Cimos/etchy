@@ -34,6 +34,21 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Without this every job recompiles the whole dependency tree from
+      # scratch, which is where most of the Actions minutes go. Keyed on the
+      # lockfile so a dependency bump invalidates it; the restore-key prefix
+      # still gives a warm start when only our own code changed.
+      - name: Cache cargo + target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
       - name: Build
         run: cargo build --workspace --all-targets
 
@@ -90,6 +105,19 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
+      # Worth the most here: Windows bills at 2x and macOS at 10x, so a warm
+      # target/ on these two legs saves more minutes than anywhere else.
+      - name: Cache cargo + target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
       - name: Build
         run: cargo build --workspace --all-targets
 
@@ -111,6 +139,19 @@ jobs:
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: wasm32-unknown-unknown
+
+      # Separate cache key from the native jobs: this job builds for
+      # wasm32-unknown-unknown, so its target/ contents don't overlap.
+      - name: Cache cargo + target (wasm)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-
 
       # Prebuilt trunk binary, pinned — avoids the slow build-from-source and
       # any extra third-party action. Bump deliberately alongside the toolchain.
@@ -173,12 +214,23 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
-      # Install from crates.io (no extra third-party action to audit). Slower than
-      # a prebuilt binary; swap for a pinned prebuilt (like trunk above) if it drags.
-      # Pin the version too: --locked pins its dependency tree, not the tool itself,
-      # so the policy enforcer stays a fixed input. Bump deliberately.
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --version 0.20.2 --locked
+      # Prebuilt binary, pinned + checksum-verified — same pattern as trunk in the
+      # wasm job. Building cargo-deny from crates.io took most of this job's time;
+      # the download is seconds. The sha256 is the one published alongside the
+      # release asset. Bump both together, deliberately.
+      - name: Install cargo-deny (prebuilt, pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          ver=0.20.2
+          target=x86_64-unknown-linux-musl
+          sha256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+          curl -fsSL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/cargo-deny-${ver}-${target}.tar.gz" \
+            -o cargo-deny.tar.gz
+          echo "${sha256}  cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf cargo-deny.tar.gz
+          install -m 0755 "cargo-deny-${ver}-${target}/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          rm -rf cargo-deny.tar.gz "cargo-deny-${ver}-${target}"
+          cargo-deny --version
 
       # Enforces the permissive-only license policy + RUSTSEC advisories + bans
       # (deny.toml). A real advisory or a non-allow-listed license fails the job.
