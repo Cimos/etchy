@@ -176,7 +176,7 @@
           <div>inner1-copper   <span class="rem">changed</span>    0.00   19.60</div>
           <div class="out">&nbsp;</div>
           <div>2 of 4 layers changed · <span class="add">+19.6</span> / <span class="rem">-19.6</span> mm²</div>
-          <div><span class="pr">$</span> <span class="cmd">etchy revA/ revB/ --json &gt; diff.json</span></div>
+          <div><span class="pr">$</span> <span class="cmd">etchy revA/ revB/ --format json &gt; diff.json</span></div>
         </div>
       </div>
       <div class="hp-view hp-gui-view">
@@ -206,8 +206,11 @@
     <span class="label">What it does</span>
     <div class="cards">
       <div class="card"><div class="ic copper">◳</div><h3>See what changed</h3><p>Highlights every added and removed feature on each layer, then measures it — changed area and region count.</p></div>
-      <div class="card"><div class="ic copper">⎙</div><h3>See it &amp; measure it</h3><p>The CLI prints a per-layer summary — changed area and region counts — plus a JSON report for CI. The native viewer shows the diff in overlay, before, and after.</p></div>
+      <div class="card"><div class="ic copper">⎙</div><h3>See it &amp; measure it</h3><p>The CLI prints a per-layer summary, and writes JSON, Markdown, per-layer SVGs, or one self-contained HTML report. The viewer shows the same diff in overlay, old, new, split and swipe.</p></div>
       <div class="card"><div class="ic copper">✓</div><h3>Same-board only</h3><p>Compares two revisions of the same board on absolute coordinates — no auto-aligning. If the boards don't match, it errors instead of showing a wrong diff.</p></div>
+      <div class="card"><div class="ic copper">⌥</div><h3>Gate it in CI</h3><p>Exit codes 0 / 1 / 2, plus thresholds on changed area and region count — scoped per layer, so copper fails the build and silkscreen churn doesn't. A GitHub Action posts the layer-by-layer table on the pull request.</p></div>
+      <div class="card"><div class="ic copper">▤</div><h3>Schematic PDFs too</h3><p>Schematic PDFs get a page-by-page pixel diff with overlay PNGs. Pages pair by content, so an inserted sheet becomes one extra row instead of desyncing every page after it.</p></div>
+      <div class="card"><div class="ic copper">⤓</div><h3>One binary, no runtime</h3><p>Static per-OS binaries and a distroless container — nothing to install alongside it. Git refs work too: diff two committed revisions without a checkout.</p></div>
     </div>
   </section>
 
@@ -236,7 +239,7 @@
     <p style="color:var(--muted);font-size:14px;margin:0;max-width:62ch">etchy's actual output diffing a real 4-layer board's fab Gerbers (v0.0.0 → v0.0.1). 8 of 11 layers changed.</p>
     <figure style="margin:16px 0 0">
       <img src="assets/example/etchy-mad-rp2040-overview.png" alt="The etchy viewer showing the Mad_RP2040 v0.0.0 to v0.0.1 bottom-copper diff — added copper in green, removed in red" loading="lazy" style="display:block;width:100%;height:auto;border:1px solid #241f18;border-radius:10px"/>
-      <figcaption style="color:var(--muted);font-size:12.5px;margin-top:7px">The etchy viewer on the Mad_RP2040 diff — layer list, overlay / before / after / split modes, per-layer colours. <span class="add">Green</span> = added, <span class="rem">red</span> = removed.</figcaption>
+      <figcaption style="color:var(--muted);font-size:12.5px;margin-top:7px">The etchy viewer on the Mad_RP2040 diff — layer list, overlay / old / new / split / swipe modes, per-layer colours. <span class="add">Green</span> = added, <span class="rem">red</span> = removed.</figcaption>
     </figure>
     <div class="excard">
       <table class="extable">
@@ -260,22 +263,29 @@
   <section id="get">
     <span class="label">Get it</span>
     <h2 style="font-size:28px;margin:10px 0 6px">Run it locally, gate it in CI.</h2>
-    <p style="color:var(--muted);font-size:14px;margin:0 0 20px;max-width:62ch">Planned for the first release — etchy ships as small static binaries and a distroless container.</p>
+    <p style="color:var(--muted);font-size:14px;margin:0 0 20px;max-width:62ch">etchy ships as a small static binary per OS and a distroless container — no runtime to install alongside it.</p>
     <div class="getgrid">
       <div class="getcard">
         <div class="label" style="margin-bottom:10px">Install &amp; run</div>
-        <pre class="code"><span class="out"># at first release</span>
-cargo install etchy
-<span class="out"># …or grab a static binary from Releases</span>
+        <pre class="code"><span class="out"># grab the archive for your OS from Releases…</span>
+<span class="out"># …or build it from a clone of the repo</span>
+cargo install --path crates/etchy-cli --features pdf
 
-etchy old/ new/            <span class="out"># per-layer summary</span>
-etchy old/ new/ --json     <span class="out"># machine-readable, for CI</span></pre>
+etchy old/ new/                    <span class="out"># per-layer summary</span>
+etchy old/ new/ --format json      <span class="out"># machine-readable, for CI</span>
+etchy old/ new/ --html diff.html   <span class="out"># one self-contained report</span></pre>
       </div>
       <div class="getcard">
         <div class="label" style="margin-bottom:10px">Gate a PR in CI</div>
-        <pre class="code"><span class="out">- name: PCB diff</span>
-  run: etchy old/ new/ --fail-on-change</pre>
-        <p style="color:var(--muted);font-size:13px;margin:10px 0 0">Per-layer thresholds + inline PR comments are on the roadmap.</p>
+        <pre class="code"><span class="out"># fail only if copper changed by more than 0.5 mm²</span>
+- name: PCB diff
+  run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
+        <p style="color:var(--muted);font-size:13px;margin:12px 0 10px">Or add the Action — five lines, and every pull request that touches Gerbers gets a sticky layer-by-layer diff comment:</p>
+        <pre class="code">- uses: Cimos/etchy@main
+  with:
+    old: fab/rev-a
+    new: fab/rev-b
+    comment: true</pre>
       </div>
     </div>
   </section>
@@ -284,15 +294,14 @@ etchy old/ new/ --json     <span class="out"># machine-readable, for CI</span></
     <span class="label">On the roadmap</span>
     <div class="roadmap-head">
       <h2>Where etchy is headed.</h2>
+      <span class="sub">Not built yet — everything described above ships today.</span>
     </div>
     <div class="road">
-      <div class="item"><h3>CI gating &amp; PR comments</h3><p>Per-layer thresholds, exit codes, and an inline visual diff posted on pull requests.</p></div>
-      <div class="item"><h3>More viewer modes</h3><p>Split view, swipe, onion-skin, and a change heatmap in the desktop viewer.</p></div>
-      <div class="item"><h3>Schematic-PDF diff</h3><p>Page-by-page pixel diff of schematic PDFs, as a supported secondary mode.</p></div>
-      <div class="item"><h3>Dense-board speed</h3><p>Parallel per-layer work and memory ceilings for big multi-layer boards.</p></div>
-      <div class="item"><h3>Static binaries + container</h3><p>Per-OS static builds and a distroless container — no runtime to install.</p></div>
-      <div class="item"><h3>Docs site</h3><p>Install, CLI reference, CI recipes, JSON schema, and how the diff works.</p></div>
-      <div class="item"><h3>Stable JSON schema</h3><p>A versioned, documented output contract for downstream integrations.</p></div>
+      <div class="item"><h3>The 1.0 release</h3><p>The release pipeline is proven on a pre-release across four platforms. Left to do: cut 1.0 and publish the container to a registry so it can be pulled, not just built.</p></div>
+      <div class="item"><h3>More EDA naming schemes</h3><p>Layer classification covers Altium and KiCad filename conventions. Eagle, OrCAD and the rest land one at a time, each with corpus samples and tests.</p></div>
+      <div class="item"><h3>Onion-skin &amp; heatmap views</h3><p>Two viewer modes still to build. Overlay, old, new, split and swipe are already there.</p></div>
+      <div class="item"><h3>Native KiCad ingestion</h3><p>Read .kicad_pcb files directly so KiCad users can skip the Gerber export. Accepted for after 1.0. KiCad <em>schematic</em> diff stays out of scope — that's connectivity, a different tool.</p></div>
+      <div class="item"><h3>Per-object change lists</h3><p>“This via moved 0.3 mm”, rather than a changed region. Needs object identity from native CAD files, so it sits behind the item above. Parked, not forgotten.</p></div>
     </div>
   </section>
   </main>
