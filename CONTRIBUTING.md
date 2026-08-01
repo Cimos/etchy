@@ -62,6 +62,27 @@ cargo clippy --workspace --all-targets   # tighten to -D warnings once deps land
 cargo test  --workspace
 ```
 
+## Cutting a release
+
+A release *is* a pushed tag: `.github/workflows/release.yml` fires on `v*`, builds
+the CLI for four platforms with `--features pdf`, and attaches the archives plus
+`SHA256SUMS` to the GitHub Release. A tag with a `-` in it (`v0.1.0-rc1`) publishes
+as a pre-release. Before pushing the tag:
+
+1. **Cut the CHANGELOG section.** Move everything under `## [Unreleased]` in
+   [`CHANGELOG.md`](CHANGELOG.md) into a new `## [X.Y.Z] — YYYY-MM-DD` heading,
+   leave `[Unreleased]` empty for the next cycle, and update the compare links at
+   the bottom of the file. A tag with no changelog section of its own is an
+   unfinished release — this step is what keeps the two from drifting.
+2. Bump `version` under `[workspace.package]` in the root `Cargo.toml` and commit
+   the refreshed `Cargo.lock`.
+3. Run the gates: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets`,
+   `cargo test --workspace`.
+4. `git tag vX.Y.Z && git push origin vX.Y.Z`, then check the workflow attached
+   all four archives and `SHA256SUMS`.
+5. The install commands in `site/docs.html` name a concrete release — point them
+   at the new one.
+
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what to build next and
 [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) for the architecture +
 verified crate stack.
