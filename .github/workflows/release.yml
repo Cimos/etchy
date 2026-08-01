@@ -59,7 +59,9 @@ jobs:
           dir="etchy-${REF_NAME}-${NAME}"
           mkdir "$dir"
           cp "target/${TARGET}/release/etchy" "$dir/"
-          cp README.md LICENSE-MIT LICENSE-APACHE "$dir/" 2>/dev/null || true
+          # No `|| true` here: an archive that quietly ships without its licences
+          # is exactly the kind of silent miss this project refuses elsewhere.
+          cp README.md LICENSE-MIT LICENSE-APACHE "$dir/"
           tar czf "$dir.tar.gz" "$dir"
           echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
 
@@ -75,7 +77,10 @@ jobs:
           dir="etchy-${REF_NAME}-${NAME}"
           mkdir "$dir"
           cp "target/${TARGET}/release/etchy.exe" "$dir/"
-          cp README.md "$dir/" 2>/dev/null || true
+          # Carry the licences here too — etchy is dual-licensed and the unix
+          # archives include both, so the Windows archive must not be the odd
+          # one out. Fail loud rather than shipping an archive without them.
+          cp README.md LICENSE-MIT LICENSE-APACHE "$dir/"
           7z a "$dir.zip" "$dir"
           echo "ASSET=$dir.zip" >> "$GITHUB_ENV"
 
