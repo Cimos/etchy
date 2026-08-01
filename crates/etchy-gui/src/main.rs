@@ -1724,7 +1724,7 @@ impl ViewApp {
                 .show(ui.ctx(), |ui| {
                     egui::Frame::default()
                         .fill(chrome(self.theme).canvas)
-                        .stroke(Stroke::new(1.0, C_COPPER))
+                        .stroke(Stroke::new(1.0_f32, C_COPPER))
                         .inner_margin(8.0)
                         .corner_radius(4.0)
                         .show(ui, |ui| {
@@ -2096,10 +2096,10 @@ fn brand_visuals(theme: Theme) -> egui::Visuals {
     v.override_text_color = Some(c.text);
     v.hyperlink_color = C_COPPER;
     v.selection.bg_fill = Color32::from_rgba_unmultiplied(0xe8, 0xa3, 0x3d, 70);
-    v.selection.stroke = Stroke::new(1.0, C_COPPER);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, C_COPPER);
+    v.selection.stroke = Stroke::new(1.0_f32, C_COPPER);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, C_COPPER);
     v.widgets.active.bg_fill = Color32::from_rgb(0x6b, 0x4c, 0x1d);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, C_COPPER);
+    v.widgets.active.bg_stroke = Stroke::new(1.0_f32, C_COPPER);
     v
 }
 
@@ -4087,7 +4087,7 @@ impl ViewApp {
         // Copper selection accent (#121): theme/units/preset toggles read
         // brand-copper, not the default blue. Child uis inherit it.
         ui.visuals_mut().selection.bg_fill = C_COPPER.gamma_multiply(0.30);
-        ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, C_COPPER);
+        ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0_f32, C_COPPER);
         // auto_shrink off (#212): the scroll area always fills the panel width,
         // so the panel keeps its user-dragged size instead of re-fitting itself
         // to the widest visible row every time a section opens or closes (which
@@ -4990,7 +4990,7 @@ impl ViewApp {
                 Pos2::new(div_x, rect.top()),
                 Pos2::new(div_x, rect.bottom()),
             ],
-            Stroke::new(if swipe { 2.5 } else { 1.5 }, line_col),
+            Stroke::new(if swipe { 2.5_f32 } else { 1.5_f32 }, line_col),
         );
         if swipe {
             // A clear grab handle at mid-height: a rounded copper pill with three
@@ -5003,7 +5003,7 @@ impl ViewApp {
                 painter.rect_stroke(
                     handle,
                     6.0,
-                    Stroke::new(1.5, C_CREAM),
+                    Stroke::new(1.5_f32, C_CREAM),
                     egui::StrokeKind::Outside,
                 );
             }
@@ -5014,7 +5014,7 @@ impl ViewApp {
                         Pos2::new(div_x - 3.0, mid_y + dy),
                         Pos2::new(div_x + 3.0, mid_y + dy),
                     ],
-                    Stroke::new(1.2, C_CANVAS),
+                    Stroke::new(1.2_f32, C_CANVAS),
                 );
             }
         }
@@ -5070,7 +5070,7 @@ impl ViewApp {
                     (ir.center().x as f64 + (w[0] - self.cam.center[0]) * self.cam.scale) as f32,
                     (ir.center().y as f64 - (w[1] - self.cam.center[1]) * self.cam.scale) as f32,
                 );
-                let cross = Stroke::new(1.0, C_CROSSHAIR);
+                let cross = Stroke::new(1.0_f32, C_CROSSHAIR);
                 painter.line_segment(
                     [
                         Pos2::new(rect.left(), cross_at.y),
@@ -5186,7 +5186,7 @@ impl ViewApp {
         painter.rect_stroke(
             rect,
             0.0,
-            Stroke::new(1.0, Color32::from_gray(60)),
+            Stroke::new(1.0_f32, Color32::from_gray(60)),
             StrokeKind::Inside,
         );
     }
@@ -5790,7 +5790,7 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
 /// so they read as one visual family.
 fn segmented_frame<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::default()
-        .stroke(Stroke::new(1.0, ui.visuals().widgets.inactive.bg_fill))
+        .stroke(Stroke::new(1.0_f32, ui.visuals().widgets.inactive.bg_fill))
         .corner_radius(8.0)
         .inner_margin(2.0)
         .show(ui, |ui| {
@@ -5806,7 +5806,7 @@ fn segmented_frame<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -
                 v.widgets.open.bg_stroke = Stroke::NONE;
                 // An open menu button reads like the selected segment.
                 v.widgets.open.weak_bg_fill = C_COPPER;
-                v.widgets.open.fg_stroke = Stroke::new(1.0, C_CANVAS);
+                v.widgets.open.fg_stroke = Stroke::new(1.0_f32, C_CANVAS);
                 // Selected segment (the mode picker's) reads brand copper.
                 v.selection.bg_fill = C_COPPER;
                 v.selection.stroke = Stroke::NONE;
@@ -5919,7 +5919,7 @@ fn eye_toggle(ui: &mut egui::Ui, visible: bool) -> egui::Response {
     // V1 (owner pick 2026-07-12): a THIN ring with a BIG dot — the original
     // wireframe glyph. The dot fills most of the ring when on, and vanishes
     // when off (the thin ring stays, dimmed, as the click target).
-    p.circle_stroke(c, 6.0, Stroke::new(1.1, ring));
+    p.circle_stroke(c, 6.0, Stroke::new(1.1_f32, ring));
     if visible {
         p.circle_filled(c, 3.6, C_COPPER);
     }
@@ -6046,7 +6046,7 @@ fn draw_measure_icon(p: &egui::Painter, r: Rect, col: Color32) {
         egui::pos2(r.min.x, r.center().y - r.height() * 0.20),
         egui::pos2(r.max.x, r.center().y + r.height() * 0.20),
     );
-    p.rect_stroke(bar, 1.0, Stroke::new(1.4, col), StrokeKind::Inside);
+    p.rect_stroke(bar, 1.0, Stroke::new(1.4_f32, col), StrokeKind::Inside);
     for i in 1..4 {
         let x = r.min.x + r.width() * (i as f32 / 4.0);
         p.line_segment(
@@ -6054,7 +6054,7 @@ fn draw_measure_icon(p: &egui::Painter, r: Rect, col: Color32) {
                 egui::pos2(x, bar.min.y),
                 egui::pos2(x, bar.min.y + r.height() * 0.16),
             ],
-            Stroke::new(1.2, col),
+            Stroke::new(1.2_f32, col),
         );
     }
 }
@@ -6065,21 +6065,21 @@ fn draw_export_icon(p: &egui::Painter, r: Rect, col: Color32) {
     let tip_y = r.center().y + r.height() * 0.10;
     p.line_segment(
         [egui::pos2(cx, r.min.y), egui::pos2(cx, tip_y)],
-        Stroke::new(1.6, col),
+        Stroke::new(1.6_f32, col),
     );
     let aw = r.width() * 0.20;
     let ah = r.height() * 0.16;
     p.line_segment(
         [egui::pos2(cx - aw, tip_y - ah), egui::pos2(cx, tip_y)],
-        Stroke::new(1.6, col),
+        Stroke::new(1.6_f32, col),
     );
     p.line_segment(
         [egui::pos2(cx + aw, tip_y - ah), egui::pos2(cx, tip_y)],
-        Stroke::new(1.6, col),
+        Stroke::new(1.6_f32, col),
     );
     p.line_segment(
         [egui::pos2(r.min.x, r.max.y), egui::pos2(r.max.x, r.max.y)],
-        Stroke::new(1.6, col),
+        Stroke::new(1.6_f32, col),
     );
 }
 
@@ -6628,7 +6628,7 @@ fn draw_grid_lines(
     if !px_per_line.is_finite() || px_per_line < 6.0 {
         return; // safety net only — the adaptive pitch already cleared MIN_GRID_PX
     }
-    let stroke = Stroke::new(1.0, color);
+    let stroke = Stroke::new(1.0_f32, color);
     // World coords visible at the rect edges (y is flipped on screen).
     let left = screen_to_world(cam, Pos2::new(rect.left(), rect.center().y), rect)[0];
     let right = screen_to_world(cam, Pos2::new(rect.right(), rect.center().y), rect)[0];
@@ -6693,7 +6693,7 @@ fn measure_label(painter: &egui::Painter, at: Pos2, text: &str, detail: &str) {
 fn draw_ruler(painter: &egui::Painter, a: Pos2, b: Pos2, label: &str, detail: &str) {
     painter.circle_filled(a, 3.0, C_COPPER);
     painter.circle_filled(b, 3.0, C_COPPER);
-    painter.line_segment([a, b], Stroke::new(1.5, C_COPPER));
+    painter.line_segment([a, b], Stroke::new(1.5_f32, C_COPPER));
     let mid = Pos2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let len = (dx * dx + dy * dy).sqrt().max(1.0);
