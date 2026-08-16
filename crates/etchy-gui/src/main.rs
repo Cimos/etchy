@@ -427,16 +427,20 @@ fn toggle_panel(current: Option<PanelTab>, clicked: PanelTab) -> Option<PanelTab
 
 /// The file names an export writes, in order, for the Export tab's preview.
 /// Mirrors [`ViewApp::build_export`]'s naming — an index-prefixed SVG per chosen
-/// layer plus a board-wide `areas.csv` — so the panel can show the set without
+/// layer plus a board-wide `areas.csv` and, when the noise filter is active, an
+/// `export-notes.txt` metadata file — so the panel can show the set without
 /// generating the (expensive) SVG content. `layer_names` are the display names of
 /// the layers that will be written, in export order. Pure → unit-testable. (#60)
-fn export_file_names(layer_names: &[String]) -> Vec<String> {
+fn export_file_names(layer_names: &[String], include_notes: bool) -> Vec<String> {
     let mut names: Vec<String> = layer_names
         .iter()
         .enumerate()
         .map(|(i, n)| format!("{i:02}-{n}.svg"))
         .collect();
     names.push("areas.csv".into());
+    if include_notes {
+        names.push("export-notes.txt".into());
+    }
     names
 }
 
@@ -1201,10 +1205,13 @@ impl Default for Camera {
 const SCALE_MIN: f64 = 1e-9;
 const SCALE_MAX: f64 = 1e3;
 
-/// Clamp a camera scale into `[SCALE_MIN, SCALE_MAX]`, mapping non-finite (NaN/±inf)
-/// and non-positive values to the floor so a bad zoom step can never corrupt the
-/// camera (#248).
+/// Clamp a camera scale into `[SCALE_MIN, SCALE_MAX]`. Positive infinity is a
+/// zoom-in overflow and therefore maps to the ceiling; NaN, negative infinity,
+/// and non-positive values map to the floor (#248/#290).
 fn clamp_scale(scale: f64) -> f64 {
+    if scale == f64::INFINITY {
+        return SCALE_MAX;
+    }
     if !scale.is_finite() || scale <= 0.0 {
         return SCALE_MIN;
     }
@@ -1643,16 +1650,19 @@ impl ViewApp {
                 content: svg.into_bytes(),
             });
         }
-        let mut csv = etchy_core::board_areas_csv(&self.diff);
-        if let Some(note) = &note {
-            // A leading `#` comment line documents that the CSV areas count every
-            // region, including those the Overlay view hides.
-            csv.insert_str(0, &format!("# {note}\n"));
-        }
+        let csv = etchy_core::board_areas_csv(&self.diff);
         files.push(exportio::ExportFile {
             name: "areas.csv".into(),
             content: csv.into_bytes(),
         });
+        if let Some(note) = &note {
+            // Keep areas.csv strictly tabular for standard CSV readers. Export
+            // context belongs in a separate metadata artifact (#290).
+            files.push(exportio::ExportFile {
+                name: "export-notes.txt".into(),
+                content: format!("{note}\n").into_bytes(),
+            });
+        }
         files
     }
 
@@ -3976,8 +3986,9 @@ impl ViewApp {
             .filter(|l| l.is_changed())
             .map(|l| l.name())
             .collect();
-        let current_files = export_file_names(&current_names);
-        let all_files = export_file_names(&changed_names);
+        let include_notes = self.min_area_mm2 > 0.0;
+        let current_files = export_file_names(&current_names, include_notes);
+        let all_files = export_file_names(&changed_names, include_notes);
         let status = self.export_msg.clone();
 
         let mut exp_current = false;
@@ -7418,8 +7429,11 @@ mod tests {
         // Runaway zoom-in toward infinity is capped.
         assert_eq!(clamp_scale(f64::MAX), SCALE_MAX);
         assert_eq!(clamp_scale(1e30), SCALE_MAX);
-        // Non-finite (a prior bad step) collapses to the floor, not inf/NaN.
-        assert_eq!(clamp_scale(f64::INFINITY), SCALE_MIN);
+        // Positive infinity is zoom-in overflow and must saturate at the ceiling;
+        // jumping to the floor would invert the zoom and destabilize its anchor
+        // correction (#290).
+        assert_eq!(clamp_scale(f64::INFINITY), SCALE_MAX);
+        // Other non-finite values collapse to the floor, not inf/NaN.
         assert_eq!(clamp_scale(f64::NEG_INFINITY), SCALE_MIN);
         assert_eq!(clamp_scale(f64::NAN), SCALE_MIN);
         // A negative scale is nonsensical (mirrors the view) — floored, never < 0.
@@ -7553,6 +7567,31 @@ mod tests {
             note.to_lowercase().contains("all diff regions"),
             "states the export includes all diff regions: {note}"
         );
+    }
+
+    #[test]
+    fn filtered_export_keeps_csv_header_first_and_writes_separate_notes() {
+        use super::ViewApp;
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.min_area_mm2 = 0.0004;
+
+        let files = app.build_export(false);
+        let csv = files
+            .iter()
+            .find(|file| file.name == "areas.csv")
+            .expect("areas.csv is always exported");
+        let csv = std::str::from_utf8(&csv.content).expect("CSV is UTF-8");
+        assert_eq!(
+            csv.lines().next(),
+            Some("layer,old_copper_mm2,new_copper_mm2,added_mm2,removed_mm2")
+        );
+
+        let notes = files
+            .iter()
+            .find(|file| file.name == "export-notes.txt")
+            .expect("active filter writes separate metadata");
+        let notes = std::str::from_utf8(&notes.content).expect("notes are UTF-8");
+        assert!(notes.contains("0.0004"));
     }
 
     #[test]
@@ -8404,21 +8443,22 @@ mod tests {
         // display name don't clobber each other) plus a trailing `areas.csv`.
         let names = vec!["top-copper".to_string(), "inner-copper1".to_string()];
         assert_eq!(
-            export_file_names(&names),
+            export_file_names(&names, true),
             vec![
                 "00-top-copper.svg".to_string(),
                 "01-inner-copper1.svg".to_string(),
                 "areas.csv".to_string(),
+                "export-notes.txt".to_string(),
             ]
         );
 
         // No layers (e.g. nothing changed, or none selected) still writes the CSV.
-        assert_eq!(export_file_names(&[]), vec!["areas.csv".to_string()]);
+        assert_eq!(export_file_names(&[], false), vec!["areas.csv".to_string()]);
 
         // Same display name twice → distinct index-prefixed files.
         let dup = vec!["other".to_string(), "other".to_string()];
         assert_eq!(
-            export_file_names(&dup),
+            export_file_names(&dup, false),
             vec![
                 "00-other.svg".to_string(),
                 "01-other.svg".to_string(),
