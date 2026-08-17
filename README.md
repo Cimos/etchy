@@ -46,7 +46,7 @@ add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
 
 ```yaml
-      - uses: Cimos/etchy@main
+      - uses: Cimos/etchy@v0.1.0
         with:
           old: fab/rev-a
           new: fab/rev-b
@@ -66,9 +66,18 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 
 ## Install
 
-- **Prebuilt binaries** — download the archive for your OS from
-  [Releases](../../releases) (Linux static-musl, macOS x86_64/arm64, Windows) and
-  verify it against `SHA256SUMS`.
+- **Prebuilt binaries (recommended)** — download the archive for your OS from
+  the Releases page (Linux static-musl, macOS x86_64/arm64, Windows). Each
+  release includes a `SHA256SUMS` file you should verify:
+
+  1. Download the archive matching your platform and the `SHA256SUMS` file from Releases (e.g. v0.1.0).
+  2. Verify locally:
+
+     ```sh
+     sha256sum --check SHA256SUMS  # on Linux/macOS
+     ```
+
+  If you prefer not to use the published archives, build from source (see below).
 - **Container** (headless CLI, distroless, ~11 MB) — build it locally:
 
   ```sh
@@ -113,9 +122,7 @@ ingestion is an accepted post-1.0 goal ([#122](../../issues/122)); KiCad
 - [`docs/PRODUCT_DISCOVERY.md`](docs/PRODUCT_DISCOVERY.md) — the requirements interview behind every decision.
 - [`deploy/SETUP.md`](deploy/SETUP.md) — stand up the hosted web demo + feedback widget on a new machine.
 
-> ⚠ **Before making this repo public**, work through [`PRE_PUBLIC.md`](PRE_PUBLIC.md) —
-> notably, demo feedback under `deploy/feedback/` contains tester IP/UA/names that
-> must be scrubbed first.
+> ⚠ **Before making this repo public**, work through [`PRE_PUBLIC.md`] — notably, demo feedback under `deploy/feedback/` contains tester IP/UA/names that must be scrubbed first.
 
 ## Workspace
 
