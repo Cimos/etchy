@@ -212,6 +212,8 @@ pub fn coordinate_mismatch_warning(old: &GerberFormat, new: &GerberFormat) -> Op
 /// codes `G70/G71/G90` (units come from `%MO`); strip the deprecated `G54`
 /// aperture-select prefix. Fails loud on `G91` (incremental coordinates), which
 /// would otherwise be a silent misread. `%…%` extended blocks pass through intact.
+/// A command that never gets its `*` — before a `%` block or at end of file — is a
+/// parse error, not a silent drop (#313): losing it would delete a flash or draw.
 fn normalize(bytes: &[u8]) -> Result<String> {
     let text = String::from_utf8_lossy(bytes);
     let mut out = String::with_capacity(text.len());
@@ -231,6 +233,7 @@ fn normalize(bytes: &[u8]) -> Result<String> {
         }
         match ch {
             '%' => {
+                check_terminated(&buf, "before '%'")?;
                 buf.clear();
                 buf.push('%');
                 in_ext = true;
@@ -246,7 +249,37 @@ fn normalize(bytes: &[u8]) -> Result<String> {
             _ => buf.push(ch),
         }
     }
+    if in_ext {
+        return Err(EngineError::Parse(format!(
+            "unterminated extended command block at end of file: {}",
+            excerpt(buf.trim())
+        )));
+    }
+    check_terminated(&buf, "at end of file")?;
     Ok(out)
+}
+
+/// Fail loud if `buf` still holds a command that never received its `*` (#313).
+/// Whitespace alone is fine — blank lines between commands are legitimate.
+fn check_terminated(buf: &str, place: &str) -> Result<()> {
+    let tok = buf.trim();
+    if tok.is_empty() {
+        return Ok(());
+    }
+    Err(EngineError::Parse(format!(
+        "unterminated command {place}: {}",
+        excerpt(tok)
+    )))
+}
+
+/// First 40 chars of `s` for an error message (char-boundary safe).
+fn excerpt(s: &str) -> String {
+    const MAX: usize = 40;
+    let mut e: String = s.chars().take(MAX).collect();
+    if s.chars().count() > MAX {
+        e.push('…');
+    }
+    e
 }
 
 fn emit_command(tok: &str, out: &mut String) -> Result<()> {
@@ -1017,6 +1050,68 @@ mod tests {
             3,
             "all three compact-line flashes must render"
         );
+    }
+
+    #[test]
+    fn unterminated_command_before_extended_block_fails_loud() {
+        // A flash missing its `*` right before a `%LP` block used to be silently
+        // discarded (#313): the layer resolved Ok with the pad gone. Must fail loud.
+        let g = format!("{HDR}X0Y0D03%LPC*%\nM02*\n");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::Parse(msg)) => {
+                assert!(
+                    msg.contains("unterminated") && msg.contains("X0Y0D03"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_command_at_eof_fails_loud() {
+        // Same silent drop at end of file: a final flash with no `*` (#313).
+        let g = format!("{HDR}X0Y0D03*\nX5Y5D03");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::Parse(msg)) => {
+                assert!(
+                    msg.contains("unterminated") && msg.contains("X5Y5D03"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unclosed_extended_block_at_eof_fails_loud() {
+        // An extended block opened with `%` and never closed was dropped too (#313).
+        let g = format!("{HDR}X0Y0D03*\n%LPC*");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::Parse(msg)) => {
+                assert!(
+                    msg.contains("unterminated") && msg.contains("%LPC"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_whitespace_after_m02_still_resolves() {
+        // Blank lines, spaces and tabs after the final `M02*` are not a command (#313).
+        let g = format!("{HDR}X0Y0D03*\nM02*\n\n  \n\t\n   ");
+        let ps = resolve_layer(g.as_bytes()).expect("trailing whitespace must be fine");
+        assert_eq!(ps.region_count(), 1);
+    }
+
+    #[test]
+    fn crlf_line_endings_still_resolve() {
+        // Windows exports: CRLF between every command, including after `M02*` (#313).
+        let g = "%FSLAX46Y46*%\r\n%MOMM*%\r\n%ADD10C,0.5*%\r\nD10*\r\nX0Y0D03*\r\nM02*\r\n";
+        let ps = resolve_layer(g.as_bytes()).expect("CRLF file must resolve");
+        assert_eq!(ps.region_count(), 1);
     }
 
     #[test]
