@@ -1244,6 +1244,23 @@ impl LoadedSource {
     }
 }
 
+/// What one drop or file pick resolved to (#325). Usually a single source for
+/// the side the gesture targeted; exactly two fab packs dropped together fill
+/// both sides at once (old = first by name, new = second) instead of one of them
+/// silently winning.
+enum DroppedSources {
+    One(LoadedSource),
+    Pair {
+        old: LoadedSource,
+        new: LoadedSource,
+    },
+}
+
+/// The one message for every ambiguous multi-pack drop (#325): shown verbatim
+/// so the user learns the accepted shapes instead of guessing why nothing loaded.
+const DROP_SHAPE_HINT: &str =
+    "drop one fab pack per side: either one zip, or two zips for old and new, or loose layer files";
+
 /// The computed comparison of two sources: a geometric board diff, or a per-page
 /// PDF pixel diff (#63).
 enum ComputedDiff {
@@ -1286,7 +1303,7 @@ enum RevSide {
 #[cfg(target_arch = "wasm32")]
 struct FilePick {
     side: RevSide,
-    result: anyhow::Result<LoadedSource>,
+    result: anyhow::Result<DroppedSources>,
 }
 
 /// Default Focus (#224): a gentle highlight — non-selected layers at 75% so the
@@ -2542,6 +2559,18 @@ impl ViewApp {
         }
     }
 
+    /// Place what a drop or pick resolved to (#325): one source goes to `side`;
+    /// a pair fills old and new together and re-diffs once.
+    fn adopt_sources(&mut self, side: RevSide, sources: DroppedSources) {
+        match sources {
+            DroppedSources::One(src) => self.set_side(side, src),
+            DroppedSources::Pair { old, new } => {
+                self.src_old = Some(old);
+                self.set_side(RevSide::New, new);
+            }
+        }
+    }
+
     /// Recompute the comparison from the two sources, if both are present.
     fn rebuild_diff(&mut self) {
         let (Some(o), Some(n)) = (self.src_old.as_ref(), self.src_new.as_ref()) else {
@@ -2586,7 +2615,7 @@ impl ViewApp {
     fn poll_file_picks(&mut self) {
         while let Ok(pick) = self.file_rx.try_recv() {
             match pick.result {
-                Ok(loaded) => self.set_side(pick.side, loaded),
+                Ok(loaded) => self.adopt_sources(pick.side, loaded),
                 Err(e) => self.load_error = Some(format!("{e:#}")),
             }
         }
@@ -2673,15 +2702,15 @@ impl ViewApp {
             return;
         }
         match load_dropped_paths(&paths) {
-            Ok(loaded) => self.set_side(side, loaded),
+            Ok(loaded) => self.adopt_sources(side, loaded),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     fn load_dropped(&mut self, side: RevSide, files: Vec<egui::DroppedFile>) {
-        // Web drops carry bytes; the shared classifier routes a `.zip`, a
-        // schematic `.pdf` (#63), or loose Gerber layers.
+        // Web drops carry bytes; the shared classifier routes a `.zip` (or a
+        // pair of them, #325), a schematic `.pdf` (#63), or loose Gerber layers.
         let byte_files: Vec<(String, Vec<u8>)> = files
             .into_iter()
             .filter_map(|f| f.bytes.map(|b| (basename(&f.name), b.to_vec())))
@@ -2689,8 +2718,8 @@ impl ViewApp {
         if byte_files.is_empty() {
             return;
         }
-        match files_to_source(byte_files, "dropped files") {
-            Ok(src) => self.set_side(side, src),
+        match files_to_sources(byte_files, "dropped files") {
+            Ok(src) => self.adopt_sources(side, src),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
@@ -2746,7 +2775,7 @@ impl ViewApp {
             }
             let result = match oversized {
                 Some(e) => Err(e),
-                None => files_to_source(byte_files, "uploaded"),
+                None => files_to_sources(byte_files, "uploaded"),
             };
             let _ = tx.send(FilePick { side, result });
             ctx.request_repaint();
@@ -2918,13 +2947,14 @@ fn basename(name: &str) -> String {
     name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
 }
 
-/// Classify a set of in-memory `(filename, bytes)` files into one loaded source
-/// (#63): a single schematic PDF (by `.pdf` name or `%PDF` magic) → PDF mode; a
-/// `.zip` → the fab-pack loader; anything else → loose Gerber layers. A PDF mixed
-/// with other files is a loud error — one PDF per side, never a guess. Shared by
-/// the web drop and web file-pick paths; pure over bytes, so it's unit-tested on
-/// native too.
-fn files_to_source(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<LoadedSource> {
+/// Classify a set of in-memory `(filename, bytes)` files into loaded sources
+/// (#63, #325): a single schematic PDF (by `.pdf` name or `%PDF` magic) → PDF
+/// mode; one `.zip` → the fab-pack loader; exactly two `.zip`s and nothing else →
+/// a pair, old = first by name; anything else → loose Gerber layers. A PDF mixed
+/// with other files, more than two zips, or a zip beside loose layers is a loud
+/// error — never a guess about which pack the user meant. Shared by the web drop
+/// and web file-pick paths; pure over bytes, so it's unit-tested on native too.
+fn files_to_sources(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<DroppedSources> {
     let pdf_count = files
         .iter()
         .filter(|(name, bytes)| {
@@ -2941,27 +2971,59 @@ fn files_to_source(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result
         if !pdfview::looks_like_pdf(&bytes) {
             anyhow::bail!("{name} has a .pdf name but no PDF content (%PDF magic missing)");
         }
-        return Ok(LoadedSource::Pdf(LoadedPdf { label: name, bytes }));
+        return Ok(DroppedSources::One(LoadedSource::Pdf(LoadedPdf {
+            label: name,
+            bytes,
+        })));
     }
     let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut zip: Option<Vec<u8>> = None;
+    let mut zips: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, bytes) in files {
         if name.to_ascii_lowercase().ends_with(".zip") {
-            zip = Some(bytes);
+            zips.push((name, bytes));
         } else {
             byte_files.push((name, bytes));
         }
     }
-    let (board, fmt) = if let Some(zb) = zip {
-        loader::load_zip(zb)
-    } else {
-        loader::board_from_bytes(byte_files)
-    }?;
-    Ok(LoadedSource::Board(LoadedBoard {
-        label: label.to_string(),
-        board,
-        fmt,
-    }))
+    let board_source =
+        |board, fmt, label: String| LoadedSource::Board(LoadedBoard { label, board, fmt });
+    match (zips.len(), byte_files.is_empty()) {
+        (0, _) => {
+            let (board, fmt) = loader::board_from_bytes(byte_files)?;
+            Ok(DroppedSources::One(board_source(
+                board,
+                fmt,
+                label.to_string(),
+            )))
+        }
+        (1, true) => {
+            let (_, bytes) = zips.pop().expect("len checked above");
+            let (board, fmt) = loader::load_zip(bytes)?;
+            Ok(DroppedSources::One(board_source(
+                board,
+                fmt,
+                label.to_string(),
+            )))
+        }
+        (2, true) => {
+            // Two packs at once fill both sides (#325); name order decides
+            // which is old so the same drop always lands the same way.
+            zips.sort_by(|a, b| a.0.cmp(&b.0));
+            let (new_name, new_bytes) = zips.pop().expect("len checked above");
+            let (old_name, old_bytes) = zips.pop().expect("len checked above");
+            let (ob, of) = loader::load_zip(old_bytes)?;
+            let (nb, nf) = loader::load_zip(new_bytes)?;
+            Ok(DroppedSources::Pair {
+                old: board_source(ob, of, old_name),
+                new: board_source(nb, nf, new_name),
+            })
+        }
+        (n, true) => anyhow::bail!("{n} zip files dropped together — {DROP_SHAPE_HINT}"),
+        (_, false) => anyhow::bail!(
+            "a zip was dropped beside {} loose layer file(s) — {DROP_SHAPE_HINT}",
+            byte_files.len()
+        ),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3026,22 +3088,39 @@ fn load_source_any(path: &std::path::Path, label: String) -> anyhow::Result<Load
     Ok(LoadedSource::Board(LoadedBoard { label, board, fmt }))
 }
 
-/// Native: turn dropped paths into a loaded source. A single dropped folder,
-/// `.zip`, or schematic `.pdf` (#63) loads directly; multiple dropped files are
-/// read as individual layers (a PDF among them is a loud error via
-/// `files_to_source` — one PDF per side).
+/// Native: is this path a whole fab pack — a Gerber folder or a `.zip`?
 #[cfg(not(target_arch = "wasm32"))]
-fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSource> {
+fn is_fab_pack(p: &std::path::Path) -> bool {
+    p.is_dir()
+        || p.extension()
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false)
+}
+
+/// Native: turn dropped paths into loaded sources. A single dropped folder,
+/// `.zip`, or schematic `.pdf` (#63) loads directly; exactly two folders or
+/// `.zip`s fill both sides, old = first by name (#325); any other multi-path
+/// drop is read as individual layers (a PDF or a fab pack among them is a loud
+/// error via `files_to_sources` — one PDF per side, one pack per side).
+#[cfg(not(target_arch = "wasm32"))]
+fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSources> {
     use anyhow::Context as _;
     if paths.len() == 1 {
         let p = &paths[0];
-        let is_zip = p
-            .extension()
-            .map(|e| e.eq_ignore_ascii_case("zip"))
-            .unwrap_or(false);
-        if p.is_dir() || is_zip || is_pdf_input(p) {
-            return load_source_any(p, path_label(p));
+        if is_fab_pack(p) || is_pdf_input(p) {
+            return load_source_any(p, path_label(p)).map(DroppedSources::One);
         }
+    }
+    if paths.len() == 2 && paths.iter().all(|p| is_fab_pack(p)) {
+        let mut pair: Vec<(String, &std::path::PathBuf)> =
+            paths.iter().map(|p| (path_label(p), p)).collect();
+        pair.sort_by(|a, b| a.0.cmp(&b.0));
+        let old = load_source_any(pair[0].1, pair[0].0.clone())?;
+        let new = load_source_any(pair[1].1, pair[1].0.clone())?;
+        return Ok(DroppedSources::Pair { old, new });
+    }
+    if paths.iter().any(|p| p.is_dir()) {
+        anyhow::bail!("a folder was dropped beside other files — {DROP_SHAPE_HINT}");
     }
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
     let mut total: u64 = 0;
@@ -3066,7 +3145,7 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSour
         let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
         files.push((path_label(p), bytes));
     }
-    files_to_source(files, &format!("{} files", paths.len()))
+    files_to_sources(files, &format!("{} files", paths.len()))
 }
 
 impl ViewApp {
@@ -6881,11 +6960,33 @@ mod tests {
         assert!(err.contains("per-file limit"), "got: {err}");
     }
 
+    /// Classify and expect a single source (the common shape).
+    fn one(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<super::LoadedSource> {
+        use super::DroppedSources;
+        match super::files_to_sources(files, label)? {
+            DroppedSources::One(src) => Ok(src),
+            DroppedSources::Pair { .. } => panic!("expected one source, got a pair"),
+        }
+    }
+
+    /// A minimal single-layer fab pack as zip bytes, for the two-zip drop tests.
+    fn zip_pack(layer_name: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zw.start_file(
+            layer_name,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zw.write_all(MIN_GERBER).unwrap();
+        zw.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn files_to_source_routes_a_single_pdf_to_pdf_mode() {
-        use super::{files_to_source, LoadedSource};
-        let src =
-            files_to_source(vec![("sch.pdf".into(), b"%PDF-1.7 junk".to_vec())], "up").unwrap();
+        use super::LoadedSource;
+        let src = one(vec![("sch.pdf".into(), b"%PDF-1.7 junk".to_vec())], "up").unwrap();
         match src {
             LoadedSource::Pdf(p) => {
                 assert_eq!(p.label, "sch.pdf", "PDF keeps its file name as label");
@@ -6898,8 +6999,7 @@ mod tests {
     #[test]
     fn files_to_source_rejects_pdf_mixed_with_layers() {
         // Trust: a PDF among Gerber layers is a loud error, never a guess.
-        use super::files_to_source;
-        let err = match files_to_source(
+        let err = match one(
             vec![
                 ("sch.pdf".into(), b"%PDF-1.7".to_vec()),
                 ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
@@ -6914,8 +7014,7 @@ mod tests {
 
     #[test]
     fn files_to_source_rejects_a_pdf_named_file_without_pdf_content() {
-        use super::files_to_source;
-        let err = match files_to_source(vec![("sch.pdf".into(), b"not a pdf".to_vec())], "up") {
+        let err = match one(vec![("sch.pdf".into(), b"not a pdf".to_vec())], "up") {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a mislabelled .pdf must fail loud"),
         };
@@ -6924,8 +7023,8 @@ mod tests {
 
     #[test]
     fn files_to_source_still_loads_gerber_layers() {
-        use super::{files_to_source, LoadedSource};
-        let src = files_to_source(
+        use super::LoadedSource;
+        let src = one(
             vec![("board-F_Cu.gtl".into(), MIN_GERBER.to_vec())],
             "uploaded",
         )
@@ -6936,6 +7035,105 @@ mod tests {
                 assert_eq!(b.board.layers.len(), 1);
             }
             LoadedSource::Pdf(_) => panic!("gerber layers must stay on the board path"),
+        }
+    }
+
+    // #325: one zip is one source, as before.
+    #[test]
+    fn files_to_sources_loads_one_zip() {
+        use super::LoadedSource;
+        let src = one(
+            vec![("rev-A.zip".into(), zip_pack("a-F_Cu.gtl"))],
+            "dropped files",
+        )
+        .unwrap();
+        match src {
+            LoadedSource::Board(b) => {
+                assert_eq!(b.label, "dropped files");
+                assert_eq!(b.board.layers.len(), 1);
+            }
+            LoadedSource::Pdf(_) => panic!("a zip must stay on the board path"),
+        }
+    }
+
+    // #325: two zips dropped together fill both sides, old = first by name —
+    // regardless of the order the OS handed them over.
+    #[test]
+    fn files_to_sources_two_zips_become_a_pair_in_name_order() {
+        use super::{files_to_sources, DroppedSources};
+        let src = files_to_sources(
+            vec![
+                ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
+                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+            ],
+            "dropped files",
+        )
+        .unwrap();
+        match src {
+            DroppedSources::Pair { old, new } => {
+                assert_eq!(old.label(), "rev-A.zip");
+                assert_eq!(new.label(), "rev-B.zip");
+            }
+            DroppedSources::One(_) => panic!("two zips must load both sides, not one"),
+        }
+    }
+
+    // #325: three zips is ambiguous — fail loud, never pick two.
+    #[test]
+    fn files_to_sources_rejects_three_zips() {
+        use super::files_to_sources;
+        let err = match files_to_sources(
+            vec![
+                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+                ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
+                ("rev-C.zip".into(), zip_pack("c-F_Cu.gtl")),
+            ],
+            "dropped files",
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("three zips must fail loud"),
+        };
+        assert!(err.contains("3 zip files"), "got: {err}");
+        assert!(err.contains("one fab pack per side"), "got: {err}");
+    }
+
+    // #325: a zip beside loose layers used to drop the layers silently.
+    #[test]
+    fn files_to_sources_rejects_zip_mixed_with_loose_layers() {
+        use super::files_to_sources;
+        let err = match files_to_sources(
+            vec![
+                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+                ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
+            ],
+            "dropped files",
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a zip beside loose layers must fail loud"),
+        };
+        assert!(err.contains("beside 1 loose layer"), "got: {err}");
+        assert!(err.contains("one fab pack per side"), "got: {err}");
+    }
+
+    // #325 native: two dropped zip paths load both sides, old = first by name.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropped_two_zip_paths_fill_both_sides() {
+        use super::{load_dropped_paths, DroppedSources};
+        let dir = std::env::temp_dir().join(format!("etchy-drop-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("rev-A.zip");
+        let b = dir.join("rev-B.zip");
+        std::fs::write(&a, zip_pack("a-F_Cu.gtl")).unwrap();
+        std::fs::write(&b, zip_pack("b-F_Cu.gtl")).unwrap();
+        let res = load_dropped_paths(&[b, a]);
+        std::fs::remove_dir_all(&dir).ok();
+        match res.unwrap() {
+            DroppedSources::Pair { old, new } => {
+                assert_eq!(old.label(), "rev-A.zip");
+                assert_eq!(new.label(), "rev-B.zip");
+            }
+            DroppedSources::One(_) => panic!("two dropped zips must load both sides"),
         }
     }
 
