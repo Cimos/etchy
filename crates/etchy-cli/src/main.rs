@@ -60,7 +60,7 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Summary)]
     format: Format,
     /// Deprecated alias for `--format json`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "format")]
     json: bool,
     /// Write a per-layer SVG of the diff into this directory: one `<layer>.svg`
     /// per changed layer (base faint grey, removed red, added green). The
@@ -834,7 +834,20 @@ fn status_str(s: etchy_core::LayerStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
     use etchy_core::LayerReport;
+
+    #[test]
+    fn deprecated_json_flag_conflicts_with_explicit_format() {
+        let err = Cli::try_parse_from(["etchy", "old", "new", "--json", "--format", "md"])
+            .expect_err("--json and --format must conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+
+        let cli = Cli::try_parse_from(["etchy", "old", "new", "--json"])
+            .expect("--json alone must remain valid");
+        assert!(cli.json);
+        assert_eq!(cli.format, Format::Summary);
+    }
 
     fn layer(kind: &'static str, area_mm2: f64, regions: u32) -> LayerReport {
         LayerReport {
