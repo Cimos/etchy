@@ -138,7 +138,7 @@ docker run --rm -v "$PWD:/work" etchy --format summary -- /work/old /work/new</p
   <section id="cli">
     <span class="eyebrow">CLI usage</span>
     <h2>Run a diff</h2>
-    <p>Point etchy at two directories of fab output. Layers are paired by filename, so both revisions must use the same Gerber filenames.</p>
+    <p>Point etchy at two directories of fab output. Layers are paired by kind, such as top copper or inner copper 1, so filenames may differ between revisions. When several files have the same kind, exact filename matches come first; remaining files pair in stack order only when their board extents plausibly overlap.</p>
     <pre class="code"><span class="k">etchy</span> &lt;old&gt; &lt;new&gt;                  <span class="c"># human-readable per-layer summary</span>
 <span class="k">etchy</span> &lt;old&gt; &lt;new&gt; --format json    <span class="c"># machine-readable report on stdout</span></pre>
     <p>The summary lists each layer with changed area (mm²) and region counts. This is the real output on the two board revisions bundled in the repo:</p>
