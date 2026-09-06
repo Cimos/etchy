@@ -30,19 +30,21 @@ use crate::geom;
 /// pass even runs (#83). We fail loud at this bound instead of grinding or
 /// OOM-ing. Set generously so legitimate dense/curvy boards never trip it;
 /// lowered under test so the guard can be exercised without huge allocations.
+/// Shared with the Excellon front-end (`R` repeat codes, #308) so one layer means
+/// one budget regardless of format.
 #[cfg(not(test))]
-const MAX_CONTOURS_PER_LAYER: usize = 5_000_000;
+pub(crate) const MAX_CONTOURS_PER_LAYER: usize = 5_000_000;
 #[cfg(test)]
-const MAX_CONTOURS_PER_LAYER: usize = 5_000;
+pub(crate) const MAX_CONTOURS_PER_LAYER: usize = 5_000;
 
 /// Per-layer total-point ceiling (#83). The contour count alone doesn't bound
 /// this — one region loop or a near-full arc can carry thousands of points, so a
 /// handful of contours can still amplify into a huge point set (and a slow/greedy
 /// boolean pass). Fail loud once the summed vertex count crosses the bound.
 #[cfg(not(test))]
-const MAX_POINTS_PER_LAYER: usize = 20_000_000;
+pub(crate) const MAX_POINTS_PER_LAYER: usize = 20_000_000;
 #[cfg(test)]
-const MAX_POINTS_PER_LAYER: usize = 30_000;
+pub(crate) const MAX_POINTS_PER_LAYER: usize = 30_000;
 
 /// Per-layer polarity-span ceiling (#83). Each span is one boolean pass over the
 /// accumulated geometry, so a file that toggles `%LP` on every object turns the
