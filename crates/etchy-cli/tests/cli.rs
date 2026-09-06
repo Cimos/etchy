@@ -152,6 +152,41 @@ fn closed_stdout_pipe_does_not_panic() {
 }
 
 #[test]
+fn separator_only_gate_layers_is_an_error() {
+    let root = scratch("gate-layers-separators");
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+
+    // A real change on copper. `--gate-layers ,` used to parse to a filter that
+    // matched no layer, so this pair passed the gate and exited 0 (#294). It
+    // must be a loud exit 2 before the diff even runs.
+    write_layer(&old, "F_Cu.gbr", "");
+    write_layer(&new, "F_Cu.gbr", "X25000000Y25000000D03*\n");
+
+    let out = etchy()
+        .arg("--gate-layers")
+        .arg(",")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "separator-only --gate-layers should exit 2"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--gate-layers has no groups"),
+        "stderr: {stderr}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn unsupported_geometry_fails_loud() {
     let root = scratch("unsupported");
     let old = root.join("old");
