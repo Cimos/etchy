@@ -996,6 +996,20 @@ fn restore_visibility(saved: &[usize], n: usize) -> Vec<bool> {
     vis
 }
 
+/// Stable identity of a board's layer stack for the persisted per-index settings
+/// (#327). `visible_layers` and `base_overrides` are indices into the layer list of
+/// whatever board was open when the settings were saved; they only mean the same
+/// thing on a board with the same stack. The key is the ordered list of layer tags
+/// (`kind_str` plus the inner-copper index), so it is independent of the Rust repr
+/// and of file names, and two revisions of the same board produce the same key.
+fn board_key(diff: &BoardDiff) -> String {
+    diff.layers
+        .iter()
+        .map(|l| l.name())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// The indices of the set bits in a visibility vector, in order (for the GeomKey
 /// and for persistence).
 fn visible_indices(visible: &[bool]) -> Vec<usize> {
@@ -2251,6 +2265,11 @@ struct Settings {
     /// Indices of the layers that were visible (#58/#59), restored on next open
     /// (#52). Empty = fall back to the on-load default (changed layers + selected).
     visible_layers: Vec<usize>,
+    /// The layer stack the per-index fields (`visible_layers`, `base_overrides`)
+    /// belong to (#327), as [`board_key`] of the board open at save time. They are
+    /// restored only onto a board with the same key; `None` (a pre-#327 config)
+    /// restores neither.
+    board_key: Option<String>,
     /// Swipe/curtain divider position, normalized 0..1 (#61).
     swipe_frac: f32,
     /// Which edge the activity rail lives on (Feature 8).
@@ -2277,6 +2296,7 @@ impl Default for Settings {
             grid_light: color_to_rgba(C_GRID_DEFAULT_LIGHT),
             input_preset: InputPreset::default(),
             visible_layers: Vec::new(),
+            board_key: None,
             swipe_frac: 0.5,
             rail_side: RailSide::default(),
             keymap: Keymap::default(),
@@ -2429,6 +2449,7 @@ impl ViewApp {
             grid_light: color_to_rgba(self.grid_light),
             input_preset: self.input_preset,
             visible_layers: visible_indices(&self.visible_layers),
+            board_key: Some(board_key(&self.diff)),
             swipe_frac: self.swipe_frac,
             rail_side: self.rail_side,
             keymap: self.keymap,
@@ -2450,11 +2471,19 @@ impl ViewApp {
         // Any persisted DPI is honoured within sane raster bounds; the chips
         // only ever write PDF_DPI_CHOICES values.
         self.pdf_dpi = s.pdf_dpi.clamp(72.0, 600.0);
-        self.base_overrides = s
-            .base_overrides
-            .into_iter()
-            .map(|(i, c)| (i, rgba_to_color(c)))
-            .collect();
+        // The per-index fields are only meaningful on the board they were saved
+        // from (#327): a different stack gets the on-load defaults instead of
+        // another board's indices landing on the wrong layers (or on none).
+        let same_board = s.board_key.as_deref() == Some(board_key(&self.diff).as_str());
+        if same_board {
+            self.base_overrides = s
+                .base_overrides
+                .into_iter()
+                .map(|(i, c)| (i, rgba_to_color(c)))
+                .collect();
+        } else {
+            self.base_overrides.clear();
+        }
         self.min_area_mm2 = s.min_area_mm2;
         self.col_added = rgba_to_color(s.col_added);
         self.col_removed = rgba_to_color(s.col_removed);
@@ -2464,11 +2493,15 @@ impl ViewApp {
         self.grid_light = rgba_to_color(s.grid_light);
         self.input_preset = s.input_preset;
         // Restore the visible set (#58/#59) over the current layer count, dropping
-        // stale indices. An empty saved set keeps the on-load default.
-        if !s.visible_layers.is_empty() {
+        // stale indices. An empty saved set keeps the on-load default, and so does
+        // a set saved on a different board (#327).
+        if same_board && !s.visible_layers.is_empty() {
             // Selection is separate from visibility (#224): the restored eye
             // state is honoured as-is, even if it hides the selected layer.
             self.visible_layers = restore_visibility(&s.visible_layers, self.visible_layers.len());
+        } else if !same_board {
+            self.visible_layers =
+                default_visible(self.diff.layers.len(), self.selected, self.outline);
         }
         self.swipe_frac = clamp_swipe_frac(s.swipe_frac);
         self.rail_side = s.rail_side;
@@ -8457,6 +8490,7 @@ mod tests {
             grid_light: [138, 102, 34, 70],
             input_preset: InputPreset::KiCad,
             visible_layers: vec![0, 2, 5],
+            board_key: Some("top-copper,inner-copper1,inner-copper2,bottom-copper,outline".into()),
             swipe_frac: 0.42,
             rail_side: RailSide::Right,
             keymap,
@@ -8971,5 +9005,144 @@ mod tests {
         fresh.visible_layers = vec![false, false, false, false];
         fresh.apply_settings(settings);
         assert_eq!(fresh.visible_layers, vec![true, false, true, false]);
+    }
+
+    /// A board diff with the given layer stack and no geometry, for the per-board
+    /// settings tests (#327). `ViewApp::new` only reads `layers`.
+    fn diff_with_kinds(kinds: &[LayerKind]) -> super::BoardDiff {
+        use etchy_core::{LayerChange, LayerStatus, LayerView, PolygonSet};
+        let layers = kinds
+            .iter()
+            .map(|&kind| LayerView {
+                kind,
+                label_old: None,
+                label_new: None,
+                status: LayerStatus::Unchanged,
+                old: std::sync::Arc::new(PolygonSet::default()),
+                new: std::sync::Arc::new(PolygonSet::default()),
+                added: PolygonSet::default(),
+                removed: PolygonSet::default(),
+                change: LayerChange::default(),
+            })
+            .collect();
+        super::BoardDiff {
+            report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
+            layers,
+        }
+    }
+
+    /// The six-layer board from the #327 report: the user hides everything but
+    /// inner-3 (index 5).
+    const BOARD_X: [LayerKind; 7] = [
+        LayerKind::TopCopper,
+        LayerKind::Outline,
+        LayerKind::InnerCopper(1),
+        LayerKind::InnerCopper(2),
+        LayerKind::BottomCopper,
+        LayerKind::InnerCopper(3),
+        LayerKind::TopMask,
+    ];
+
+    /// A different, four-layer board: index 5 does not exist and index 2 is a
+    /// different layer kind.
+    const BOARD_Y: [LayerKind; 4] = [
+        LayerKind::TopCopper,
+        LayerKind::BottomCopper,
+        LayerKind::Outline,
+        LayerKind::TopSilk,
+    ];
+
+    #[test]
+    fn board_key_is_the_ordered_layer_tags() {
+        use super::board_key;
+        assert_eq!(
+            board_key(&diff_with_kinds(&BOARD_Y)),
+            "top-copper,bottom-copper,outline,top-silk"
+        );
+        // Inner index and drill plating are part of the identity; order matters.
+        assert_eq!(
+            board_key(&diff_with_kinds(&[
+                LayerKind::InnerCopper(2),
+                LayerKind::Drill(etchy_core::DrillKind::Plated),
+            ])),
+            "inner-copper2,drill-pth"
+        );
+        assert_ne!(
+            board_key(&diff_with_kinds(&[
+                LayerKind::TopCopper,
+                LayerKind::Outline
+            ])),
+            board_key(&diff_with_kinds(&[
+                LayerKind::Outline,
+                LayerKind::TopCopper
+            ]))
+        );
+        assert_eq!(board_key(&empty_diff()), "");
+    }
+
+    #[test]
+    fn settings_from_another_board_fall_back_to_the_defaults() {
+        use super::{default_visible, ViewApp};
+        use egui::Color32;
+        // Board X: hide everything but inner-3 (index 5), recolour index 2.
+        let mut x = ViewApp::new(diff_with_kinds(&BOARD_X), "old".into(), "new".into());
+        x.visible_layers = vec![false, false, false, false, false, true, false];
+        x.base_overrides = vec![(2, Color32::from_rgb(20, 21, 22))];
+        x.theme = Theme::Light;
+        let settings = x.to_settings();
+        assert_eq!(settings.visible_layers, vec![5]);
+        assert_eq!(
+            settings.board_key.as_deref(),
+            Some(super::board_key(&x.diff).as_str())
+        );
+
+        // Launch on board Y: neither per-index field is restored, so the canvas
+        // shows the on-load default (selected + outline) instead of nothing, and
+        // index 2 does not inherit X's colour.
+        let mut y = ViewApp::new(diff_with_kinds(&BOARD_Y), "a".into(), "b".into());
+        y.apply_settings(settings);
+        assert_eq!(
+            y.visible_layers,
+            default_visible(BOARD_Y.len(), y.selected, y.outline)
+        );
+        assert!(y.visible_layers.iter().any(|&v| v), "some layer is visible");
+        assert!(y.base_overrides.is_empty());
+        // The board-independent preferences still apply.
+        assert_eq!(y.theme, Theme::Light);
+    }
+
+    #[test]
+    fn settings_from_the_same_stack_are_restored() {
+        use super::ViewApp;
+        use egui::Color32;
+        let mut x = ViewApp::new(diff_with_kinds(&BOARD_X), "old".into(), "new".into());
+        x.visible_layers = vec![false, false, false, false, false, true, false];
+        x.base_overrides = vec![(2, Color32::from_rgb(20, 21, 22))];
+        let settings = x.to_settings();
+
+        // A different revision pair of the same board has the same layer stack.
+        let mut again = ViewApp::new(diff_with_kinds(&BOARD_X), "r3".into(), "r4".into());
+        again.apply_settings(settings);
+        assert_eq!(again.visible_layers, x.visible_layers);
+        assert_eq!(again.base_overrides, x.base_overrides);
+    }
+
+    #[test]
+    fn settings_without_board_key_load_and_restore_nothing_per_board() {
+        use super::{default_visible, Settings, ViewApp};
+        // A pre-#327 config has no `board_key`: it still deserialises, and its
+        // per-index fields are treated as belonging to an unknown board.
+        let old = r#"{"theme":"light","visible_layers":[5],"base_overrides":[[2,[1,2,3,255]]]}"#;
+        let s: Settings = serde_json::from_str(old).expect("deserialize pre-#327 blob");
+        assert_eq!(s.board_key, None);
+        assert_eq!(s.visible_layers, vec![5]);
+        let mut app = ViewApp::new(diff_with_kinds(&BOARD_Y), "a".into(), "b".into());
+        app.apply_settings(s);
+        assert_eq!(
+            app.visible_layers,
+            default_visible(BOARD_Y.len(), app.selected, app.outline)
+        );
+        assert!(app.base_overrides.is_empty());
+        assert_eq!(app.theme, Theme::Light);
     }
 }
