@@ -42,6 +42,10 @@ etchy deliberately does **not** do.
   were exported with different `%FS`/unit settings, identical geometry quantizes
   onto different grids and produces spurious sub-µm "rim" differences; etchy
   **warns** about this rather than silently massaging it.
+- **Gerber arcs need a declared quadrant mode.** An arc (`G02`/`G03` draw)
+  before any `G74`/`G75` fails loud: pre-2012 RS-274X made single-quadrant the
+  implicit default while every modern exporter emits `G75`, so guessing either
+  way risks a wrong centre with no error. Add `G75*` to the file.
 - **Excellon scope.** Drill hits (circles), `G85` canned slots, routed
   (`M15`…`M16` / `G01`) slots, `R` repeat codes, headerless files, inline digit
   formats, and feed/speed tool fields are supported. **Arc routing** (`G02`/`G03`
