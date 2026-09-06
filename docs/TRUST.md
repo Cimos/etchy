@@ -41,7 +41,9 @@ etchy deliberately does **not** do.
 - **Coordinate-format mismatch is flagged, not reconciled.** If the two revisions
   were exported with different `%FS`/unit settings, identical geometry quantizes
   onto different grids and produces spurious sub-µm "rim" differences; etchy
-  **warns** about this rather than silently massaging it.
+  **warns** about this rather than silently massaging it. Incremental notation
+  (`%FS…I…`, or the deprecated `G91`) is not rendered at all — it fails loud
+  rather than being read as absolute (#305).
 - **Excellon scope.** Drill hits (circles), `G85` canned slots, routed
   (`M15`…`M16` / `G01`) slots, `R` repeat codes, headerless files, inline digit
   formats, and feed/speed tool fields are supported. **Arc routing** (`G02`/`G03`
