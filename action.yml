@@ -34,8 +34,9 @@ outputs:
 runs:
   using: composite
   steps:
-    # Build etchy from this repo (no release binary published yet). Cargo's own
-    # cache + the toolchain are the consumer workflow's responsibility. Use the
+    # Building etchy from source is the current design. Downloading a release
+    # asset with checksum verification is a later option. Cargo's own cache +
+    # the toolchain are the consumer workflow's responsibility. Use the
     # runner-provided $GITHUB_ACTION_PATH env var, not a ${{ }} template, so no
     # value is expanded into the script.
     - shell: bash
