@@ -82,10 +82,10 @@ excludes `deploy/feedback/` screenshots and uploads.
       already-public board — confirm the source repo's licence covers
       redistributing the bundled copy (provenance note now in place).
 - [ ] **README release claims vs reality.** README status line and Install
-      section point users at [Releases] + `SHA256SUMS`. v0.1.0 is not cut
-      (Actions billing parked). Either publish the Release with per-OS archives
-      + checksums before flipping, or soften README §Install to
-      "build from source / container" until binaries ship (both already work).
+      section point users at [Releases] + `SHA256SUMS`. CI is green and
+      `v0.1.0-rc1` is published as a pre-release with four archives plus
+      `SHA256SUMS`; public `v0.1.0` is not cut until this checklist is complete.
+      Keep README §Install explicit about the pre-release status until then.
 
 ## 4. Hardening — should-do
 

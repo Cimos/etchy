@@ -59,8 +59,9 @@ and revert the label edit. The committed demo board is the public Mad_RP2040.
 **Branches:** `main` has everything. `docs/perf-gpu-transform` (PR #75) open. Earlier
 working/agent branches are merged or superseded — safe to ignore.
 
-**CI:** GitHub Actions still failing repo-wide (infra/billing, not our code) — every
-merge verified green locally instead.
+**CI:** GitHub Actions on `main` has been green since 2026-08-01. `v0.1.0-rc1`
+is published as a pre-release with four archives plus `SHA256SUMS`; public
+`v0.1.0` is gated on completing `PRE_PUBLIC.md`.
 
 ---
 
@@ -83,9 +84,9 @@ fmt clean). Integrates, this session:
 **Merged PRs this session:** #45, #46, #47, #48, #43, #10 (earlier) → then #66, #65, #64,
 #69 (=#54, superseded the auto-closed #67). All squash-merged; branches deleted.
 
-**⚠️ GitHub Actions CI is failing repo-wide** — every run fails in ~5–18s with **no failed
-step** (a startup/infra/billing issue, NOT our code; verified by building every merge
-green locally). **Check the repo's Actions minutes/billing.** Until fixed, CI can't gate.
+**Historical CI note:** At the time of this 2026-06-24 entry, GitHub Actions runs
+failed before starting jobs and merges were verified locally. That incident is
+resolved: CI on `main` has been green since 2026-08-01 and is the merge gate.
 
 **Headless visual verification now works** (this box, no sudo): Playwright + Chromium in
 `~/.cache/etchy-shot-venv`; `~/.cache/etchy-shot-venv/bin/python ~/.cache/etchy-shot-venv/shot.py <url> <out.png> [wait_ms] [w] [h]`
