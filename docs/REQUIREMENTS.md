@@ -12,7 +12,7 @@ numbered requirements with their source and current status.
 - **Status legend:** ✅ shipped on `main` · 🔶 built, in an open PR · 🔜 accepted,
   not built · 📋 future (post-1.0) · ↔ superseded by a later decision.
 - **Source** is the GitHub issue, PR, or the decision record that produced the
-  requirement. "Owner" decisions were made by Simon in review sessions.
+  requirement. "Owner" decisions were made by the owner in review sessions.
 
 ---
 
