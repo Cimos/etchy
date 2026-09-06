@@ -51,8 +51,11 @@ etchy deliberately does **not** do.
 - **Pick-and-place is placement geometry, not a BOM.** Each component is rendered
   as a marker at its centroid + rotation and diffed geometrically (moved / rotated
   / added / removed parts show up); etchy does **not** compare values, footprints,
-  or nets. Coordinates are assumed millimetres, and all parts land on one
-  `placement` layer (top/bottom sides aren't split yet).
+  or nets. Coordinates are converted to millimetres from the unit the file
+  declares (Altium `Center-X(mil)` / `(in)` column brackets, KiCad
+  `## Unit = inches`); an unrecognised unit, or X and Y in different units,
+  fails loud, and a file that declares no unit is assumed millimetres. All parts
+  land on one `placement` layer (top/bottom sides aren't split yet).
 - **Region counts use a small noise floor** so sub-nanometre tessellation slivers
   aren't counted as changes; the changed *area* is always exact.
 - **Schematic-PDF diff is not implemented yet** (the `etchy-pdf` crate is a
