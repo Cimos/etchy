@@ -2002,7 +2002,7 @@ const BUILD_SHA: &str = env!("ETCHY_BUILD_SHA");
 /// Links for the Help menu.
 const URL_REPO: &str = "https://github.com/Cimos/etchy";
 const URL_ISSUES: &str = "https://github.com/Cimos/etchy/issues";
-const URL_SITE: &str = "https://cimos.github.io";
+const URL_SITE: &str = "https://cimos.github.io/etchy/";
 const URL_SPONSOR: &str = "https://github.com/sponsors/Cimos";
 
 /// The etchy brand icon (#191), embedded at compile time. 256 px source drawn at
