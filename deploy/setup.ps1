@@ -24,7 +24,8 @@ if (-not (Test-Path $server)) {
   throw "nothing staged in $ServeDir. Build+stage on WSL/Linux first: deploy/setup.sh --build-only"
 }
 
-$py = (Get-Command python.exe -ErrorAction SilentlyContinue) ?? (Get-Command python -ErrorAction SilentlyContinue)
+$py = Get-Command python.exe -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
 if (-not $py) { throw "python not found on PATH." }
 
 $fb = Join-Path $repo ("deploy\feedback\{0}.jsonl" -f $env:COMPUTERNAME)
