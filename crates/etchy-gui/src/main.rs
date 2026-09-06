@@ -5791,7 +5791,7 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
             items,
         };
     }
-    // Overlay / Before / After: stack every visible layer.
+    // Overlay / Before / After: stack every visible layer's base first.
     for &li in &key.visible {
         let layer = &diff.layers[li];
         match key.mode {
@@ -5801,10 +5801,20 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
                 if key.base_on {
                     push_context_items(&mut items, &layer.new, Role::Base, Side::Full, li);
                 }
-                push_diff_items(&mut items, &layer.removed, Role::Removed, li);
-                push_diff_items(&mut items, &layer.added, Role::Added, li);
             }
             Mode::Split | Mode::Swipe => unreachable!("split/swipe handled above"),
+        }
+    }
+    // Overlay: the diff of every layer goes on in a SECOND pass, after every base.
+    // Interleaving base and diff per layer let a later layer's opaque base (a
+    // bottom-copper plane, say) paint over an earlier layer's added/removed regions
+    // and hide a real change (#323). Two passes match the GPU-feature path, which
+    // draws all base before any diff.
+    if key.mode == Mode::Overlay {
+        for &li in &key.visible {
+            let layer = &diff.layers[li];
+            push_diff_items(&mut items, &layer.removed, Role::Removed, li);
+            push_diff_items(&mut items, &layer.added, Role::Added, li);
         }
     }
     TessCache {
@@ -6168,7 +6178,9 @@ fn transform_cache(
     // instead of one Mesh+Shape per region — a real board's top-copper layer was ~5.5k
     // mesh allocations per frame; this makes it one. Off-screen items are culled
     // before their vertices are built (cheaper when zoomed in). Items are pushed
-    // base → outline → diff, so draw order within the single mesh stays correct.
+    // outline → every layer's base → every layer's diff (see build_cache), so draw
+    // order within the single mesh stays correct: no layer's opaque base lands on
+    // top of another layer's added/removed regions (#323).
     let mut mesh = egui::epaint::Mesh::default();
     // Pre-reserve the vertex/index buffers (#80). Without this they double-and-copy
     // as they grow; on a dense board (e.g. an 8-layer pack with all layers on) the
@@ -9094,5 +9106,77 @@ mod tests {
         fresh.visible_layers = vec![false, false, false, false];
         fresh.apply_settings(settings);
         assert_eq!(fresh.visible_layers, vec![true, false, true, false]);
+    }
+
+    /// #323: in Overlay the cache must hold EVERY visible layer's base before ANY
+    /// layer's diff. The old per-layer interleave (base, removed, added, next layer)
+    /// let a later layer's opaque base paint over an earlier layer's diff triangles
+    /// and hide a real change.
+    #[test]
+    fn overlay_cache_puts_every_base_before_every_diff() {
+        use std::sync::Arc;
+        let square = |x0: i64, y0: i64, s: i64| -> etchy_core::Shape {
+            vec![vec![
+                super::Pt::new(x0, y0),
+                super::Pt::new(x0 + s, y0),
+                super::Pt::new(x0 + s, y0 + s),
+                super::Pt::new(x0, y0 + s),
+            ]]
+        };
+        let set = |x0: i64, y0: i64| super::PolygonSet::new(vec![square(x0, y0, 1_000_000)]);
+        // Two changed layers, each with base geometry AND diff geometry.
+        let layer = |kind: etchy_core::LayerKind, x0: i64| super::LayerView {
+            kind,
+            label_old: None,
+            label_new: None,
+            status: super::LayerStatus::Changed,
+            old: Arc::new(set(x0, 0)),
+            new: Arc::new(set(x0, 0)),
+            added: set(x0, 2_000_000),
+            removed: set(x0, 4_000_000),
+            change: etchy_core::LayerChange::default(),
+        };
+        let diff = super::BoardDiff {
+            report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
+            layers: vec![
+                layer(etchy_core::LayerKind::TopCopper, 0),
+                layer(etchy_core::LayerKind::BottomCopper, 10_000_000),
+            ],
+        };
+        let key = super::GeomKey {
+            visible: vec![0, 1],
+            mode: Mode::Overlay,
+            base_on: true,
+            outline_effective: false,
+        };
+        let cache = super::build_cache(&diff, &key, None);
+        let roles: Vec<super::Role> = cache.items.iter().map(|it| it.role).collect();
+        let last_base = roles
+            .iter()
+            .rposition(|r| *r == super::Role::Base)
+            .expect("both layers push a base item");
+        let first_diff = roles
+            .iter()
+            .position(|r| matches!(r, super::Role::Added | super::Role::Removed))
+            .expect("both layers push diff items");
+        assert!(
+            last_base < first_diff,
+            "a base item follows a diff item: layer N's opaque base would cover layer N-1's diff"
+        );
+        // Both layers contribute both kinds, so the ordering claim is not vacuous.
+        let bases: Vec<usize> = cache
+            .items
+            .iter()
+            .filter(|it| it.role == super::Role::Base)
+            .map(|it| it.layer_index)
+            .collect();
+        let diffs: Vec<usize> = cache
+            .items
+            .iter()
+            .filter(|it| it.role != super::Role::Base)
+            .map(|it| it.layer_index)
+            .collect();
+        assert_eq!(bases, vec![0, 1]);
+        assert_eq!(diffs, vec![0, 0, 1, 1]);
     }
 }
