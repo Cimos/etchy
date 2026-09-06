@@ -2706,10 +2706,12 @@ impl ViewApp {
             };
             let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
             let mut oversized: Option<anyhow::Error> = None;
+            let mut total: u64 = 0;
             for h in handles {
                 let name = h.file_name();
                 // Check `File.size` BEFORE reading, so an oversized upload is
-                // rejected without ever pulling it into wasm memory (#247).
+                // rejected without ever pulling it into wasm memory (#247) —
+                // per file, and in aggregate across the pick (#326).
                 let size = h.inner().size();
                 if size > loader::MAX_LAYER_FILE_BYTES as f64 {
                     oversized = Some(anyhow::anyhow!(
@@ -2718,6 +2720,13 @@ impl ViewApp {
                         size as u64,
                         loader::MAX_LAYER_FILE_BYTES
                     ));
+                    break;
+                }
+                total += size as u64;
+                if let Err(e) =
+                    loader::check_total(total, loader::MAX_TOTAL_BYTES, &basename(&name))
+                {
+                    oversized = Some(e);
                     break;
                 }
                 let bytes = h.read().await;
@@ -3023,10 +3032,12 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSour
         }
     }
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
+    let mut total: u64 = 0;
     for p in paths {
         // Check the size from metadata BEFORE reading, so an oversized drop is
         // rejected without ever buffering it into RAM (#247; same pre-read guard
-        // as `read_pdf_bytes` and the folder loader).
+        // as `read_pdf_bytes` and the folder loader) — per file, and in
+        // aggregate across the drop (#326).
         let len = p
             .metadata()
             .with_context(|| format!("reading metadata for {}", p.display()))?
@@ -3038,6 +3049,8 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSour
                 loader::MAX_LAYER_FILE_BYTES
             );
         }
+        total += len;
+        loader::check_total(total, loader::MAX_TOTAL_BYTES, &path_label(p))?;
         let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
         files.push((path_label(p), bytes));
     }
