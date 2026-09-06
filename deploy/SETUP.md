@@ -6,8 +6,7 @@ WASM build of `etchy-gui` served over a LAN so others can try the diff viewer in
 browser and submit structured feedback.
 
 > **TL;DR:** on WSL/Linux run **`deploy/setup.sh`** — it installs what's missing,
-> builds, stages, and serves. Feedback lands in `deploy/feedback/<hostname>.jsonl`;
-> commit it. Triage with `python3 deploy/collect-feedback.py`.
+> builds, stages, and serves.
 
 ---
 
@@ -63,14 +62,4 @@ Bump the `?v=` query in `index.html` when the bundle changes (busts browser cach
 
 ## 5. Feedback — collected & preserved
 
-- The widget POSTs to `/feedback`; the server appends one JSON line per submission
-  (server ts + client IP + UA + payload: sentiment / category / severity / name /
-  text / `ctx` = screen/viewport/url/app-state).
-- `setup.sh`/`setup.ps1` set **`$ETCHY_FEEDBACK`** so writes go straight into the
-  repo at **`deploy/feedback/<hostname>.jsonl`** — one file per host, so two
-  machines never clash. **Commit your file** to share feedback with the team.
-- Triage everything: `python3 deploy/collect-feedback.py` (summary + records);
-  `--merged` emits combined JSONL.
-
-> ⚠ Feedback records contain IP/UA/names (PII), kept on purpose during dev. They
-> **must be scrubbed before the repo goes public** — see [`/PRE_PUBLIC.md`](../PRE_PUBLIC.md).
+See [`feedback/README.md`](feedback/README.md) for the local-storage, triage, and safe-sharing rules.
