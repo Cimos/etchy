@@ -672,11 +672,15 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>, Vec<String>)> 
     if !dir.is_dir() {
         anyhow::bail!("{} is not a directory", dir.display());
     }
+    // Every entry must list or the load fails: an entry that errors (transient
+    // I/O on a network/FUSE mount) would otherwise vanish from one revision and
+    // read as a removed layer, or as nothing at all (#300).
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading directory {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file())
-        .collect();
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("listing directory {}", dir.display()))?;
+    entries.retain(|p| p.is_file());
     entries.sort();
 
     let mut files = Vec::with_capacity(entries.len());
@@ -1042,5 +1046,26 @@ mod tests {
         assert!(json.contains("\"configured\": true"));
         assert!(json.contains("\"passed\": true"));
         assert!(json.contains("\"fail_on_area\": 1.0"));
+    }
+
+    #[test]
+    fn load_board_lists_every_file_in_sorted_order() {
+        // #300: the directory listing must be complete and deterministic. The
+        // erroring-`DirEntry` path itself can't be provoked portably, so this
+        // pins the two properties the listing code is responsible for.
+        const GERBER: &str = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
+        let dir = std::env::temp_dir().join(format!("etchy-300-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Written out of order so a creation-order or readdir-order listing
+        // would not happen to match.
+        for name in ["c-B_Cu.gbl", "a-F_Cu.gtl", "b-F_Mask.gts"] {
+            std::fs::write(dir.join(name), GERBER).unwrap();
+        }
+        let (board, _, _) = load_board(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let labels: Vec<&str> = board.layers.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, ["a-F_Cu.gtl", "b-F_Mask.gts", "c-B_Cu.gbl"]);
     }
 }
