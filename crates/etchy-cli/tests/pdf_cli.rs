@@ -655,6 +655,75 @@ mod with_pdf {
     }
 
     #[test]
+    fn a_total_raster_over_the_budget_fails_loud_before_rendering() {
+        // Ten 100x100 pt sheets at 3600 DPI are 5000x5000 px = 25 MP each — under
+        // the 50 MP per-page cap and far under the page-count cap — but 250 MP a
+        // side and 500 MP for the pair, over the 400 MP whole-run budget. Under
+        // the per-page cap alone this pair rasterizes ~2 GB and the OS kills the
+        // process with no message (#297); it must be exit 2 naming the totals.
+        // Neither document breaches the budget on its own: the check has to sum
+        // BOTH sides.
+        let pages: Vec<PageSpec> = (0..10).map(|i| sheet(10 + i * 5, 10)).collect();
+        let old = write_multi_page_pdf("297-budget-old", &pages);
+        let new = write_multi_page_pdf("297-budget-new", &pages);
+        let out = etchy()
+            .arg("--dpi")
+            .arg("3600")
+            .arg(&old)
+            .arg(&new)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "over the total raster budget must exit 2, not be OOM-killed: {stderr}"
+        );
+        assert!(
+            stderr.contains("500 MP in total")
+                && stderr.contains("old 10 pages ~250 MP")
+                && stderr.contains("new 10 pages ~250 MP")
+                && stderr.contains("400 MP total raster budget"),
+            "the error names the per-document and total pixel counts and the budget: {stderr}"
+        );
+        assert!(
+            stderr.contains("lower --dpi"),
+            "the error tells the user to lower --dpi: {stderr}"
+        );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn a_modest_multi_page_pair_under_the_budget_still_diffs() {
+        // The same ten-sheet pair at 720 DPI is 1000x1000 px a page: 10 MP a side,
+        // 20 MP for the pair — well inside every cap, so it must run to a real
+        // result (identical documents: exit 0), not trip the new budget check.
+        let pages: Vec<PageSpec> = (0..10).map(|i| sheet(10 + i * 5, 10)).collect();
+        let old = write_multi_page_pdf("297-modest-old", &pages);
+        let new = write_multi_page_pdf("297-modest-new", &pages);
+        let out = etchy()
+            .arg("--dpi")
+            .arg("720")
+            .arg(&old)
+            .arg(&new)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "a modest multi-page pair must diff normally: {stderr}"
+        );
+        assert!(
+            !stderr.contains("raster budget"),
+            "under the budget the check must stay silent: {stderr}"
+        );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
     fn zero_pixel_dpi_fails_loud_not_no_change() {
         // A tiny positive DPI floors the page to 0x0 px. Diffing zero pixels
         // would read as "no differences" — a silent false negative — so it must

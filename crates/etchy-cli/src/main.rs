@@ -90,7 +90,8 @@ struct Cli {
     /// PDF inputs only: rasterization resolution in DPI (default 150). One DPI
     /// for all sheet sizes — larger sheets produce more pixels, text stays
     /// equally crisp. Higher DPI = crisper diff but more memory/time (per-page
-    /// pixel area is capped; see the error if you hit it).
+    /// pixel area and the total across both documents are capped; see the error
+    /// if you hit it).
     #[arg(long, value_name = "DPI")]
     dpi: Option<f32>,
     /// PDF inputs only: write one overlay PNG per diffed page (`page-<n>.png`)

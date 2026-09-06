@@ -24,6 +24,14 @@ pub const PDF_SCHEMA_VERSION: u32 = 1;
 /// *before* rendering, consistent with the Gerber per-file caps (CORE-7).
 pub const MAX_PAGE_PIXELS: u64 = 50_000_000;
 
+/// Whole-run rasterized-pixel budget across BOTH documents. `diff_pdfs` holds
+/// every page of both PDFs as RGBA at once, so the per-page cap alone lets
+/// pages × pixels grow without bound (two 1000-page A4 documents at 150 DPI are
+/// ~8.7 GB each — the process was OOM-killed with no error and no exit 2, #297).
+/// 400 MP × 4 bytes/px ≈ 1.6 GB of page rasters resident (plus an overlay per
+/// paired page); at 150 DPI an A4 sheet is ~2.2 MP, so ~90 sheets per side.
+pub const MAX_TOTAL_PIXELS: u64 = 400_000_000;
+
 /// Whether a page exists in both revisions or only one — page-count changes must
 /// be legible in every format, not folded into a count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -532,15 +540,21 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
     let old = read_pdf(&cli.old)?;
     let new = read_pdf(&cli.new)?;
 
-    // Enforce the page-count and per-page pixel ceilings BEFORE rasterizing
-    // anything.
-    for (label, path, bytes) in [("old", &cli.old, &old), ("new", &cli.new, &new)] {
+    // Enforce the page-count, per-page and whole-run pixel ceilings BEFORE
+    // rasterizing anything.
+    let mut doc_px = [0u64; 2];
+    let mut page_count = [0usize; 2];
+    for (n, (label, path, bytes)) in [("old", &cli.old, &old), ("new", &cli.new, &new)]
+        .into_iter()
+        .enumerate()
+    {
         let dims = etchy_pdf::page_pixel_dims(bytes, dpi)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("reading {label} PDF {}", path.display()))?;
         // Page alignment is a DP matrix quadratic in the page count, so a huge
         // document pair would ask for gigabytes. Fail loud here, naming the input
         // and the limit, before a single page is rendered (#249).
+        page_count[n] = dims.len();
         if dims.len() > etchy_core::MAX_ALIGN_PAGES {
             anyhow::bail!(
                 "{label} PDF {} has {} pages, over the {}-page limit etchy will align \
@@ -571,7 +585,24 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
                     MAX_PAGE_PIXELS / 1_000_000
                 );
             }
+            doc_px[n] += px;
         }
+    }
+    // Every page of both documents is resident as RGBA during the diff, so the
+    // sum over pages × pixels has to be bounded too — under the per-page cap,
+    // a many-page pair still OOM-kills the process with no error (#297).
+    let total_px = doc_px[0] + doc_px[1];
+    if total_px > MAX_TOTAL_PIXELS {
+        anyhow::bail!(
+            "this PDF pair would rasterize to ~{} MP in total (old {} pages ~{} MP + new {} \
+             pages ~{} MP) at {dpi} DPI, over the ~{} MP total raster budget — lower --dpi",
+            total_px / 1_000_000,
+            page_count[0],
+            doc_px[0] / 1_000_000,
+            page_count[1],
+            doc_px[1] / 1_000_000,
+            MAX_TOTAL_PIXELS / 1_000_000
+        );
     }
 
     let mut opts = etchy_core::ImageDiffOptions::default();

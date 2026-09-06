@@ -32,7 +32,10 @@ etchy deliberately does **not** do.
   fuzz-lite pass asserts the parser never panics on arbitrary bytes.
 - **Amplification limits.** Per-layer ceilings on emitted contours, total points,
   and polarity spans mean a tiny crafted file fails loud instead of exhausting a
-  CI runner's CPU/RAM.
+  CI runner's CPU/RAM. Schematic-PDF inputs are bounded the same way — a per-page
+  pixel cap (50 MP), a page-count cap (1024 per document), and a whole-run raster
+  budget across both documents (`MAX_TOTAL_PIXELS`, 400 MP ≈ 1.6 GB RGBA) — all
+  checked from the page sizes before a single page is rendered.
 
 ## Limitations (by design or not-yet)
 
