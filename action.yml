@@ -2,7 +2,9 @@ name: etchy PCB diff
 description: >-
   Diff two revisions of a board's fab output and gate the pipeline on the result.
   Writes a Markdown summary to the job step-summary and (optionally) a sticky PR
-  comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error.
+  comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error. Any other
+  code (a panic, an OOM kill, a missing binary) is treated as an error, never
+  as "no change".
 author: Cimos
 branding:
   icon: layers
@@ -62,8 +64,8 @@ runs:
         md="$("$etchy" --format md -- "$OLD_DIR" "$NEW_DIR")"
         code=$?
         set -e
+        case "$code" in 0|1) ;; *) echo "etchy exited $code" >&2; exit 2;; esac
         printf '%s\n' "$md" >> "$GITHUB_STEP_SUMMARY"
-        [ "$code" -eq 2 ] && { echo "etchy errored" >&2; exit 2; }
         echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
         # Post/refresh the sticky PR comment with the layer-by-layer table. A
         # comment failure (missing permission, not a PR event) is a warning, not
