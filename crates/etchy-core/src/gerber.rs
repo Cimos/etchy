@@ -396,8 +396,8 @@ impl<'a> Machine<'a> {
             Command::FunctionCode(FunctionCode::GCode(g)) => match g {
                 GCode::InterpolationMode(m) => self.interp = *m,
                 GCode::QuadrantMode(q) => self.quadrant = *q,
-                GCode::RegionMode(true) => self.begin_region(),
-                GCode::RegionMode(false) => self.end_region(),
+                GCode::RegionMode(true) => self.begin_region()?,
+                GCode::RegionMode(false) => self.end_region()?,
                 GCode::Comment(_)
                 | GCode::Unit(_)
                 | GCode::CoordinateMode(_)
@@ -497,13 +497,24 @@ impl<'a> Machine<'a> {
 
     // --- regions ---
 
-    fn begin_region(&mut self) {
+    fn begin_region(&mut self) -> Result<()> {
+        // A second `G36` before the `G37` would silently discard every loop
+        // collected so far (#314): fail loud instead.
+        if self.in_region {
+            return Err(unsupported("G36 inside an open region"));
+        }
         self.in_region = true;
         self.region_loops.clear();
         self.cur_loop.clear();
+        Ok(())
     }
 
-    fn end_region(&mut self) {
+    fn end_region(&mut self) -> Result<()> {
+        // `G37` with no region open has nothing to close; the file is malformed
+        // and used to pass as a no-op (#314).
+        if !self.in_region {
+            return Err(unsupported("G37 outside a region"));
+        }
         if !self.cur_loop.is_empty() {
             self.region_loops.push(std::mem::take(&mut self.cur_loop));
         }
@@ -516,9 +527,18 @@ impl<'a> Machine<'a> {
             self.region_loops.clear();
         }
         self.in_region = false;
+        Ok(())
     }
 
     fn region_segment(&mut self, to: Pt, offset: &Option<CoordinateOffset>) -> Result<()> {
+        // A contour starts at the current point (RS-274X 4.10: the first `D01`
+        // after the `D02` begins it there). A `D02` inside the region seeds the
+        // loop itself; when the region opens straight into `D01`s the start vertex
+        // was never recorded and the contour lost its first corner (#314). The arc
+        // path below relies on this too — it skips the first arc point as `cur`.
+        if self.cur_loop.is_empty() {
+            self.cur_loop.push(self.cur);
+        }
         if self.is_arc(offset) {
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
             let center = self.arc_center(to, offset, ccw)?;
@@ -1231,6 +1251,57 @@ mod tests {
         let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\nX0Y0D02*\nG01*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y2000000D01*\nX0Y0D01*\nG37*\nM02*\n";
         let a = area_mm2(g);
         assert!((a - 4.0).abs() < 0.001, "region area {a} vs 4.0");
+    }
+
+    #[test]
+    fn region_without_leading_d02_keeps_its_start_vertex() {
+        // #314: the contour starts at the current point. `X0Y0D02*` BEFORE `G36*`
+        // then two `D01`s is a right triangle (0,0)-(2,0)-(2,2) = 2 mm². Without
+        // the start vertex the loop was 2 points, dropped by the `len < 3` guard,
+        // and the region vanished with no error — a silent miss.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nX0Y0D02*\nG36*\nX2000000Y0D01*\nX2000000Y2000000D01*\nG37*\nM02*\n";
+        let a = area_mm2(g);
+        assert!((a - 2.0).abs() < 0.001, "triangle region area {a} vs 2.0");
+    }
+
+    #[test]
+    fn region_with_leading_d02_is_unchanged_by_the_seed() {
+        // #314 guard: a region that opens with its own `D02` must render exactly as
+        // before — the seed only fires when no `D02` has started the loop. Same
+        // 2×2 square as `region_fills_its_outline`, with and without a stale
+        // current point set before `G36*`; both must be 4 mm² and identical.
+        let with_d02 = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\nX0Y0D02*\nG01*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y2000000D01*\nX0Y0D01*\nG37*\nM02*\n";
+        let stale_cur = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nX9000000Y9000000D02*\nG36*\nX0Y0D02*\nG01*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y2000000D01*\nX0Y0D01*\nG37*\nM02*\n";
+        let a = area_mm2(with_d02);
+        let b = area_mm2(stale_cur);
+        assert!((a - 4.0).abs() < 0.001, "region area {a} vs 4.0");
+        assert!(
+            (a - b).abs() < 1e-9,
+            "a stale current point before G36 must not leak into the region: {a} vs {b}"
+        );
+    }
+
+    #[test]
+    fn nested_g36_fails_loud() {
+        // #314: a second `G36` while a region is open used to reset the collected
+        // loops silently. It is a malformed file — fail loud.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\nX0Y0D02*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y0D01*\nG36*\nX5000000Y5000000D02*\nX6000000Y5000000D01*\nX6000000Y6000000D01*\nX5000000Y5000000D01*\nG37*\nM02*\n";
+        let err = resolve_layer(g.as_bytes());
+        assert!(
+            matches!(err, Err(EngineError::Unsupported { .. })),
+            "nested G36 must fail loud, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn g37_outside_a_region_fails_loud() {
+        // #314: `G37` with no open region used to be a silent no-op.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nX0Y0D03*\nG37*\nM02*\n";
+        let err = resolve_layer(g.as_bytes());
+        assert!(
+            matches!(err, Err(EngineError::Unsupported { .. })),
+            "stray G37 must fail loud, got {err:?}"
+        );
     }
 
     #[test]
