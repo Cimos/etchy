@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::io::{BufReader, Cursor};
 
 use gerber_parser::gerber_types::{
-    Aperture as GtAperture, ApertureMacro, Command, CoordinateOffset, Coordinates, DCode,
-    ExtendedCode, FunctionCode, GCode, InterpolationMode, MacroBoolean, MacroContent, MacroDecimal,
-    MacroInteger, Operation, Polarity as GtPolarity, QuadrantMode, Unit,
+    Aperture as GtAperture, ApertureMacro, Command, CoordinateMode, CoordinateOffset, Coordinates,
+    DCode, ExtendedCode, FunctionCode, GCode, InterpolationMode, MacroBoolean, MacroContent,
+    MacroDecimal, MacroInteger, Operation, Polarity as GtPolarity, QuadrantMode, Unit,
 };
 use gerber_parser::parse;
 
@@ -435,8 +435,18 @@ impl<'a> Machine<'a> {
     fn extended(&mut self, ec: &ExtendedCode) -> Result<()> {
         match ec {
             ExtendedCode::LoadPolarity(p) => self.polarity_dark = matches!(p, GtPolarity::Dark),
-            ExtendedCode::CoordinateFormat(_)
-            | ExtendedCode::Unit(_)
+            // #305: `%FS…I…` declares incremental notation — every coordinate is an
+            // offset from the previous point. `resolve()` reads coordinates as
+            // absolute, so accepting the file would render wrong geometry silently.
+            // (The deprecated `G91` form is caught earlier, in `normalize`.)
+            ExtendedCode::CoordinateFormat(fs) => {
+                if fs.coordinate_mode == CoordinateMode::Incremental {
+                    return Err(unsupported(
+                        "incremental coordinate notation (%FS…I) is not supported",
+                    ));
+                }
+            }
+            ExtendedCode::Unit(_)
             | ExtendedCode::ApertureDefinition(_)
             | ExtendedCode::ApertureMacro(_)
             | ExtendedCode::FileAttribute(_)
@@ -1257,6 +1267,30 @@ mod tests {
         assert!(
             (a - 88.0).abs() < 0.05,
             "sequential polarity area {a} vs 88.0"
+        );
+    }
+
+    #[test]
+    fn incremental_format_spec_fails_loud() {
+        // #305: `%FSLIX24Y24*%` declares incremental notation (the 'I' after the
+        // zero-omission letter). The parser stored the mode but the engine resolved
+        // every coordinate as absolute — wrong geometry, no error. The identical
+        // file with `%FSLAX24Y24*%` must still resolve, so the failure is provably
+        // the mode, not the rest of the file.
+        let body = "%MOMM*%\n%ADD10C,0.5*%\nD10*\nX1000Y1000D03*\nX1000Y0D03*\nM02*\n";
+        let inc = format!("%FSLIX24Y24*%\n{body}");
+        let err = resolve_layer(inc.as_bytes());
+        match err {
+            Err(EngineError::Unsupported { feature }) => assert!(
+                feature.contains("incremental coordinate notation"),
+                "unexpected feature text: {feature}"
+            ),
+            other => panic!("incremental %FS must fail loud, got {other:?}"),
+        }
+        let abs = format!("%FSLAX24Y24*%\n{body}");
+        assert!(
+            resolve_layer(abs.as_bytes()).is_ok(),
+            "the same file in absolute notation must resolve"
         );
     }
 
