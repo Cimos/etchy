@@ -663,6 +663,9 @@ impl<'a> Machine<'a> {
                 self.push(c, true);
             }
             GtAperture::Polygon(p) => {
+                if p.hole_diameter.is_some() {
+                    return Err(unsupported("drilled (hole) polygon aperture"));
+                }
                 let n = p.vertices as usize;
                 if !(3..=64).contains(&n) {
                     return Err(unsupported(
@@ -1022,13 +1025,15 @@ mod tests {
     fn drilled_apertures_fail_loud() {
         // #240: an aperture with a hole (annular pad) must fail loud, not silently
         // report the solid-disk area — otherwise a copper-annulus change diffs as if
-        // the whole pad were solid (a silent miss). Pin circle / rectangle / obround.
+        // the whole pad were solid (a silent miss). Pin circle / rectangle / obround
+        // and (#307) polygon.
         // Each is flashed once; the SAME aperture without the hole is checked to
         // resolve, so the failure is provably the hole, not a parse problem.
         let cases = [
             ("C,0.5X0.2", "C,0.5"),         // drilled circle vs solid circle
             ("R,0.6X0.4X0.2", "R,0.6X0.4"), // drilled rect vs solid rect
             ("O,0.6X0.4X0.2", "O,0.6X0.4"), // drilled obround vs solid obround
+            ("P,1.0X6X0X0.4", "P,1.0X6"),   // drilled polygon vs solid polygon (#307)
         ];
         for (drilled, solid) in cases {
             let g = format!("%FSLAX46Y46*%\n%MOMM*%\n%ADD10{drilled}*%\nD10*\nX0Y0D03*\nM02*\n");
