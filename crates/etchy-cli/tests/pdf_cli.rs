@@ -50,6 +50,25 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// The per-page summary row for `page`, split into its nine columns:
+/// `page old new present added_px removed_px changed_px changed% regions`.
+/// Only a line of exactly that shape qualifies, so the header, the
+/// "N page(s) diffed" count line and the result line can never stand in for
+/// a missing row.
+#[cfg(feature = "pdf")]
+fn page_row(stdout: &str, page: usize) -> Option<Vec<&str>> {
+    stdout
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .find(|f| {
+            f.len() == 9
+                && f[0] == page.to_string()
+                && f[4..7].iter().all(|n| n.parse::<u64>().is_ok())
+                && f[7].ends_with('%')
+                && f[8].parse::<u32>().is_ok()
+        })
+}
+
 #[cfg(feature = "pdf")]
 mod with_pdf {
     use super::*;
@@ -68,7 +87,16 @@ mod with_pdf {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("differences found"), "summary: {stdout}");
         // The summary carries the per-page table; the fixture's edit is on page 1.
-        assert!(stdout.lines().any(|l| l.trim_start().starts_with('1')));
+        // Match the row itself, not any line that happens to start with a `1`
+        // (the count line "1 page(s) diffed ..." always does — #301).
+        let row = page_row(&stdout, 1).unwrap_or_else(|| panic!("no row for page 1: {stdout}"));
+        assert_eq!(row[1], "1", "old column of the page-1 row: {stdout}");
+        assert_eq!(row[2], "1", "new column of the page-1 row: {stdout}");
+        assert_eq!(row[3], "both", "present column of the page-1 row: {stdout}");
+        let changed_px: u64 = row[6].parse().expect("changed_px is a count");
+        assert!(changed_px > 0, "page 1 has changed pixels: {stdout}");
+        let regions: u32 = row[8].parse().expect("regions is a count");
+        assert!(regions > 0, "page 1 has changed regions: {stdout}");
         let png = out_dir.join("page-1.png");
         assert!(png.is_file(), "--out writes page-1.png");
         assert!(
