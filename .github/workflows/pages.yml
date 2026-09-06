@@ -18,7 +18,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Pages stays dormant until PAGES_ENABLED=true is set in
+  # Settings -> Secrets and variables -> Actions -> Variables.
   deploy:
+    if: ${{ vars.PAGES_ENABLED == 'true' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
