@@ -159,6 +159,14 @@ impl LayerFilter {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        if tokens.is_empty() {
+            anyhow::bail!(
+                "--gate-layers has no groups: '{spec}' is only separators (this would \
+                 silently disarm the gate). Use 'all' or a comma-separated list of: \
+                 copper, mask, silk, paste, drill, outline, documentation/docs, \
+                 placement, other"
+            );
+        }
         for t in &tokens {
             let known = t == "docs" || KIND_TAGS.iter().any(|k| k.contains(t.as_str()));
             if !known {
@@ -955,6 +963,25 @@ mod tests {
             "",
         ] {
             assert!(LayerFilter::parse(ok).is_ok(), "'{ok}' should be valid");
+        }
+    }
+
+    #[test]
+    fn filter_rejects_separator_only_spec() {
+        // "," passed the ""/"all" test, then split to ZERO tokens, so the
+        // validation loop never ran and the filter matched no layer at all —
+        // `--gate-layers ,` exited 0 on a real change (#294).
+        for bad in [",", " , ", ",,", " ,, "] {
+            assert!(
+                LayerFilter::parse(bad).is_err(),
+                "'{bad}' should be rejected"
+            );
+        }
+        // "" and "all" still mean every layer.
+        for all in ["", "all", " all "] {
+            let f = LayerFilter::parse(all).unwrap();
+            assert!(f.all, "'{all}' should mean all layers");
+            assert!(f.includes("top-copper"));
         }
     }
 
