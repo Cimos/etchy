@@ -19,7 +19,8 @@ are **not** committed.
   `/etchy-gui_bg.wasm` with a `?v=` cache-bust.
 - `demo/etchy-server.py` — static file server **+ `POST /feedback`** → appends one
   JSON line per submission to `feedback.jsonl` (server ts + IP + UA + payload).
-  Refuses to serve `feedback.jsonl` or itself.
+  Refuses to serve the feedback file, the `screenshots/` dir beside it, itself,
+  or any directory listing (#334).
 
 ## Build + deploy (current host: Windows, served from `C:\Users\<user>\etchy-demo\`)
 
