@@ -163,11 +163,32 @@ impl DiffReport {
         if !self.warnings.is_empty() {
             s.push_str("\n⚠️ **Warnings**\n");
             for w in &self.warnings {
-                s.push_str(&format!("- {w}\n"));
+                // Warnings embed on-disk filenames, and the CI action posts this
+                // text verbatim as a bot-authored PR comment (#298). A code span
+                // keeps `@`, `[`, `<`, `|`, `#` … inert.
+                s.push_str(&format!("- {}\n", md_code_span(w)));
             }
         }
         s
     }
+}
+
+/// Wrap `s` in a Markdown code span so nothing inside it is Markdown- or
+/// HTML-active (#298). Per CommonMark the fence must be a backtick run longer
+/// than any run inside the content, and content that starts or ends with a
+/// backtick is padded with a space so the pad, not the backtick, meets the fence.
+/// A code span cannot contain a line break at this position, so `\r`/`\n` are
+/// collapsed to a space first.
+fn md_code_span(s: &str) -> String {
+    let text = s.replace(['\r', '\n'], " ");
+    let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest_run + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
 }
 
 #[cfg(test)]
@@ -210,6 +231,34 @@ mod tests {
         assert!(md.contains("| layer |"));
         assert!(md.contains("top-copper"));
         assert!(md.contains("heads up"));
+    }
+
+    #[test]
+    fn markdown_warnings_are_inert_code_spans() {
+        // #298: a hostile filename inside a warning must not become a heading,
+        // link or @-mention in the bot-posted PR comment.
+        let hostile = "cc @user [link](https://x)\n## heading";
+        let r = DiffReport::new(vec![], vec![hostile.into()]);
+        let md = r.to_markdown_summary();
+        assert!(md.contains("- `cc @user [link](https://x) ## heading`\n"));
+        for line in md.lines() {
+            assert!(
+                !line.starts_with('#') || line.starts_with("## etchy"),
+                "{line}"
+            );
+            assert!(!line.starts_with("- ["), "{line}");
+        }
+        // The newline is collapsed: the warning is one bullet, not two lines.
+        assert_eq!(md.lines().filter(|l| l.starts_with("- ")).count(), 1);
+
+        // Backticks in the content get a longer fence, and an edge backtick is padded.
+        let r = DiffReport::new(vec![], vec!["a ``b`` c".into(), "`edge".into()]);
+        let md = r.to_markdown_summary();
+        assert!(md.contains("- ```a ``b`` c```\n"));
+        assert!(md.contains("- `` `edge ``\n"));
+
+        // A plain warning is just itself in a code span.
+        assert_eq!(md_code_span("heads up"), "`heads up`");
     }
 
     #[test]
