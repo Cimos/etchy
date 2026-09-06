@@ -30,6 +30,18 @@ enum Exit {
     Error = 2,
 }
 
+impl Exit {
+    /// The 0/1 outcome of a comparison that ran: `passed` (no gated change) is
+    /// `NoDiff`, anything else is `DiffFound`.
+    fn from_passed(passed: bool) -> Self {
+        if passed {
+            Exit::NoDiff
+        } else {
+            Exit::DiffFound
+        }
+    }
+}
+
 impl From<Exit> for ExitCode {
     fn from(code: Exit) -> Self {
         ExitCode::from(code as u8)
@@ -550,7 +562,7 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
             format_summary(&report, &verdict)
         }
     };
-    write_stdout(&out)?;
+    write_stdout(&out, Exit::from_passed(verdict.passed))?;
     Ok(RunOutcome::Board {
         passed: verdict.passed,
     })
@@ -559,9 +571,12 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
 /// Write a finished report to stdout, treating a downstream pipe that closed
 /// early (`etchy … | head`) as a clean exit instead of the panic `println!`
 /// raises on a broken pipe (which escaped the 0/1/2 contract as exit 101 — #261).
-/// Any other write failure is a real error and propagates (exit 2), so a genuine
-/// I/O problem is never masked. Appends the trailing newline `println!` would.
-fn write_stdout(s: &str) -> Result<()> {
+/// `on_broken_pipe` is the exit code the run has already decided (0 or 1): the
+/// consumer going away loses the text, not the verdict, so `etchy … | head` in
+/// CI still gates (#296). Any other write failure is a real error and propagates
+/// (exit 2), so a genuine I/O problem is never masked. Appends the trailing
+/// newline `println!` would.
+fn write_stdout(s: &str, on_broken_pipe: Exit) -> Result<()> {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
@@ -572,9 +587,9 @@ fn write_stdout(s: &str) -> Result<()> {
     {
         Ok(()) => Ok(()),
         // The consumer went away — there is nothing left to report to. Exit
-        // quietly with success, the conventional CLI behaviour for SIGPIPE.
+        // quietly, with the verdict the run reached, not an unconditional 0.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-            std::process::exit(Exit::NoDiff as i32);
+            std::process::exit(on_broken_pipe as i32);
         }
         Err(e) => Err(e).context("writing to stdout"),
     }
