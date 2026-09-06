@@ -620,8 +620,8 @@ pub fn run_pdf(cli: &Cli) -> Result<bool> {
         Format::Summary => report.to_summary(),
     };
     // Route through the shared writer so a closed pipe (`… | head`) exits cleanly
-    // instead of panicking (#261).
-    crate::write_stdout(&out)?;
+    // instead of panicking (#261), with this run's verdict, not a blanket 0 (#296).
+    crate::write_stdout(&out, crate::Exit::from_passed(!report.any_changes))?;
     Ok(report.any_changes)
 }
 
