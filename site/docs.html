@@ -256,7 +256,7 @@ result: differences found</pre>
     <pre class="code">- name: PCB diff
   run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
     <p>The gate names its verdict on stderr — <code class="inline">etchy: gate FAIL — copper: changed 552.6209 mm², 1661 regions</code> — and repeats it in the JSON, so why a build passed or failed is on the record. When a gate is configured and the change comes in under it, etchy exits 0 even though it found differences. That is the point of the gate.</p>
-    <p><strong>Or add the Action.</strong> Five lines, and every pull request that touches Gerbers gets a layer-by-layer table posted as a sticky comment (edited in place on each push, not re-posted):</p>
+    <p><strong>Or add the Action.</strong> Five lines, and every pull request that touches Gerbers gets a layer-by-layer table posted as a sticky comment for that input pair (edited in place on each push, not re-posted):</p>
     <pre class="code">- uses: Cimos/etchy@main
   with:
     old: fab/rev-a
