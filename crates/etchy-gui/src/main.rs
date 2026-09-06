@@ -4981,8 +4981,14 @@ impl ViewApp {
         }
         // Focus at 100% hides every non-selected layer — that suppression must
         // be accounted for on-canvas, like the old single-mode hint (#224
-        // review: no silent misses, TRUST-1).
-        if let Some(note) = focus_note(self.focus, shown) {
+        // review: no silent misses, TRUST-1). The selected layer's own eye may
+        // be off (#328), in which case every shown layer is focus-hidden.
+        let selected_visible = self
+            .visible_layers
+            .get(self.selected)
+            .copied()
+            .unwrap_or(false);
+        if let Some(note) = focus_note(self.focus, shown, selected_visible) {
             extra_chips.push(note);
         }
         self.canvas_trailing(&painter, &response, rect, extra_chips);
@@ -6546,15 +6552,25 @@ fn single_layer_hint(shown: usize, total: usize) -> Option<String> {
 /// The Focus-suppression chip (#224): at focus 100% every non-selected visible
 /// layer is fully hidden — that must be accounted for on-canvas (TRUST-1), the
 /// way the old single-mode "1 / N" hint accounted for its hiding. Below 100%
-/// the layers are still (faintly) visible, so no chip. Pure → unit-testable.
-fn focus_note(focus: f32, shown: usize) -> Option<String> {
-    if focus >= 1.0 && shown > 1 {
-        Some(format!(
-            "focus 100% — {} other layer(s) hidden",
-            shown.saturating_sub(1)
-        ))
+/// the layers are still (faintly) visible, so no chip.
+///
+/// `shown` is the eye-on layer count (outline excluded); `selected_visible` says
+/// whether the selected layer is one of them. The selected layer's eye can be
+/// off (#328): then every shown layer is non-selected, focus 100% hides them
+/// all and the canvas is blank — so the count of "others" must not assume the
+/// selected layer is among `shown`, and the chip has to say why an eye-on
+/// layer is invisible. Pure → unit-testable.
+fn focus_note(focus: f32, shown: usize, selected_visible: bool) -> Option<String> {
+    let others = shown.saturating_sub(usize::from(selected_visible));
+    if focus < 1.0 || others == 0 {
+        return None;
+    }
+    if selected_visible {
+        Some(format!("focus 100% — {others} other layer(s) hidden"))
     } else {
-        None
+        Some(format!(
+            "focus 100% hides the {others} other layer(s); the selected layer's eye is off — press its eye or lower focus"
+        ))
     }
 }
 
@@ -7019,19 +7035,44 @@ mod tests {
         assert_eq!(single_layer_hint(1, 13).as_deref(), Some("1 / 13 layers"));
         // Focus 100% must announce its hiding (#224 review, TRUST-1)…
         assert_eq!(
-            super::focus_note(1.0, 13).as_deref(),
+            super::focus_note(1.0, 13, true).as_deref(),
             Some("focus 100% — 12 other layer(s) hidden")
         );
         // …but below 100% the others are still faintly visible (no chip), and a
         // single visible layer has nothing focus-hidden.
-        assert_eq!(super::focus_note(0.99, 13), None);
-        assert_eq!(super::focus_note(1.0, 1), None);
+        assert_eq!(super::focus_note(0.99, 13, true), None);
+        assert_eq!(super::focus_note(1.0, 1, true), None);
         assert_eq!(single_layer_hint(1, 2).as_deref(), Some("1 / 2 layers"));
         // Not a single-of-many situation → no hint (no clutter).
         assert_eq!(single_layer_hint(2, 13), None); // more than one shown
         assert_eq!(single_layer_hint(13, 13), None); // all shown
         assert_eq!(single_layer_hint(1, 1), None); // only one layer exists
         assert_eq!(single_layer_hint(0, 5), None); // none shown
+    }
+
+    #[test]
+    fn focus_note_counts_others_without_the_selected_layer() {
+        // #328: the selected layer's eye can be off. Then it is not among the
+        // shown layers, so every shown layer is focus-hidden — the count must
+        // not subtract a layer that isn't there, and the chip must explain why
+        // an eye-on layer is invisible.
+        assert_eq!(
+            super::focus_note(1.0, 2, true).as_deref(),
+            Some("focus 100% — 1 other layer(s) hidden")
+        );
+        assert_eq!(
+            super::focus_note(1.0, 2, false).as_deref(),
+            Some(
+                "focus 100% hides the 2 other layer(s); the selected layer's eye is off — press its eye or lower focus"
+            )
+        );
+        // One eye-on layer, selected hidden: previously None (nothing said why
+        // the canvas was blank); now the chip appears.
+        assert!(super::focus_note(1.0, 1, false).is_some());
+        // Nothing shown at all → nothing focus-hidden, no chip.
+        assert_eq!(super::focus_note(1.0, 0, false), None);
+        // Below 100% the eye-off case still shows the others faintly: no chip.
+        assert_eq!(super::focus_note(0.99, 2, false), None);
     }
 
     #[test]
