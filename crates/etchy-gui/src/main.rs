@@ -2521,13 +2521,25 @@ impl ViewApp {
     }
 
     /// Store a freshly loaded source on one side and re-diff if both sides are set.
+    ///
+    /// A failed re-diff (#330) restores the side's previous source: the diff,
+    /// labels, layer list and export on screen still describe the previous
+    /// pair, so the stored sources must too. The error stays visible; the
+    /// rejected file is dropped rather than silently kept for the next load.
     fn set_side(&mut self, side: RevSide, loaded: LoadedSource) {
-        match side {
-            RevSide::Old => self.src_old = Some(loaded),
-            RevSide::New => self.src_new = Some(loaded),
-        }
+        let slot = match side {
+            RevSide::Old => &mut self.src_old,
+            RevSide::New => &mut self.src_new,
+        };
+        let prev = slot.replace(loaded);
         self.load_error = None;
         self.rebuild_diff();
+        if self.load_error.is_some() {
+            match side {
+                RevSide::Old => self.src_old = prev,
+                RevSide::New => self.src_new = prev,
+            }
+        }
     }
 
     /// Recompute the comparison from the two sources, if both are present.
@@ -6911,6 +6923,63 @@ mod tests {
             err.contains("cannot compare a PDF with Gerber"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn set_side_restores_the_previous_source_when_the_rediff_fails() {
+        // #330: after a rejected load the stored sources must still describe
+        // the diff on screen. Opening a PDF as "new" over a board pair fails
+        // loud; the board that side held stays, so a later successful load of
+        // the other side diffs against it and not against the rejected PDF.
+        use super::{LoadedBoard, LoadedPdf, LoadedSource, RevSide, ViewApp};
+        let board = |label: &str| {
+            let (board, fmt) = crate::loader::board_from_bytes(vec![(
+                "board-F_Cu.gtl".to_string(),
+                MIN_GERBER.to_vec(),
+            )])
+            .unwrap();
+            LoadedSource::Board(LoadedBoard {
+                label: label.into(),
+                board,
+                fmt,
+            })
+        };
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.set_side(RevSide::Old, board("old"));
+        app.set_side(RevSide::New, board("new"));
+        assert!(app.load_error.is_none());
+        assert_eq!(app.old_label, "old");
+        assert_eq!(app.new_label, "new");
+
+        app.set_side(
+            RevSide::New,
+            LoadedSource::Pdf(LoadedPdf {
+                label: "b.pdf".into(),
+                bytes: b"%PDF-1.7".to_vec(),
+            }),
+        );
+        let err = app.load_error.clone().expect("mixed pair must fail loud");
+        assert!(
+            err.contains("cannot compare a PDF with Gerber"),
+            "got: {err}"
+        );
+        assert_eq!(app.new_label, "new", "on-screen labels untouched");
+        assert_eq!(
+            app.src_new.as_ref().map(|s| s.label()),
+            Some("new"),
+            "the rejected PDF must not replace the stored source"
+        );
+        assert!(
+            matches!(app.src_new, Some(LoadedSource::Board(_))),
+            "stored source agrees with the diff on screen"
+        );
+
+        // The next successful load on the other side diffs against the board
+        // that is still shown, not the rejected PDF.
+        app.set_side(RevSide::Old, board("old2"));
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert_eq!(app.old_label, "old2");
+        assert_eq!(app.new_label, "new");
     }
 
     #[test]
