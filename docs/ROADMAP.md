@@ -86,7 +86,7 @@ highest-uncertainty pieces before committing to the full build.
   the same files.
 - **Golden-corpus harness:** the trust backbone, built first so every later
   feature is validated against ground truth. Sources: synthesized known-delta
-  board pairs (exact ground truth) + public KiCad demo boards + Simon's
+  board pairs (exact ground truth) + public KiCad demo boards + the owner's
   non-confidential boards. Property tests (`diff(A,A)=∅`, symmetry of add/remove)
   + fuzzing wired into CI.
 

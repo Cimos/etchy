@@ -22,23 +22,23 @@ list in the split/swipe colour lookup → panic, wedging wasm); select no longer
 auto-ticks visibility; "Show changed" hidden (API kept); group rows indented under the
 header; top controls wrap when narrow; colour-list scrollbar to far right; inline layer
 swatch opens its colour picker; Esc backs out of the Colours window; dropped the
-"input:" dropdown prefix; adaptive base-copper LOD when zoomed out. **Simon chose "PR/
+"input:" dropdown prefix; adaptive base-copper LOD when zoomed out. **The owner chose "PR/
 commit trail is enough"** — no separate tracking issues opened for these.
 
 **⏳ Performance (#9/#10) — DESIGN STAGE, no code yet.** Dense multi-layer boards (the
 real board, 24+ layers) are slow to pan/zoom. The base-LOD shipped in #74 **did not help
-at working zoom** (Simon confirmed "no real change") — LOD only removes already-sub-pixel
+at working zoom** (the owner confirmed "no real change") — LOD only removes already-sub-pixel
 features.
 Root cause: `transform_cache` re-runs the world→screen transform of every visible
 triangle on the CPU every frame (scales with layers, not zoom). **Decision: deeper
 engine work — GPU-side transform.** Design doc **`docs/PERF_GPU_TRANSFORM.md`** + **PR
-#75** are open and **awaiting Simon's review**. Hybrid plan: GPU-transform base copper
+#75** are open and **awaiting the owner's review**. Hybrid plan: GPU-transform base copper
 via an egui glow `PaintCallback`, keep diff items + their LOD on CPU; local-origin
-precision fix; CPU fallback. **Four open decisions** for Simon (spike-first vs full
+precision fix; CPU fallback. **Four open decisions** for the owner (spike-first vs full
 build; base-copper-only scope; bake-dimming vs uniform; keep CPU fallback). **Do not
 start coding until those are answered.**
 
-**Issues still open for Simon to verify + close** (PRs used `Refs`, not `Closes`): **#58,
+**Issues still open for the owner to verify + close** (PRs used `Refs`, not `Closes`): **#58,
 #59, #61** (Phase 3 features). The #71-era issues (#30/#31/#36/#50/#54/#55) were closed
 this session after his sign-off.
 
@@ -93,7 +93,7 @@ screenshots the web viewer (serve a build, shot localhost). Used it to catch + c
 the pour regression and verify the measure/grid features. Native egui window still can't
 be captured. (See `~/.claude` memory `verify-native-gui-visuals`.)
 
-### For Simon (your workflow: you verify + close issues)
+### For the owner (workflow: you verify + close issues)
 - **Verify & close** the implemented issues — render: #12/#14 (diagnosed/fixed), #13
   (notch, verified); the fixed-pending set #28–#42; and the #49 Phase 1–2 issues now
   shipped: #50 #51 #52 #53 #55 #56 #54. (Fixing PRs used `Refs`, so they stayed open.)
@@ -160,13 +160,13 @@ be captured. (See `~/.claude` memory `verify-native-gui-visuals`.)
     committed**; the repo keeps the generic non-confidential labels). `trunk build
     --release --filehash false`, deploy to the Windows serve dir, serve with
     `deploy/demo/etchy-server.py` on `0.0.0.0:8080`.
-  - **Feedback given:** Simon confirmed rev A vs rev B is the intended comparison — it
+  - **Feedback given:** the owner confirmed rev A vs rev B is the intended comparison — it
     is a near-total redesign (all 14 layers changed, ~+1120 / −638 mm², ~5,900/6,580
     regions; expected for a revision gap that wide). He had the demo **stopped** after
     review; relaunch on request.
-- **Env note:** the office machine now drives reviews through the `feedback-loop` tool
-  (`~/UbuntuProjects/feedback-loop`, SessionStart hook) and the merged `~/.claude/CLAUDE.md`
-  agreements (Cimos identity, no AI attribution, never the word "canonical").
+- **Env note:** the office machine drives reviews through a local feedback-loop tool
+  and the owner's global working rules (Cimos identity, no AI attribution, never the
+  word "canonical").
 
 ## How to build / run / test
 - `cargo test` (workspace), `cargo clippy`, `cargo fmt` — keep all green/clean.
@@ -181,7 +181,7 @@ G1 units-mismatch warning · G2 sequential polarity · G7a/G5 layer list + group
 ## DONE — A–D landed this run (gui-web-wasm-v2)
 All four clusters from the autonomous finishing run are implemented, build green
 (native + wasm), 23 unit tests pass, clippy + fmt clean. The visual items (C/D
-appearance, and the A/B render look) are **pending Simon's eyes** — no live-window
+appearance, and the A/B render look) are **pending the owner's eyes** — no live-window
 screenshot is available on this box (llvmpipe software GL), so correctness was
 build- and test-verified, not visually confirmed. Some native lag is inherent to
 llvmpipe and won't fully match the GPU web build.
