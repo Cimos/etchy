@@ -109,6 +109,34 @@ fn passing_gate_output_matches_exit_0() {
 }
 
 #[test]
+fn nan_area_threshold_is_a_loud_exit_2() {
+    // #295: `--fail-on-area nan` used to parse fine and disarm the gate (every
+    // `area > NaN` is false, so a changed pair exited 0 with `gate PASS`). A
+    // non-finite or negative threshold must be refused before the diff runs.
+    let root = scratch("gate295");
+    let old = root.join("old");
+    fs::create_dir_all(&old).unwrap();
+    write_layer(&old, "F_Cu.gbr", "");
+
+    let out = etchy()
+        .arg("--fail-on-area")
+        .arg("nan")
+        .arg(&old)
+        .arg(&old)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "nan threshold must exit 2");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--fail-on-area"),
+        "stderr names the flag: {err}"
+    );
+    assert!(err.contains("NaN"), "stderr names the value: {err}");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn closed_stdout_pipe_does_not_panic() {
     // #261: `etchy … | head` closes the read end early. `println!` panics on the
     // resulting broken pipe and the process exits 101, outside the 0/1/2
