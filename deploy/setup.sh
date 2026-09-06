@@ -85,7 +85,7 @@ serve() {
   say "feedback -> $fb"
   say "serving on 0.0.0.0:$PORT  ->  http://${ip:-<this-host-ip>}:$PORT/"
   say "stop with Ctrl+C; commit deploy/feedback/$(hostname).jsonl to share feedback."
-  ETCHY_FEEDBACK="$fb" exec python3 "$SERVE_DIR/etchy-server.py" "$PORT" "$SERVE_DIR"
+  ETCHY_BIND=${ETCHY_BIND:-0.0.0.0} ETCHY_FEEDBACK="$fb" exec python3 "$SERVE_DIR/etchy-server.py" "$PORT" "$SERVE_DIR"
 }
 
 check_toolchain

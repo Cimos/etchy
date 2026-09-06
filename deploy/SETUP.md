@@ -45,8 +45,10 @@ Build/stage once on WSL (`deploy/setup.sh --build-only`), then on Windows:
 deploy\setup.ps1 -Port 8080
 ```
 
-(or, raw, from the staged dir: `python etchy-server.py 8080 .`). LAN-reachable at
-`http://<host-ip>:8080/`. No auth — trusted LAN only; exposure is the owner's call.
+(or, raw, from the staged dir: `python etchy-server.py 8080 .`, which binds to
+loopback by default; set `$env:ETCHY_BIND = '0.0.0.0'` first to expose it).
+LAN-reachable at `http://<host-ip>:8080/`. No auth — trusted LAN only; exposure is
+the owner's call.
 
 ## 4. Manual build (if you'd rather not use the script)
 
@@ -58,6 +60,9 @@ cd crates/etchy-gui && trunk build --release --filehash false   # -> dist/
 ETCHY_FEEDBACK=../../deploy/feedback/$(hostname).jsonl \
   python3 etchy-server.py 8080 <serve-dir>
 ```
+
+The raw command binds to loopback by default. Prefix it with
+`ETCHY_BIND=0.0.0.0` to expose it to the LAN.
 
 Bump the `?v=` query in `index.html` when the bundle changes (busts browser cache).
 

@@ -37,11 +37,13 @@ trunk build --release --filehash false   # in crates/etchy-gui  -> dist/
 
 ```powershell
 # launch (detached, hidden, no console window):
+$env:ETCHY_BIND = '0.0.0.0' # omit for the loopback-only default
 Start-Process -WindowStyle Hidden -FilePath python.exe -ArgumentList `
   'etchy-server.py','8080','<serve-dir>'
 # stop: kill whatever listens on 8080
 Get-NetTCPConnection -LocalPort 8080 -State Listen | %{ Stop-Process -Id $_.OwningProcess -Force }
 ```
 
-Reachable at `http://<host-LAN-ip>:8080/`. No auth (trusted LAN). The feedback
-file lives next to the bundle on the host; read it to review submissions.
+The raw server binds to loopback by default; setting `ETCHY_BIND=0.0.0.0` exposes
+it at `http://<host-LAN-ip>:8080/`. No auth (trusted LAN). The feedback file lives
+next to the bundle on the host; read it to review submissions.
