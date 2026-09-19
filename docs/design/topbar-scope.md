@@ -5,7 +5,7 @@ Scope for reworking the etchy-gui viewer top bar. Covers feedback **#57**
 Layers panel), **#160** (old/new naming + Open A/B clutter), and the
 responsive/no-wrap requirement. Wireframe reference:
 `docs/design/ui-wireframes.html` Part B, "Top-bar & mode controls" (#57) —
-Simon approved that direction.
+The owner approved that direction.
 
 All code anchors are in `crates/etchy-gui/src/main.rs`. Line numbers shift;
 anchor by the markers given (e.g. `egui::Panel::top("top")`).
@@ -239,7 +239,7 @@ numbers, and rebase before starting.
 
 ## 6. Risks / open questions
 
-Defaults are picked; Simon can veto.
+Defaults are picked; the owner can veto.
 
 1. **Mode label rename `Before/After` → `Old/New`** (default: rename). The
    `publish_state` string feeds the web/demo status bridge — confirm no

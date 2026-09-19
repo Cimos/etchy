@@ -1,0 +1,44 @@
+# Run cargo-deny weekly so new advisories surface between code changes;
+# ci.yml remains the push/PR gate.
+name: Weekly cargo-deny
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo-deny (licenses, advisories, bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      # Prebuilt binary, pinned + checksum-verified — same pattern as trunk in the
+      # wasm job. Building cargo-deny from crates.io took most of this job's time;
+      # the download is seconds. The sha256 is the one published alongside the
+      # release asset. Bump both together, deliberately.
+      - name: Install cargo-deny (prebuilt, pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          ver=0.20.2
+          target=x86_64-unknown-linux-musl
+          sha256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+          curl -fsSL "https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/cargo-deny-${ver}-${target}.tar.gz" \
+            -o cargo-deny.tar.gz
+          echo "${sha256}  cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf cargo-deny.tar.gz
+          install -m 0755 "cargo-deny-${ver}-${target}/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+          rm -rf cargo-deny.tar.gz "cargo-deny-${ver}-${target}"
+          cargo-deny --version
+
+      # Enforces the permissive-only license policy + RUSTSEC advisories + bans
+      # (deny.toml). A real advisory or a non-allow-listed license fails the job.
+      - name: cargo deny check
+        run: cargo deny check advisories bans licenses

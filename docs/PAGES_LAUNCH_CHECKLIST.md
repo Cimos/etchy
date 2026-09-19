@@ -2,13 +2,15 @@
 
 The landing site lives in `site/` and deploys to GitHub Pages via
 `.github/workflows/pages.yml`. It is on `main` but **dormant**: the repo is
-private and Pages is not enabled, so the deploy workflow fails on pushes that
-touch `site/**` (expected — it goes green once Pages is enabled).
+private and Pages is not enabled. To launch it, enable Pages with **Source:
+GitHub Actions**, set the `PAGES_ENABLED` repository variable to `true`, then
+re-run the workflow.
 
 ## Go-public steps (do these when launching)
 
 - [ ] Make the repo public.
 - [ ] Enable Pages: **Settings → Pages → Source: GitHub Actions**.
+- [ ] Set `PAGES_ENABLED=true` in **Settings → Secrets and variables → Actions → Variables**.
 - [ ] Set the repo **Social preview** image to `site/assets/brand/etchy-social-1280x640.png` (Settings → General).
 - [ ] Re-check the page copy matches the **actually-shipped** feature set at launch
       (shipped GUI viewer modes today: **Overlay / Before / After** — everything else stays on the roadmap).
