@@ -138,7 +138,7 @@ docker run --rm -v "$PWD:/work" etchy --format summary -- /work/old /work/new</p
   <section id="cli">
     <span class="eyebrow">CLI usage</span>
     <h2>Run a diff</h2>
-    <p>Point etchy at two directories of fab output. Layers are paired by filename, so both revisions must use the same Gerber filenames.</p>
+    <p>Point etchy at two directories of fab output. Layers are paired by kind, such as top copper or inner copper 1, so filenames may differ between revisions. When several files have the same kind, exact filename matches come first; remaining files pair in stack order only when their board extents plausibly overlap.</p>
     <pre class="code"><span class="k">etchy</span> &lt;old&gt; &lt;new&gt;                  <span class="c"># human-readable per-layer summary</span>
 <span class="k">etchy</span> &lt;old&gt; &lt;new&gt; --format json    <span class="c"># machine-readable report on stdout</span></pre>
     <p>The summary lists each layer with changed area (mm²) and region counts. This is the real output on the two board revisions bundled in the repo:</p>
@@ -256,7 +256,7 @@ result: differences found</pre>
     <pre class="code">- name: PCB diff
   run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
     <p>The gate names its verdict on stderr — <code class="inline">etchy: gate FAIL — copper: changed 552.6209 mm², 1661 regions</code> — and repeats it in the JSON, so why a build passed or failed is on the record. When a gate is configured and the change comes in under it, etchy exits 0 even though it found differences. That is the point of the gate.</p>
-    <p><strong>Or add the Action.</strong> Five lines, and every pull request that touches Gerbers gets a layer-by-layer table posted as a sticky comment (edited in place on each push, not re-posted):</p>
+    <p><strong>Or add the Action.</strong> Five lines, and every pull request that touches Gerbers gets a layer-by-layer table posted as a sticky comment for that input pair (edited in place on each push, not re-posted):</p>
     <pre class="code">- uses: Cimos/etchy@main
   with:
     old: fab/rev-a

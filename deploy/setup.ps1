@@ -24,12 +24,14 @@ if (-not (Test-Path $server)) {
   throw "nothing staged in $ServeDir. Build+stage on WSL/Linux first: deploy/setup.sh --build-only"
 }
 
-$py = (Get-Command python.exe -ErrorAction SilentlyContinue) ?? (Get-Command python -ErrorAction SilentlyContinue)
+$py = Get-Command python.exe -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
 if (-not $py) { throw "python not found on PATH." }
 
 $fb = Join-Path $repo ("deploy\feedback\{0}.jsonl" -f $env:COMPUTERNAME)
 $env:ETCHY_FEEDBACK = $fb
 Write-Host "• feedback -> $fb" -ForegroundColor Cyan
 Write-Host "• serving $ServeDir on 0.0.0.0:$Port  (Ctrl+C to stop)" -ForegroundColor Cyan
-Write-Host "• commit deploy\feedback\$($env:COMPUTERNAME).jsonl to share feedback." -ForegroundColor Cyan
+Write-Host "• feedback files stay local and gitignored; do not commit them." -ForegroundColor Cyan
+Write-Host "• to prepare a merge: python3 deploy/collect-feedback.py --merged (scrub its output before sharing; see deploy/feedback/README.md)." -ForegroundColor Cyan
 & $py.Source $server $Port $ServeDir

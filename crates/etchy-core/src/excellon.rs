@@ -15,8 +15,18 @@
 //! coordinates, arc routing) is a loud [`EngineError`], never a quiet drop.
 
 use crate::error::{EngineError, Result};
-use crate::geo::{Contour, PolygonSet};
+use crate::geo::{snap_nm, Contour, PolygonSet};
 use crate::geom;
+use crate::gerber::{MAX_CONTOURS_PER_LAYER, MAX_POINTS_PER_LAYER};
+
+/// Most digits accepted on either side of a declared coordinate format
+/// (`;FILE_FORMAT=i:d`, `METRIC,LZ,000.000`). Suppressed coordinates are zero-padded
+/// to `int + dec` digits and parsed as an `i64`: 9 + 9 = 18 digits always fits
+/// (i64::MAX has 19), and `10^dec` with `dec <= 9` is exact in f64, so the decode
+/// stays exact. Real exporters use 2..6 per side; a larger declaration is either a
+/// typo or a crafted header (`3:99999999999` asked `format!` for ~100 GB of padding
+/// per coordinate and aborted the process, #308). Fail loud instead.
+const MAX_FORMAT_DIGITS: usize = 9;
 
 /// Which zeros a coordinate field keeps (the other side is suppressed). Named for
 /// what's *present* in the file, matching the header keywords `LZ`/`TZ`.
@@ -195,6 +205,17 @@ fn tool_select(line: &str) -> Option<u32> {
 /// header's `%`/`M95` terminator, or the whole file when there is no header
 /// (header-form lines don't match any body form and are ignored there).
 pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
+    // Contain a panic anywhere in the header/body walk as a loud typed error
+    // instead of unwinding through the caller / aborting a batch — the same
+    // boundary `resolve_layer` puts around the Gerber parser (#85, #308). Relies
+    // on panic=unwind (kept that way in the release profile for this reason).
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        resolve_excellon_inner(bytes)
+    }))
+    .map_err(|_| EngineError::Parse("excellon parser panicked on this input".into()))?
+}
+
+fn resolve_excellon_inner(bytes: &[u8]) -> Result<PolygonSet> {
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
@@ -211,6 +232,12 @@ pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
         EngineError::Parse("Excellon file declares no units (INCH/METRIC)".into())
     })?;
     let (int_digits, dec_digits) = fmt_digits.unwrap_or_else(|| units.default_format());
+    if int_digits > MAX_FORMAT_DIGITS || dec_digits > MAX_FORMAT_DIGITS {
+        return Err(EngineError::Parse(format!(
+            "drill coordinate format {int_digits}:{dec_digits} declares more than \
+             {MAX_FORMAT_DIGITS} digits on one side — refusing an absurd format"
+        )));
+    }
     let fmt = Format {
         zeros,
         int_digits,
@@ -275,6 +302,14 @@ fn parse_header_line(
         let d: f64 = dia
             .parse()
             .map_err(|_| EngineError::Parse(format!("bad tool diameter in '{line}'")))?;
+        // A digit run long enough to overflow f64 parses as `inf`; it would reach
+        // the geometry builders and saturate the nm cast (#308). Units aren't
+        // known yet here, so the range check happens at select time.
+        if !d.is_finite() {
+            return Err(EngineError::Parse(format!(
+                "tool diameter in '{line}' is not a finite number"
+            )));
+        }
         tools.insert(num, d);
         return Ok(());
     }
@@ -342,6 +377,10 @@ struct Body {
     y: f64,
     routing: bool, // between M15 (down) and M16/M17 (up)
     contours: Vec<Contour>,
+    /// Running sum of vertices across all pushed contours, checked against the
+    /// shared `MAX_POINTS_PER_LAYER` on every push (#308). The contour count is
+    /// `contours.len()`, checked against `MAX_CONTOURS_PER_LAYER` the same way.
+    total_points: usize,
 }
 
 impl Body {
@@ -355,6 +394,7 @@ impl Body {
             y: 0.0,
             routing: false,
             contours: Vec::new(),
+            total_points: 0,
         }
     }
 
@@ -416,6 +456,17 @@ impl Body {
                 "repeat code 'R{rest}' carries no X/Y offset"
             )));
         }
+        // A repeat count is pure amplification (`R4000000000X0.001` asks for 4e9
+        // holes from one line, #308): refuse up front against the shared per-layer
+        // contour budget rather than grinding towards it one hit at a time.
+        let requested = self.contours.len().saturating_add(n as usize);
+        if requested > MAX_CONTOURS_PER_LAYER {
+            return Err(EngineError::ObjectLimit {
+                what: "contours",
+                count: requested,
+                limit: MAX_CONTOURS_PER_LAYER,
+            });
+        }
         // Offsets are relative steps in the file's format/units; a missing axis
         // steps by zero.
         let (dx, dy) = self.read_xy(frag, 0.0, 0.0)?;
@@ -436,8 +487,19 @@ impl Body {
                 "drill body selects tool T{t} not defined in the header"
             ))
         })?;
-        self.dia_nm = d * self.unit_nm;
+        // Range-guard the nm diameter like the Gerber `dim()` chokepoint: an absurd
+        // value must fail loud here, not saturate inside geom::ngon (#308).
+        self.dia_nm = self.nm(d * self.unit_nm)?;
         Ok(())
+    }
+
+    /// Range/finiteness guard for a value already in nm — the Excellon
+    /// equivalent of the Gerber `dim()` chokepoint. Returns the value unchanged
+    /// (rounding to the grid happens in the geometry builders) so a guarded
+    /// coordinate is exactly what the unguarded path would have used.
+    fn nm(&self, v: f64) -> Result<f64> {
+        snap_nm(v)?;
+        Ok(v)
     }
 
     fn coordinate_line(&mut self, line: &str) -> Result<()> {
@@ -478,12 +540,15 @@ impl Body {
     /// Read the X/Y tokens from a coordinate fragment, in nm, modal (a missing
     /// axis keeps its previous value).
     fn read_xy(&self, frag: &str, dx: f64, dy: f64) -> Result<(f64, f64)> {
+        // Explicit-decimal fields accept anything `f64` parses (`1.0e300`,
+        // `1.0e999` = inf); guard every decoded coordinate so it fails loud instead
+        // of saturating the nm cast in the geometry builders (#308).
         let x = match extract_axis(frag, 'X') {
-            Some(f) => self.fmt.decode(f)? * self.unit_nm,
+            Some(f) => self.nm(self.fmt.decode(f)? * self.unit_nm)?,
             None => dx,
         };
         let y = match extract_axis(frag, 'Y') {
-            Some(f) => self.fmt.decode(f)? * self.unit_nm,
+            Some(f) => self.nm(self.fmt.decode(f)? * self.unit_nm)?,
             None => dy,
         };
         Ok((x, y))
@@ -495,8 +560,9 @@ impl Body {
                 "drill hit before a tool with a positive diameter was selected".into(),
             ));
         }
-        self.contours.push(geom::ngon(x, y, self.dia_nm / 2.0));
-        Ok(())
+        // Repeat codes accumulate `x += dx`, so guard the final position too.
+        let (x, y) = (self.nm(x)?, self.nm(y)?);
+        self.push(geom::ngon(x, y, self.dia_nm / 2.0))
     }
 
     fn emit_slot(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<()> {
@@ -505,8 +571,32 @@ impl Body {
                 "drill slot before a tool with a positive diameter was selected".into(),
             ));
         }
-        self.contours
-            .push(geom::stadium(x1, y1, x2, y2, self.dia_nm / 2.0));
+        let (x1, y1) = (self.nm(x1)?, self.nm(y1)?);
+        let (x2, y2) = (self.nm(x2)?, self.nm(y2)?);
+        self.push(geom::stadium(x1, y1, x2, y2, self.dia_nm / 2.0))
+    }
+
+    /// Append one contour, then enforce the per-layer contour and point ceilings
+    /// shared with the Gerber front-end (#83, #308). Checked on every push — a
+    /// single `R` line can emit thousands of hits, so a per-line check would let
+    /// the loop run far past the budget before failing.
+    fn push(&mut self, c: Contour) -> Result<()> {
+        self.total_points += c.len();
+        self.contours.push(c);
+        if self.contours.len() > MAX_CONTOURS_PER_LAYER {
+            return Err(EngineError::ObjectLimit {
+                what: "contours",
+                count: self.contours.len(),
+                limit: MAX_CONTOURS_PER_LAYER,
+            });
+        }
+        if self.total_points > MAX_POINTS_PER_LAYER {
+            return Err(EngineError::ObjectLimit {
+                what: "points",
+                count: self.total_points,
+                limit: MAX_POINTS_PER_LAYER,
+            });
+        }
         Ok(())
     }
 
@@ -747,5 +837,142 @@ mod tests {
         let src =
             "M48\nMETRIC,TZ\nT1C0.5\n%\nT1\nG00X10.0Y10.0\nM15\nG03X15.0Y10.0I2.5J0\nM16\nM30\n";
         assert!(resolve_excellon(src.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn huge_repeat_count_fails_loud_with_object_limit() {
+        // `R4000000000X0.001` asks one line to emit 4e9 holes (#308). It must trip
+        // the shared per-layer contour cap up front — not grind through the loop.
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX10.0Y10.0\nR4000000000X0.001\nM30\n";
+        match resolve_excellon(src.as_bytes()) {
+            Err(EngineError::ObjectLimit { what, limit, count }) => {
+                assert_eq!(what, "contours");
+                assert_eq!(limit, MAX_CONTOURS_PER_LAYER);
+                assert!(count > limit, "count {count} must exceed limit {limit}");
+            }
+            other => panic!("expected ObjectLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn many_small_repeats_trip_the_point_cap() {
+        // Each repeat line stays under the contour cap, but the summed vertices
+        // (64 per hit) cross the shared point ceiling; the per-push check must
+        // catch it (#308). Caps are lowered under cfg(test).
+        let per_line = 100;
+        let lines = MAX_POINTS_PER_LAYER / (per_line * geom::CIRCLE_SEGMENTS) + 2;
+        assert!(
+            lines * per_line < MAX_CONTOURS_PER_LAYER,
+            "test must trip the point cap, not the contour cap"
+        );
+        let mut src = String::from("M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX0.0Y0.0\n");
+        for _ in 0..lines {
+            src.push_str(&format!("R{per_line}X0.001\n"));
+        }
+        src.push_str("M30\n");
+        match resolve_excellon(src.as_bytes()) {
+            Err(EngineError::ObjectLimit { what, limit, .. }) => {
+                assert_eq!(what, "points");
+                assert_eq!(limit, MAX_POINTS_PER_LAYER);
+            }
+            other => panic!("expected ObjectLimit(points), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absurd_format_digits_fail_loud() {
+        // `;FILE_FORMAT=3:99999999999` made decode() zero-pad every suppressed
+        // coordinate to ~1e11 characters and abort the process (#308). Both the
+        // comment form and the inline `METRIC,LZ,000.0000000000` form must be a
+        // parse error before any coordinate is decoded.
+        let src =
+            "M48\n;FILE_FORMAT=3:99999999999\nMETRIC,LZ\nT1C0.5\n%\nT1\nX010000Y010000\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Parse(_))
+        ));
+        let src = "M48\nMETRIC,LZ,0000000000.000\nT1C0.5\n%\nT1\nX010000Y010000\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Parse(_))
+        ));
+        // 9:9 is the largest accepted split and still decodes exactly.
+        let src = "M48\n;FILE_FORMAT=9:9\nMETRIC,LZ\nT1C0.5\n%\nT1\nX000000010Y000000010\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 1);
+    }
+
+    #[test]
+    fn non_finite_and_out_of_range_coordinates_fail_loud() {
+        // Explicit-decimal coordinates accept anything f64 parses; each of these
+        // used to reach geom::ngon and saturate `round() as i64` silently (#308).
+        for coord in [
+            "Xinf",
+            "XNaN",
+            "X1e300",
+            "X1.0e300",
+            "X1.0e999",
+            "X-1.0e999",
+        ] {
+            let src = format!("M48\nMETRIC,TZ\nT1C0.500\n%\nT1\n{coord}Y10.0\nM30\n");
+            let r = resolve_excellon(src.as_bytes());
+            assert!(
+                matches!(
+                    r,
+                    Err(EngineError::Parse(_)) | Err(EngineError::Geometry(_))
+                ),
+                "{coord}: expected a loud error, got {r:?}"
+            );
+        }
+        // A tool-up rapid to an absurd point must fail at the move, not later.
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nG00X1.0e300Y0.0\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Geometry(_))
+        ));
+        // Repeats accumulating past the range fail at the hit that crosses it.
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX0.0Y0.0\nR3X60000000.0\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Geometry(_))
+        ));
+    }
+
+    #[test]
+    fn non_finite_tool_diameter_fails_loud() {
+        // The tool-def scanner only admits digits and '.', so `inf` arrives as a
+        // digit run too long for f64 (parses to +inf). It used to reach
+        // geom::ngon as an infinite radius (#308).
+        let inf_digits = "9".repeat(400);
+        let src = format!("M48\nMETRIC,TZ\nT1C{inf_digits}\n%\nT1\nX10.0Y10.0\nM30\n");
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Parse(_))
+        ));
+        // Finite but past the nm range (1e300 mm) must fail at tool select.
+        let big = format!("1{}", "0".repeat(300));
+        let src = format!("M48\nMETRIC,TZ\nT1C{big}\n%\nT1\nX10.0Y10.0\nM30\n");
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Geometry(_))
+        ));
+    }
+
+    #[test]
+    fn resolver_never_panics_on_garbage() {
+        // The catch_unwind boundary (#308) must turn any panic in the header/body
+        // walk into a typed error: resolve_excellon returns for ANY bytes. The
+        // fuzz target covers the broader space.
+        let inputs: &[&[u8]] = &[
+            b"",
+            b"\xff\xfe\x00\x01 not a drill file",
+            b"M48\n",                           // header never terminated
+            b"M48\nMETRIC\n%\nT1\nX\nY\n",      // empty coordinate fields
+            b"M48\nMETRIC,TZ\nT1C\n%\nR\nRX\n", // malformed tool def and repeats
+            b"M48\nMETRIC,TZ\nT1C0.5\n%\nT1\nX1.0Y1.0G85\n",
+        ];
+        for inp in inputs {
+            let _ = resolve_excellon(inp); // Ok or Err — must not panic.
+        }
     }
 }

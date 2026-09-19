@@ -170,7 +170,7 @@
     function captureCanvas(){try{var c=el('the_canvas_id');
       return (c&&c.toDataURL)?c.toDataURL('image/png'):null;}catch(e){return null;}}
     function done(ok){shots=[];renderShots();etfbClose();el('etfb-text').value='';el('etfb-name').value='';el('etfb-text').style.borderColor='';
-      var t=el('etfb-toast');t.textContent=ok?'✓ Thanks — sent!':"⚠ Couldn't send — please tell Simon directly";
+      var t=el('etfb-toast');t.textContent=ok?'✓ Thanks — sent!':"⚠ Couldn't send — please open a GitHub issue instead";
       t.style.borderColor=ok?'#36d39a':'#e8b34a';t.style.color=ok?'#bff5e0':'#f0d49a';t.style.background=ok?'#10331f':'#33270f';
       t.classList.add('show');setTimeout(function(){t.classList.remove('show');},2800);}
     window.etfbSend=function(){var text=el('etfb-text').value.trim();
