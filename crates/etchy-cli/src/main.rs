@@ -202,6 +202,20 @@ impl LayerFilter {
     }
 }
 
+/// Validate an area threshold read from the command line (#295). clap parses the
+/// `f64` with `FromStr`, which accepts `nan`, `inf` and negatives: `area > NaN` is
+/// always false (a silently disarmed gate), and `0.0 > -1.0` is true (an identical
+/// board fails). A threshold must be finite and >= 0; anything else is a loud
+/// exit 2 naming the flag and the value.
+fn check_area_threshold(flag: &str, value: Option<f64>) -> Result<Option<f64>> {
+    match value {
+        Some(t) if !t.is_finite() || t < 0.0 => {
+            anyhow::bail!("{flag} must be a finite, non-negative number of mm², got `{t}`")
+        }
+        other => Ok(other),
+    }
+}
+
 /// The CI gate (#M2): decides whether a diff should fail (exit 1). Thresholds are
 /// opt-in — with none set, any change on the gated layers fails (so
 /// `--gate-layers copper` alone means "fail on copper, ignore silkscreen").
@@ -214,7 +228,7 @@ struct Gate {
 impl Gate {
     fn from_cli(cli: &Cli) -> Result<Self> {
         Ok(Self {
-            fail_on_area: cli.fail_on_area,
+            fail_on_area: check_area_threshold("--fail-on-area", cli.fail_on_area)?,
             fail_on_regions: cli.fail_on_regions,
             filter: LayerFilter::parse(&cli.gate_layers)?,
         })
@@ -993,6 +1007,42 @@ mod tests {
         ] {
             assert!(LayerFilter::parse(ok).is_ok(), "'{ok}' should be valid");
         }
+    }
+
+    #[test]
+    fn area_threshold_rejects_nan_inf_and_negative() {
+        // #295: `--fail-on-area nan` disarmed the gate (area > NaN is never true)
+        // and a negative threshold failed an identical board (0.0 > -1.0). Every
+        // area threshold must be finite and >= 0, refused before the diff runs.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let err = check_area_threshold("--fail-on-area", Some(bad))
+                .err()
+                .unwrap_or_else(|| panic!("{bad} must be rejected"));
+            let msg = err.to_string();
+            assert!(msg.contains("--fail-on-area"), "names the flag: {msg}");
+            assert!(msg.contains(&bad.to_string()), "names the value: {msg}");
+        }
+        // Zero (any change fails) and an ordinary threshold are accepted as-is.
+        assert_eq!(
+            check_area_threshold("--fail-on-area", Some(0.0)).unwrap(),
+            Some(0.0)
+        );
+        assert_eq!(
+            check_area_threshold("--fail-on-area", Some(2.5)).unwrap(),
+            Some(2.5)
+        );
+        assert_eq!(check_area_threshold("--fail-on-area", None).unwrap(), None);
+    }
+
+    #[test]
+    fn gate_from_cli_refuses_nan_area() {
+        // The real clap path: `nan` parses as an f64, so the check must sit in
+        // Gate::from_cli, which main() runs before the diff and maps to exit 2.
+        let cli = Cli::try_parse_from(["etchy", "--fail-on-area", "nan", "old", "new"]).unwrap();
+        let err = Gate::from_cli(&cli).err().expect("nan must be refused");
+        assert!(err.to_string().contains("--fail-on-area"));
+        let cli = Cli::try_parse_from(["etchy", "--fail-on-area", "2.5", "old", "new"]).unwrap();
+        assert_eq!(Gate::from_cli(&cli).unwrap().fail_on_area, Some(2.5));
     }
 
     #[test]
