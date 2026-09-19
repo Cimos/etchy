@@ -20,6 +20,35 @@ pub(crate) const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_ZIP_BYTES: u64 = 500 * 1024 * 1024;
 
+/// Cap on the *decompressed* bytes one side's whole input set may occupy — the
+/// sum over every zip entry, picked file, dropped file or folder entry. The
+/// per-file cap alone is not enough: nothing stopped N files at 100 MiB each, so
+/// a 20 MB zip holding 2,000 entries of 99 MiB of zeros passed every check and
+/// asked for ~200 GB (#326). A real fab pack is a few tens of MiB uncompressed;
+/// 500 MiB (five files at the per-file cap) leaves plenty of headroom while
+/// bounding the worst case to something a laptop survives.
+pub(crate) const MAX_TOTAL_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Cap on the number of entries a `.zip` fab pack may carry. A fab pack has well
+/// under 100 files (layers, drills, P&P, a readme); 1,000 is generous headroom and
+/// stops a pack padded with thousands of entries from running up allocations and
+/// extraction time one entry at a time (#326).
+pub(crate) const MAX_ZIP_ENTRIES: usize = 1000;
+
+/// Fail loud once `total` — the running sum of one side's input bytes — passes
+/// `limit`. `name` is the file that tipped it over. Shared by the zip loader, the
+/// folder loader and the multi-file pick/drop paths so the message reads the same
+/// everywhere (#326).
+pub(crate) fn check_total(total: u64, limit: u64, name: &str) -> Result<()> {
+    if total > limit {
+        bail!(
+            "{name} takes this side's input to {total} bytes, over the {limit}-byte total \
+             limit for one board"
+        );
+    }
+    Ok(())
+}
+
 /// Build a [`Board`] from an in-memory set of `(filename, bytes)` layer files.
 /// Shared by every input path — the folder loader, the `.zip` loader, and GUI
 /// drag-and-drop — so the classify/sniff/polygonize logic lives in exactly one
@@ -102,6 +131,7 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
     // Read the bytes here (with a pre-read size guard so a huge file can't OOM
     // us before we even look at it, #82) and hand the shared builder the set.
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(entries.len());
+    let mut total: u64 = 0;
     for path in entries {
         let len = path
             .metadata()
@@ -118,6 +148,9 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
+        // Aggregate guard, also pre-read (#326).
+        total += len;
+        check_total(total, MAX_TOTAL_BYTES, &name)?;
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         files.push((name, bytes));
     }
@@ -127,22 +160,43 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
 /// Read a `.zip` fab pack (its raw bytes) into a [`Board`]. Entries are flattened
 /// to their basename (a pack zipped with a top folder still classifies correctly),
 /// and each entry's size is enforced on the *actual bytes read* so a zip bomb
-/// can't OOM us. Cross-platform (in-memory) so the same path serves native file
-/// picks and web uploads.
+/// can't OOM us — per entry, in aggregate, and by entry count (#326).
+/// Cross-platform (in-memory) so the same path serves native file picks and web
+/// uploads.
 pub fn load_zip(bytes: Vec<u8>) -> Result<(Board, Option<GerberFormat>)> {
-    load_zip_capped(bytes, MAX_LAYER_FILE_BYTES)
+    load_zip_capped(
+        bytes,
+        MAX_LAYER_FILE_BYTES,
+        MAX_TOTAL_BYTES,
+        MAX_ZIP_ENTRIES,
+    )
 }
 
-/// [`load_zip`] with an explicit per-entry byte cap so the guard is testable with
-/// a small limit. The cap is enforced on the bytes actually decompressed, never on
-/// the header-declared uncompressed size: that size is attacker-controlled
-/// metadata, so a forged header that under-declares while its deflate stream
-/// expands past the limit would otherwise sail straight through (#246). We read
-/// through a reader capped at `limit + 1` and bail the moment more than `limit`
-/// bytes come out — the stream is abandoned before it can inflate to gigabytes.
-fn load_zip_capped(bytes: Vec<u8>, limit: u64) -> Result<(Board, Option<GerberFormat>)> {
+/// [`load_zip`] with explicit caps so the guards are testable with small limits:
+/// `limit` per entry, `total_limit` over every entry, `max_entries` on the count.
+/// The byte caps are enforced on the bytes actually decompressed, never on the
+/// header-declared uncompressed size: that size is attacker-controlled metadata,
+/// so a forged header that under-declares while its deflate stream expands past
+/// the limit would otherwise sail straight through (#246). Each entry is read
+/// through a reader capped at one byte past the tighter of `limit` and the
+/// aggregate headroom left, and we bail the moment more than that comes out — the
+/// stream is abandoned before it can inflate to gigabytes, and the sum of what is
+/// ever held in memory stays under `total_limit` (#326).
+fn load_zip_capped(
+    bytes: Vec<u8>,
+    limit: u64,
+    total_limit: u64,
+    max_entries: usize,
+) -> Result<(Board, Option<GerberFormat>)> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("reading zip archive")?;
+    if zip.len() > max_entries {
+        bail!(
+            "zip has {} entries, over the {max_entries}-entry limit for a fab pack",
+            zip.len()
+        );
+    }
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(zip.len());
+    let mut total: u64 = 0;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
@@ -161,18 +215,24 @@ fn load_zip_capped(bytes: Vec<u8>, limit: u64) -> Result<(Board, Option<GerberFo
         if name.is_empty() {
             continue;
         }
+        // Never pull more than one byte past whichever cap is nearer: the
+        // per-entry limit or what the aggregate limit still allows.
+        let cap = limit.min(total_limit - total);
         let mut buf = Vec::new();
         let read = (&mut entry)
-            .take(limit + 1)
+            .take(cap + 1)
             .read_to_end(&mut buf)
             .with_context(|| format!("extracting {name}"))?;
-        if read as u64 > limit {
+        let read = read as u64;
+        if read > limit {
             bail!(
                 "zip entry {name} expands past the {limit}-byte per-file limit \
                  (header declared {} bytes)",
                 entry.size()
             );
         }
+        total += read;
+        check_total(total, total_limit, &format!("zip entry {name}"))?;
         files.push((name, buf));
     }
     board_from_bytes(files)
@@ -307,7 +367,7 @@ mod tests {
 
         // Cap of 100: above the forged 10 (so a declared-size check passes it) but
         // below the real payload (so an actual-bytes check must reject it).
-        let err = load_zip_capped(buf, 100)
+        let err = load_zip_capped(buf, 100, MAX_TOTAL_BYTES, MAX_ZIP_ENTRIES)
             .expect_err("a forged small declaration must not bypass the cap")
             .to_string();
         assert!(err.contains("per-file limit"), "got: {err}");
@@ -326,7 +386,81 @@ mod tests {
             w.write_all(MIN_GERBER).unwrap();
             w.finish().unwrap();
         }
-        let (board, _) = load_zip_capped(buf, MAX_LAYER_FILE_BYTES).unwrap();
+        let (board, _) =
+            load_zip_capped(buf, MAX_LAYER_FILE_BYTES, MAX_TOTAL_BYTES, MAX_ZIP_ENTRIES).unwrap();
         assert_eq!(board.layers.len(), 1);
+    }
+
+    /// A stored zip of `n` copies of `MIN_GERBER`, each a distinct copper layer.
+    fn zip_of_n_layers(n: usize) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for i in 0..n {
+                w.start_file(format!("board-{i}-F_Cu.gtl"), opts).unwrap();
+                w.write_all(MIN_GERBER).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    // #326: entries each under the per-entry cap, whose sum passes the aggregate
+    // cap, must fail loud — the per-entry check alone waved N x cap through.
+    #[test]
+    fn load_zip_capped_rejects_aggregate_over_total_limit() {
+        let one = MIN_GERBER.len() as u64;
+        let buf = zip_of_n_layers(3);
+        // Per-entry cap clears every entry; the total cap sits between two and
+        // three of them, so the third entry tips it.
+        let err = load_zip_capped(buf, one + 10, 2 * one + 10, MAX_ZIP_ENTRIES)
+            .expect_err("three entries over the aggregate cap must be rejected")
+            .to_string();
+        assert!(err.contains("total limit"), "got: {err}");
+        assert!(!err.contains("per-file limit"), "wrong cap named: {err}");
+    }
+
+    // #326: an aggregate cap that exactly fits still loads (boundary is >, not >=).
+    #[test]
+    fn load_zip_capped_accepts_aggregate_at_total_limit() {
+        let one = MIN_GERBER.len() as u64;
+        let buf = zip_of_n_layers(3);
+        let (board, _) = load_zip_capped(buf, one, 3 * one, MAX_ZIP_ENTRIES).unwrap();
+        assert_eq!(board.layers.len(), 3);
+    }
+
+    // #326: more entries than the count cap fails before any entry is extracted.
+    #[test]
+    fn load_zip_capped_rejects_too_many_entries() {
+        let buf = zip_of_n_layers(5);
+        let err = load_zip_capped(buf, MAX_LAYER_FILE_BYTES, MAX_TOTAL_BYTES, 4)
+            .expect_err("five entries over a four-entry cap must be rejected")
+            .to_string();
+        assert!(err.contains("entry limit"), "got: {err}");
+        // At the cap exactly it still loads.
+        let (board, _) =
+            load_zip_capped(zip_of_n_layers(4), MAX_LAYER_FILE_BYTES, MAX_TOTAL_BYTES, 4).unwrap();
+        assert_eq!(board.layers.len(), 4);
+    }
+
+    // A normal small pack still loads through the public, real-constant path.
+    #[test]
+    fn load_zip_accepts_a_normal_small_pack() {
+        let (board, fmt) = load_zip(zip_of_n_layers(6)).unwrap();
+        assert_eq!(board.layers.len(), 6);
+        assert!(fmt.is_some());
+    }
+
+    #[test]
+    fn check_total_bites_only_past_the_limit() {
+        assert!(check_total(10, 10, "a.gtl").is_ok());
+        let err = check_total(11, 10, "a.gtl").unwrap_err().to_string();
+        assert!(
+            err.contains("a.gtl") && err.contains("total limit"),
+            "got: {err}"
+        );
     }
 }

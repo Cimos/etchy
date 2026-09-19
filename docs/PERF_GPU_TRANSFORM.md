@@ -1,6 +1,6 @@
 # Design — GPU-side geometry transform for the viewer
 
-**Status:** proposed (awaiting Simon's review). **Author:** Simon. **Date:** 2026-06-24.
+**Status:** proposed (awaiting the owner's review). **Author:** the owner. **Date:** 2026-06-24.
 
 ## Problem
 
@@ -12,7 +12,7 @@ thousands of triangles):
 - "Turning off all the other layers speeds up the app a lot."
 
 An adaptive-LOD pass (cull sub-pixel base copper when zoomed out) shipped in #74 and
-**did not help at working zoom** — confirmed by Simon ("no real change"). That is
+**did not help at working zoom** — confirmed by the owner ("no real change"). That is
 expected: LOD only removes features that are already sub-pixel, which only happens
 when zoomed far out. At normal working zoom every feature is full size, so nothing is
 culled and the full triangle set is processed each frame.
@@ -161,7 +161,7 @@ current CPU path** — see below.
 3. Ship behind the existing modes (no user-facing flag needed if parity holds);
    document in DEVELOPER_GUIDE.
 
-## Open decisions (for Simon)
+## Open decisions (for the owner)
 
 1. **Dimming/colour**: bake per-vertex at upload (chosen here — simplest) vs a per-layer
    uniform + per-vertex layer id (avoids re-upload on selection change, more shader

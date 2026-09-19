@@ -30,6 +30,18 @@ enum Exit {
     Error = 2,
 }
 
+impl Exit {
+    /// The 0/1 outcome of a comparison that ran: `passed` (no gated change) is
+    /// `NoDiff`, anything else is `DiffFound`.
+    fn from_passed(passed: bool) -> Self {
+        if passed {
+            Exit::NoDiff
+        } else {
+            Exit::DiffFound
+        }
+    }
+}
+
 impl From<Exit> for ExitCode {
     fn from(code: Exit) -> Self {
         ExitCode::from(code as u8)
@@ -60,7 +72,7 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Format::Summary)]
     format: Format,
     /// Deprecated alias for `--format json`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "format")]
     json: bool,
     /// Write a per-layer SVG of the diff into this directory: one `<layer>.svg`
     /// per changed layer (base faint grey, removed red, added green). The
@@ -90,7 +102,8 @@ struct Cli {
     /// PDF inputs only: rasterization resolution in DPI (default 150). One DPI
     /// for all sheet sizes — larger sheets produce more pixels, text stays
     /// equally crisp. Higher DPI = crisper diff but more memory/time (per-page
-    /// pixel area is capped; see the error if you hit it).
+    /// pixel area and the total across both documents are capped; see the error
+    /// if you hit it).
     #[arg(long, value_name = "DPI")]
     dpi: Option<f32>,
     /// PDF inputs only: write one overlay PNG per diffed page (`page-<n>.png`)
@@ -159,6 +172,14 @@ impl LayerFilter {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        if tokens.is_empty() {
+            anyhow::bail!(
+                "--gate-layers has no groups: '{spec}' is only separators (this would \
+                 silently disarm the gate). Use 'all' or a comma-separated list of: \
+                 copper, mask, silk, paste, drill, outline, documentation/docs, \
+                 placement, other"
+            );
+        }
         for t in &tokens {
             let known = t == "docs" || KIND_TAGS.iter().any(|k| k.contains(t.as_str()));
             if !known {
@@ -541,7 +562,7 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
             format_summary(&report, &verdict)
         }
     };
-    write_stdout(&out)?;
+    write_stdout(&out, Exit::from_passed(verdict.passed))?;
     Ok(RunOutcome::Board {
         passed: verdict.passed,
     })
@@ -550,9 +571,12 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
 /// Write a finished report to stdout, treating a downstream pipe that closed
 /// early (`etchy … | head`) as a clean exit instead of the panic `println!`
 /// raises on a broken pipe (which escaped the 0/1/2 contract as exit 101 — #261).
-/// Any other write failure is a real error and propagates (exit 2), so a genuine
-/// I/O problem is never masked. Appends the trailing newline `println!` would.
-fn write_stdout(s: &str) -> Result<()> {
+/// `on_broken_pipe` is the exit code the run has already decided (0 or 1): the
+/// consumer going away loses the text, not the verdict, so `etchy … | head` in
+/// CI still gates (#296). Any other write failure is a real error and propagates
+/// (exit 2), so a genuine I/O problem is never masked. Appends the trailing
+/// newline `println!` would.
+fn write_stdout(s: &str, on_broken_pipe: Exit) -> Result<()> {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
@@ -563,9 +587,9 @@ fn write_stdout(s: &str) -> Result<()> {
     {
         Ok(()) => Ok(()),
         // The consumer went away — there is nothing left to report to. Exit
-        // quietly with success, the conventional CLI behaviour for SIGPIPE.
+        // quietly, with the verdict the run reached, not an unconditional 0.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-            std::process::exit(Exit::NoDiff as i32);
+            std::process::exit(on_broken_pipe as i32);
         }
         Err(e) => Err(e).context("writing to stdout"),
     }
@@ -825,7 +849,20 @@ fn status_str(s: etchy_core::LayerStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
     use etchy_core::LayerReport;
+
+    #[test]
+    fn deprecated_json_flag_conflicts_with_explicit_format() {
+        let err = Cli::try_parse_from(["etchy", "old", "new", "--json", "--format", "md"])
+            .expect_err("--json and --format must conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+
+        let cli = Cli::try_parse_from(["etchy", "old", "new", "--json"])
+            .expect("--json alone must remain valid");
+        assert!(cli.json);
+        assert_eq!(cli.format, Format::Summary);
+    }
 
     fn layer(kind: &'static str, area_mm2: f64, regions: u32) -> LayerReport {
         LayerReport {
@@ -955,6 +992,25 @@ mod tests {
             "",
         ] {
             assert!(LayerFilter::parse(ok).is_ok(), "'{ok}' should be valid");
+        }
+    }
+
+    #[test]
+    fn filter_rejects_separator_only_spec() {
+        // "," passed the ""/"all" test, then split to ZERO tokens, so the
+        // validation loop never ran and the filter matched no layer at all —
+        // `--gate-layers ,` exited 0 on a real change (#294).
+        for bad in [",", " , ", ",,", " ,, "] {
+            assert!(
+                LayerFilter::parse(bad).is_err(),
+                "'{bad}' should be rejected"
+            );
+        }
+        // "" and "all" still mean every layer.
+        for all in ["", "all", " all "] {
+            let f = LayerFilter::parse(all).unwrap();
+            assert!(f.all, "'{all}' should mean all layers");
+            assert!(f.includes("top-copper"));
         }
     }
 
