@@ -83,6 +83,14 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   downloads from one click.
 
 ### Fixed
+- **The demo server no longer serves the feedback log or tester screenshots over
+  GET** (#334). The block compared the raw request string, so `/feedback%2Ejsonl`,
+  `/./feedback.jsonl` and `//feedback.jsonl` fetched the file, and the
+  `screenshots/` dir beside it was never blocked at all — anyone on the LAN could
+  list and pull every tester's IP, name, text and screenshots. The decision is now
+  made on the resolved real path (feedback file, script, anything under
+  `screenshots/`), directory listings return 404, and an offline unittest covers
+  the bypasses (`deploy/demo/test_etchy_server.py`).
 - **A schematic page whose paper size changed is now a diff, not an error**
   (#262). A resized sheet used to fail the whole run with `ImageSizeMismatch` and
   exit 2 — which CI treats as infrastructure failure to retry, not a review gate

@@ -84,7 +84,8 @@ serve() {
   local ip; ip="$( (hostname -I 2>/dev/null || echo) | awk '{print $1}')"
   say "feedback -> $fb"
   say "serving on 0.0.0.0:$PORT  ->  http://${ip:-<this-host-ip>}:$PORT/"
-  say "stop with Ctrl+C; commit deploy/feedback/$(hostname).jsonl to share feedback."
+  say "feedback files stay local and gitignored; do not commit them."
+  say "to prepare a merge: python3 deploy/collect-feedback.py --merged (scrub its output before sharing; see deploy/feedback/README.md)."
   ETCHY_FEEDBACK="$fb" exec python3 "$SERVE_DIR/etchy-server.py" "$PORT" "$SERVE_DIR"
 }
 

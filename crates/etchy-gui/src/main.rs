@@ -1251,6 +1251,23 @@ impl LoadedSource {
     }
 }
 
+/// What one drop or file pick resolved to (#325). Usually a single source for
+/// the side the gesture targeted; exactly two fab packs dropped together fill
+/// both sides at once (old = first by name, new = second) instead of one of them
+/// silently winning.
+enum DroppedSources {
+    One(LoadedSource),
+    Pair {
+        old: LoadedSource,
+        new: LoadedSource,
+    },
+}
+
+/// The one message for every ambiguous multi-pack drop (#325): shown verbatim
+/// so the user learns the accepted shapes instead of guessing why nothing loaded.
+const DROP_SHAPE_HINT: &str =
+    "drop one fab pack per side: either one zip, or two zips for old and new, or loose layer files";
+
 /// The computed comparison of two sources: a geometric board diff, or a per-page
 /// PDF pixel diff (#63).
 enum ComputedDiff {
@@ -1293,7 +1310,7 @@ enum RevSide {
 #[cfg(target_arch = "wasm32")]
 struct FilePick {
     side: RevSide,
-    result: anyhow::Result<LoadedSource>,
+    result: anyhow::Result<DroppedSources>,
 }
 
 /// Default Focus (#224): a gentle highlight — non-selected layers at 75% so the
@@ -2012,7 +2029,7 @@ const BUILD_SHA: &str = env!("ETCHY_BUILD_SHA");
 /// Links for the Help menu.
 const URL_REPO: &str = "https://github.com/Cimos/etchy";
 const URL_ISSUES: &str = "https://github.com/Cimos/etchy/issues";
-const URL_SITE: &str = "https://cimos.github.io";
+const URL_SITE: &str = "https://cimos.github.io/etchy/";
 const URL_SPONSOR: &str = "https://github.com/sponsors/Cimos";
 
 /// The etchy brand icon (#191), embedded at compile time. 256 px source drawn at
@@ -2531,13 +2548,37 @@ impl ViewApp {
     }
 
     /// Store a freshly loaded source on one side and re-diff if both sides are set.
+    ///
+    /// A failed re-diff (#330) restores the side's previous source: the diff,
+    /// labels, layer list and export on screen still describe the previous
+    /// pair, so the stored sources must too. The error stays visible; the
+    /// rejected file is dropped rather than silently kept for the next load.
     fn set_side(&mut self, side: RevSide, loaded: LoadedSource) {
-        match side {
-            RevSide::Old => self.src_old = Some(loaded),
-            RevSide::New => self.src_new = Some(loaded),
-        }
+        let slot = match side {
+            RevSide::Old => &mut self.src_old,
+            RevSide::New => &mut self.src_new,
+        };
+        let prev = slot.replace(loaded);
         self.load_error = None;
         self.rebuild_diff();
+        if self.load_error.is_some() {
+            match side {
+                RevSide::Old => self.src_old = prev,
+                RevSide::New => self.src_new = prev,
+            }
+        }
+    }
+
+    /// Place what a drop or pick resolved to (#325): one source goes to `side`;
+    /// a pair fills old and new together and re-diffs once.
+    fn adopt_sources(&mut self, side: RevSide, sources: DroppedSources) {
+        match sources {
+            DroppedSources::One(src) => self.set_side(side, src),
+            DroppedSources::Pair { old, new } => {
+                self.src_old = Some(old);
+                self.set_side(RevSide::New, new);
+            }
+        }
     }
 
     /// Recompute the comparison from the two sources, if both are present.
@@ -2584,7 +2625,7 @@ impl ViewApp {
     fn poll_file_picks(&mut self) {
         while let Ok(pick) = self.file_rx.try_recv() {
             match pick.result {
-                Ok(loaded) => self.set_side(pick.side, loaded),
+                Ok(loaded) => self.adopt_sources(pick.side, loaded),
                 Err(e) => self.load_error = Some(format!("{e:#}")),
             }
         }
@@ -2671,15 +2712,15 @@ impl ViewApp {
             return;
         }
         match load_dropped_paths(&paths) {
-            Ok(loaded) => self.set_side(side, loaded),
+            Ok(loaded) => self.adopt_sources(side, loaded),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
 
     #[cfg(target_arch = "wasm32")]
     fn load_dropped(&mut self, side: RevSide, files: Vec<egui::DroppedFile>) {
-        // Web drops carry bytes; the shared classifier routes a `.zip`, a
-        // schematic `.pdf` (#63), or loose Gerber layers.
+        // Web drops carry bytes; the shared classifier routes a `.zip` (or a
+        // pair of them, #325), a schematic `.pdf` (#63), or loose Gerber layers.
         let byte_files: Vec<(String, Vec<u8>)> = files
             .into_iter()
             .filter_map(|f| f.bytes.map(|b| (basename(&f.name), b.to_vec())))
@@ -2687,8 +2728,8 @@ impl ViewApp {
         if byte_files.is_empty() {
             return;
         }
-        match files_to_source(byte_files, "dropped files") {
-            Ok(src) => self.set_side(side, src),
+        match files_to_sources(byte_files, "dropped files") {
+            Ok(src) => self.adopt_sources(side, src),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
@@ -2716,10 +2757,12 @@ impl ViewApp {
             };
             let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
             let mut oversized: Option<anyhow::Error> = None;
+            let mut total: u64 = 0;
             for h in handles {
                 let name = h.file_name();
                 // Check `File.size` BEFORE reading, so an oversized upload is
-                // rejected without ever pulling it into wasm memory (#247).
+                // rejected without ever pulling it into wasm memory (#247) —
+                // per file, and in aggregate across the pick (#326).
                 let size = h.inner().size();
                 if size > loader::MAX_LAYER_FILE_BYTES as f64 {
                     oversized = Some(anyhow::anyhow!(
@@ -2730,12 +2773,19 @@ impl ViewApp {
                     ));
                     break;
                 }
+                total += size as u64;
+                if let Err(e) =
+                    loader::check_total(total, loader::MAX_TOTAL_BYTES, &basename(&name))
+                {
+                    oversized = Some(e);
+                    break;
+                }
                 let bytes = h.read().await;
                 byte_files.push((basename(&name), bytes));
             }
             let result = match oversized {
                 Some(e) => Err(e),
-                None => files_to_source(byte_files, "uploaded"),
+                None => files_to_sources(byte_files, "uploaded"),
             };
             let _ = tx.send(FilePick { side, result });
             ctx.request_repaint();
@@ -2907,13 +2957,14 @@ fn basename(name: &str) -> String {
     name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
 }
 
-/// Classify a set of in-memory `(filename, bytes)` files into one loaded source
-/// (#63): a single schematic PDF (by `.pdf` name or `%PDF` magic) → PDF mode; a
-/// `.zip` → the fab-pack loader; anything else → loose Gerber layers. A PDF mixed
-/// with other files is a loud error — one PDF per side, never a guess. Shared by
-/// the web drop and web file-pick paths; pure over bytes, so it's unit-tested on
-/// native too.
-fn files_to_source(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<LoadedSource> {
+/// Classify a set of in-memory `(filename, bytes)` files into loaded sources
+/// (#63, #325): a single schematic PDF (by `.pdf` name or `%PDF` magic) → PDF
+/// mode; one `.zip` → the fab-pack loader; exactly two `.zip`s and nothing else →
+/// a pair, old = first by name; anything else → loose Gerber layers. A PDF mixed
+/// with other files, more than two zips, or a zip beside loose layers is a loud
+/// error — never a guess about which pack the user meant. Shared by the web drop
+/// and web file-pick paths; pure over bytes, so it's unit-tested on native too.
+fn files_to_sources(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<DroppedSources> {
     let pdf_count = files
         .iter()
         .filter(|(name, bytes)| {
@@ -2930,27 +2981,59 @@ fn files_to_source(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result
         if !pdfview::looks_like_pdf(&bytes) {
             anyhow::bail!("{name} has a .pdf name but no PDF content (%PDF magic missing)");
         }
-        return Ok(LoadedSource::Pdf(LoadedPdf { label: name, bytes }));
+        return Ok(DroppedSources::One(LoadedSource::Pdf(LoadedPdf {
+            label: name,
+            bytes,
+        })));
     }
     let mut byte_files: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut zip: Option<Vec<u8>> = None;
+    let mut zips: Vec<(String, Vec<u8>)> = Vec::new();
     for (name, bytes) in files {
         if name.to_ascii_lowercase().ends_with(".zip") {
-            zip = Some(bytes);
+            zips.push((name, bytes));
         } else {
             byte_files.push((name, bytes));
         }
     }
-    let (board, fmt) = if let Some(zb) = zip {
-        loader::load_zip(zb)
-    } else {
-        loader::board_from_bytes(byte_files)
-    }?;
-    Ok(LoadedSource::Board(LoadedBoard {
-        label: label.to_string(),
-        board,
-        fmt,
-    }))
+    let board_source =
+        |board, fmt, label: String| LoadedSource::Board(LoadedBoard { label, board, fmt });
+    match (zips.len(), byte_files.is_empty()) {
+        (0, _) => {
+            let (board, fmt) = loader::board_from_bytes(byte_files)?;
+            Ok(DroppedSources::One(board_source(
+                board,
+                fmt,
+                label.to_string(),
+            )))
+        }
+        (1, true) => {
+            let (_, bytes) = zips.pop().expect("len checked above");
+            let (board, fmt) = loader::load_zip(bytes)?;
+            Ok(DroppedSources::One(board_source(
+                board,
+                fmt,
+                label.to_string(),
+            )))
+        }
+        (2, true) => {
+            // Two packs at once fill both sides (#325); name order decides
+            // which is old so the same drop always lands the same way.
+            zips.sort_by(|a, b| a.0.cmp(&b.0));
+            let (new_name, new_bytes) = zips.pop().expect("len checked above");
+            let (old_name, old_bytes) = zips.pop().expect("len checked above");
+            let (ob, of) = loader::load_zip(old_bytes)?;
+            let (nb, nf) = loader::load_zip(new_bytes)?;
+            Ok(DroppedSources::Pair {
+                old: board_source(ob, of, old_name),
+                new: board_source(nb, nf, new_name),
+            })
+        }
+        (n, true) => anyhow::bail!("{n} zip files dropped together — {DROP_SHAPE_HINT}"),
+        (_, false) => anyhow::bail!(
+            "a zip was dropped beside {} loose layer file(s) — {DROP_SHAPE_HINT}",
+            byte_files.len()
+        ),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3015,28 +3098,47 @@ fn load_source_any(path: &std::path::Path, label: String) -> anyhow::Result<Load
     Ok(LoadedSource::Board(LoadedBoard { label, board, fmt }))
 }
 
-/// Native: turn dropped paths into a loaded source. A single dropped folder,
-/// `.zip`, or schematic `.pdf` (#63) loads directly; multiple dropped files are
-/// read as individual layers (a PDF among them is a loud error via
-/// `files_to_source` — one PDF per side).
+/// Native: is this path a whole fab pack — a Gerber folder or a `.zip`?
 #[cfg(not(target_arch = "wasm32"))]
-fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSource> {
+fn is_fab_pack(p: &std::path::Path) -> bool {
+    p.is_dir()
+        || p.extension()
+            .map(|e| e.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false)
+}
+
+/// Native: turn dropped paths into loaded sources. A single dropped folder,
+/// `.zip`, or schematic `.pdf` (#63) loads directly; exactly two folders or
+/// `.zip`s fill both sides, old = first by name (#325); any other multi-path
+/// drop is read as individual layers (a PDF or a fab pack among them is a loud
+/// error via `files_to_sources` — one PDF per side, one pack per side).
+#[cfg(not(target_arch = "wasm32"))]
+fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSources> {
     use anyhow::Context as _;
     if paths.len() == 1 {
         let p = &paths[0];
-        let is_zip = p
-            .extension()
-            .map(|e| e.eq_ignore_ascii_case("zip"))
-            .unwrap_or(false);
-        if p.is_dir() || is_zip || is_pdf_input(p) {
-            return load_source_any(p, path_label(p));
+        if is_fab_pack(p) || is_pdf_input(p) {
+            return load_source_any(p, path_label(p)).map(DroppedSources::One);
         }
     }
+    if paths.len() == 2 && paths.iter().all(|p| is_fab_pack(p)) {
+        let mut pair: Vec<(String, &std::path::PathBuf)> =
+            paths.iter().map(|p| (path_label(p), p)).collect();
+        pair.sort_by(|a, b| a.0.cmp(&b.0));
+        let old = load_source_any(pair[0].1, pair[0].0.clone())?;
+        let new = load_source_any(pair[1].1, pair[1].0.clone())?;
+        return Ok(DroppedSources::Pair { old, new });
+    }
+    if paths.iter().any(|p| p.is_dir()) {
+        anyhow::bail!("a folder was dropped beside other files — {DROP_SHAPE_HINT}");
+    }
     let mut files: Vec<(String, Vec<u8>)> = Vec::with_capacity(paths.len());
+    let mut total: u64 = 0;
     for p in paths {
         // Check the size from metadata BEFORE reading, so an oversized drop is
         // rejected without ever buffering it into RAM (#247; same pre-read guard
-        // as `read_pdf_bytes` and the folder loader).
+        // as `read_pdf_bytes` and the folder loader) — per file, and in
+        // aggregate across the drop (#326).
         let len = p
             .metadata()
             .with_context(|| format!("reading metadata for {}", p.display()))?
@@ -3048,10 +3150,12 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<LoadedSour
                 loader::MAX_LAYER_FILE_BYTES
             );
         }
+        total += len;
+        loader::check_total(total, loader::MAX_TOTAL_BYTES, &path_label(p))?;
         let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
         files.push((path_label(p), bytes));
     }
-    files_to_source(files, &format!("{} files", paths.len()))
+    files_to_sources(files, &format!("{} files", paths.len()))
 }
 
 impl ViewApp {
@@ -4967,8 +5071,14 @@ impl ViewApp {
         }
         // Focus at 100% hides every non-selected layer — that suppression must
         // be accounted for on-canvas, like the old single-mode hint (#224
-        // review: no silent misses, TRUST-1).
-        if let Some(note) = focus_note(self.focus, shown) {
+        // review: no silent misses, TRUST-1). The selected layer's own eye may
+        // be off (#328), in which case every shown layer is focus-hidden.
+        let selected_visible = self
+            .visible_layers
+            .get(self.selected)
+            .copied()
+            .unwrap_or(false);
+        if let Some(note) = focus_note(self.focus, shown, selected_visible) {
             extra_chips.push(note);
         }
         self.canvas_trailing(&painter, &response, rect, extra_chips);
@@ -5771,7 +5881,7 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
             items,
         };
     }
-    // Overlay / Before / After: stack every visible layer.
+    // Overlay / Before / After: stack every visible layer's base first.
     for &li in &key.visible {
         let layer = &diff.layers[li];
         match key.mode {
@@ -5781,10 +5891,20 @@ fn build_cache(diff: &BoardDiff, key: &GeomKey, outline: Option<usize>) -> TessC
                 if key.base_on {
                     push_context_items(&mut items, &layer.new, Role::Base, Side::Full, li);
                 }
-                push_diff_items(&mut items, &layer.removed, Role::Removed, li);
-                push_diff_items(&mut items, &layer.added, Role::Added, li);
             }
             Mode::Split | Mode::Swipe => unreachable!("split/swipe handled above"),
+        }
+    }
+    // Overlay: the diff of every layer goes on in a SECOND pass, after every base.
+    // Interleaving base and diff per layer let a later layer's opaque base (a
+    // bottom-copper plane, say) paint over an earlier layer's added/removed regions
+    // and hide a real change (#323). Two passes match the GPU-feature path, which
+    // draws all base before any diff.
+    if key.mode == Mode::Overlay {
+        for &li in &key.visible {
+            let layer = &diff.layers[li];
+            push_diff_items(&mut items, &layer.removed, Role::Removed, li);
+            push_diff_items(&mut items, &layer.added, Role::Added, li);
         }
     }
     TessCache {
@@ -6148,7 +6268,9 @@ fn transform_cache(
     // instead of one Mesh+Shape per region — a real board's top-copper layer was ~5.5k
     // mesh allocations per frame; this makes it one. Off-screen items are culled
     // before their vertices are built (cheaper when zoomed in). Items are pushed
-    // base → outline → diff, so draw order within the single mesh stays correct.
+    // outline → every layer's base → every layer's diff (see build_cache), so draw
+    // order within the single mesh stays correct: no layer's opaque base lands on
+    // top of another layer's added/removed regions (#323).
     let mut mesh = egui::epaint::Mesh::default();
     // Pre-reserve the vertex/index buffers (#80). Without this they double-and-copy
     // as they grow; on a dense board (e.g. an 8-layer pack with all layers on) the
@@ -6532,15 +6654,25 @@ fn single_layer_hint(shown: usize, total: usize) -> Option<String> {
 /// The Focus-suppression chip (#224): at focus 100% every non-selected visible
 /// layer is fully hidden — that must be accounted for on-canvas (TRUST-1), the
 /// way the old single-mode "1 / N" hint accounted for its hiding. Below 100%
-/// the layers are still (faintly) visible, so no chip. Pure → unit-testable.
-fn focus_note(focus: f32, shown: usize) -> Option<String> {
-    if focus >= 1.0 && shown > 1 {
-        Some(format!(
-            "focus 100% — {} other layer(s) hidden",
-            shown.saturating_sub(1)
-        ))
+/// the layers are still (faintly) visible, so no chip.
+///
+/// `shown` is the eye-on layer count (outline excluded); `selected_visible` says
+/// whether the selected layer is one of them. The selected layer's eye can be
+/// off (#328): then every shown layer is non-selected, focus 100% hides them
+/// all and the canvas is blank — so the count of "others" must not assume the
+/// selected layer is among `shown`, and the chip has to say why an eye-on
+/// layer is invisible. Pure → unit-testable.
+fn focus_note(focus: f32, shown: usize, selected_visible: bool) -> Option<String> {
+    let others = shown.saturating_sub(usize::from(selected_visible));
+    if focus < 1.0 || others == 0 {
+        return None;
+    }
+    if selected_visible {
+        Some(format!("focus 100% — {others} other layer(s) hidden"))
     } else {
-        None
+        Some(format!(
+            "focus 100% hides the {others} other layer(s); the selected layer's eye is off — press its eye or lower focus"
+        ))
     }
 }
 
@@ -6839,11 +6971,33 @@ mod tests {
         assert!(err.contains("per-file limit"), "got: {err}");
     }
 
+    /// Classify and expect a single source (the common shape).
+    fn one(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<super::LoadedSource> {
+        use super::DroppedSources;
+        match super::files_to_sources(files, label)? {
+            DroppedSources::One(src) => Ok(src),
+            DroppedSources::Pair { .. } => panic!("expected one source, got a pair"),
+        }
+    }
+
+    /// A minimal single-layer fab pack as zip bytes, for the two-zip drop tests.
+    fn zip_pack(layer_name: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zw.start_file(
+            layer_name,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zw.write_all(MIN_GERBER).unwrap();
+        zw.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn files_to_source_routes_a_single_pdf_to_pdf_mode() {
-        use super::{files_to_source, LoadedSource};
-        let src =
-            files_to_source(vec![("sch.pdf".into(), b"%PDF-1.7 junk".to_vec())], "up").unwrap();
+        use super::LoadedSource;
+        let src = one(vec![("sch.pdf".into(), b"%PDF-1.7 junk".to_vec())], "up").unwrap();
         match src {
             LoadedSource::Pdf(p) => {
                 assert_eq!(p.label, "sch.pdf", "PDF keeps its file name as label");
@@ -6856,8 +7010,7 @@ mod tests {
     #[test]
     fn files_to_source_rejects_pdf_mixed_with_layers() {
         // Trust: a PDF among Gerber layers is a loud error, never a guess.
-        use super::files_to_source;
-        let err = match files_to_source(
+        let err = match one(
             vec![
                 ("sch.pdf".into(), b"%PDF-1.7".to_vec()),
                 ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
@@ -6872,8 +7025,7 @@ mod tests {
 
     #[test]
     fn files_to_source_rejects_a_pdf_named_file_without_pdf_content() {
-        use super::files_to_source;
-        let err = match files_to_source(vec![("sch.pdf".into(), b"not a pdf".to_vec())], "up") {
+        let err = match one(vec![("sch.pdf".into(), b"not a pdf".to_vec())], "up") {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a mislabelled .pdf must fail loud"),
         };
@@ -6882,8 +7034,8 @@ mod tests {
 
     #[test]
     fn files_to_source_still_loads_gerber_layers() {
-        use super::{files_to_source, LoadedSource};
-        let src = files_to_source(
+        use super::LoadedSource;
+        let src = one(
             vec![("board-F_Cu.gtl".into(), MIN_GERBER.to_vec())],
             "uploaded",
         )
@@ -6894,6 +7046,105 @@ mod tests {
                 assert_eq!(b.board.layers.len(), 1);
             }
             LoadedSource::Pdf(_) => panic!("gerber layers must stay on the board path"),
+        }
+    }
+
+    // #325: one zip is one source, as before.
+    #[test]
+    fn files_to_sources_loads_one_zip() {
+        use super::LoadedSource;
+        let src = one(
+            vec![("rev-A.zip".into(), zip_pack("a-F_Cu.gtl"))],
+            "dropped files",
+        )
+        .unwrap();
+        match src {
+            LoadedSource::Board(b) => {
+                assert_eq!(b.label, "dropped files");
+                assert_eq!(b.board.layers.len(), 1);
+            }
+            LoadedSource::Pdf(_) => panic!("a zip must stay on the board path"),
+        }
+    }
+
+    // #325: two zips dropped together fill both sides, old = first by name —
+    // regardless of the order the OS handed them over.
+    #[test]
+    fn files_to_sources_two_zips_become_a_pair_in_name_order() {
+        use super::{files_to_sources, DroppedSources};
+        let src = files_to_sources(
+            vec![
+                ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
+                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+            ],
+            "dropped files",
+        )
+        .unwrap();
+        match src {
+            DroppedSources::Pair { old, new } => {
+                assert_eq!(old.label(), "rev-A.zip");
+                assert_eq!(new.label(), "rev-B.zip");
+            }
+            DroppedSources::One(_) => panic!("two zips must load both sides, not one"),
+        }
+    }
+
+    // #325: three zips is ambiguous — fail loud, never pick two.
+    #[test]
+    fn files_to_sources_rejects_three_zips() {
+        use super::files_to_sources;
+        let err = match files_to_sources(
+            vec![
+                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+                ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
+                ("rev-C.zip".into(), zip_pack("c-F_Cu.gtl")),
+            ],
+            "dropped files",
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("three zips must fail loud"),
+        };
+        assert!(err.contains("3 zip files"), "got: {err}");
+        assert!(err.contains("one fab pack per side"), "got: {err}");
+    }
+
+    // #325: a zip beside loose layers used to drop the layers silently.
+    #[test]
+    fn files_to_sources_rejects_zip_mixed_with_loose_layers() {
+        use super::files_to_sources;
+        let err = match files_to_sources(
+            vec![
+                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+                ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
+            ],
+            "dropped files",
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a zip beside loose layers must fail loud"),
+        };
+        assert!(err.contains("beside 1 loose layer"), "got: {err}");
+        assert!(err.contains("one fab pack per side"), "got: {err}");
+    }
+
+    // #325 native: two dropped zip paths load both sides, old = first by name.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropped_two_zip_paths_fill_both_sides() {
+        use super::{load_dropped_paths, DroppedSources};
+        let dir = std::env::temp_dir().join(format!("etchy-drop-pair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("rev-A.zip");
+        let b = dir.join("rev-B.zip");
+        std::fs::write(&a, zip_pack("a-F_Cu.gtl")).unwrap();
+        std::fs::write(&b, zip_pack("b-F_Cu.gtl")).unwrap();
+        let res = load_dropped_paths(&[b, a]);
+        std::fs::remove_dir_all(&dir).ok();
+        match res.unwrap() {
+            DroppedSources::Pair { old, new } => {
+                assert_eq!(old.label(), "rev-A.zip");
+                assert_eq!(new.label(), "rev-B.zip");
+            }
+            DroppedSources::One(_) => panic!("two dropped zips must load both sides"),
         }
     }
 
@@ -6925,6 +7176,63 @@ mod tests {
     }
 
     #[test]
+    fn set_side_restores_the_previous_source_when_the_rediff_fails() {
+        // #330: after a rejected load the stored sources must still describe
+        // the diff on screen. Opening a PDF as "new" over a board pair fails
+        // loud; the board that side held stays, so a later successful load of
+        // the other side diffs against it and not against the rejected PDF.
+        use super::{LoadedBoard, LoadedPdf, LoadedSource, RevSide, ViewApp};
+        let board = |label: &str| {
+            let (board, fmt) = crate::loader::board_from_bytes(vec![(
+                "board-F_Cu.gtl".to_string(),
+                MIN_GERBER.to_vec(),
+            )])
+            .unwrap();
+            LoadedSource::Board(LoadedBoard {
+                label: label.into(),
+                board,
+                fmt,
+            })
+        };
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.set_side(RevSide::Old, board("old"));
+        app.set_side(RevSide::New, board("new"));
+        assert!(app.load_error.is_none());
+        assert_eq!(app.old_label, "old");
+        assert_eq!(app.new_label, "new");
+
+        app.set_side(
+            RevSide::New,
+            LoadedSource::Pdf(LoadedPdf {
+                label: "b.pdf".into(),
+                bytes: b"%PDF-1.7".to_vec(),
+            }),
+        );
+        let err = app.load_error.clone().expect("mixed pair must fail loud");
+        assert!(
+            err.contains("cannot compare a PDF with Gerber"),
+            "got: {err}"
+        );
+        assert_eq!(app.new_label, "new", "on-screen labels untouched");
+        assert_eq!(
+            app.src_new.as_ref().map(|s| s.label()),
+            Some("new"),
+            "the rejected PDF must not replace the stored source"
+        );
+        assert!(
+            matches!(app.src_new, Some(LoadedSource::Board(_))),
+            "stored source agrees with the diff on screen"
+        );
+
+        // The next successful load on the other side diffs against the board
+        // that is still shown, not the rejected PDF.
+        app.set_side(RevSide::Old, board("old2"));
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert_eq!(app.old_label, "old2");
+        assert_eq!(app.new_label, "new");
+    }
+
+    #[test]
     fn hidden_note_only_when_something_is_hidden() {
         // TRUST (#178): the noise-filter's hidden count must never be dropped
         // silently. When nothing is hidden there is no chip; when regions are
@@ -6948,19 +7256,44 @@ mod tests {
         assert_eq!(single_layer_hint(1, 13).as_deref(), Some("1 / 13 layers"));
         // Focus 100% must announce its hiding (#224 review, TRUST-1)…
         assert_eq!(
-            super::focus_note(1.0, 13).as_deref(),
+            super::focus_note(1.0, 13, true).as_deref(),
             Some("focus 100% — 12 other layer(s) hidden")
         );
         // …but below 100% the others are still faintly visible (no chip), and a
         // single visible layer has nothing focus-hidden.
-        assert_eq!(super::focus_note(0.99, 13), None);
-        assert_eq!(super::focus_note(1.0, 1), None);
+        assert_eq!(super::focus_note(0.99, 13, true), None);
+        assert_eq!(super::focus_note(1.0, 1, true), None);
         assert_eq!(single_layer_hint(1, 2).as_deref(), Some("1 / 2 layers"));
         // Not a single-of-many situation → no hint (no clutter).
         assert_eq!(single_layer_hint(2, 13), None); // more than one shown
         assert_eq!(single_layer_hint(13, 13), None); // all shown
         assert_eq!(single_layer_hint(1, 1), None); // only one layer exists
         assert_eq!(single_layer_hint(0, 5), None); // none shown
+    }
+
+    #[test]
+    fn focus_note_counts_others_without_the_selected_layer() {
+        // #328: the selected layer's eye can be off. Then it is not among the
+        // shown layers, so every shown layer is focus-hidden — the count must
+        // not subtract a layer that isn't there, and the chip must explain why
+        // an eye-on layer is invisible.
+        assert_eq!(
+            super::focus_note(1.0, 2, true).as_deref(),
+            Some("focus 100% — 1 other layer(s) hidden")
+        );
+        assert_eq!(
+            super::focus_note(1.0, 2, false).as_deref(),
+            Some(
+                "focus 100% hides the 2 other layer(s); the selected layer's eye is off — press its eye or lower focus"
+            )
+        );
+        // One eye-on layer, selected hidden: previously None (nothing said why
+        // the canvas was blank); now the chip appears.
+        assert!(super::focus_note(1.0, 1, false).is_some());
+        // Nothing shown at all → nothing focus-hidden, no chip.
+        assert_eq!(super::focus_note(1.0, 0, false), None);
+        // Below 100% the eye-off case still shows the others faintly: no chip.
+        assert_eq!(super::focus_note(0.99, 2, false), None);
     }
 
     #[test]
@@ -9011,5 +9344,77 @@ mod tests {
         fresh.visible_layers = vec![false, false, false, false];
         fresh.apply_settings(settings);
         assert_eq!(fresh.visible_layers, vec![true, false, true, false]);
+    }
+
+    /// #323: in Overlay the cache must hold EVERY visible layer's base before ANY
+    /// layer's diff. The old per-layer interleave (base, removed, added, next layer)
+    /// let a later layer's opaque base paint over an earlier layer's diff triangles
+    /// and hide a real change.
+    #[test]
+    fn overlay_cache_puts_every_base_before_every_diff() {
+        use std::sync::Arc;
+        let square = |x0: i64, y0: i64, s: i64| -> etchy_core::Shape {
+            vec![vec![
+                super::Pt::new(x0, y0),
+                super::Pt::new(x0 + s, y0),
+                super::Pt::new(x0 + s, y0 + s),
+                super::Pt::new(x0, y0 + s),
+            ]]
+        };
+        let set = |x0: i64, y0: i64| super::PolygonSet::new(vec![square(x0, y0, 1_000_000)]);
+        // Two changed layers, each with base geometry AND diff geometry.
+        let layer = |kind: etchy_core::LayerKind, x0: i64| super::LayerView {
+            kind,
+            label_old: None,
+            label_new: None,
+            status: super::LayerStatus::Changed,
+            old: Arc::new(set(x0, 0)),
+            new: Arc::new(set(x0, 0)),
+            added: set(x0, 2_000_000),
+            removed: set(x0, 4_000_000),
+            change: etchy_core::LayerChange::default(),
+        };
+        let diff = super::BoardDiff {
+            report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
+            layers: vec![
+                layer(etchy_core::LayerKind::TopCopper, 0),
+                layer(etchy_core::LayerKind::BottomCopper, 10_000_000),
+            ],
+        };
+        let key = super::GeomKey {
+            visible: vec![0, 1],
+            mode: Mode::Overlay,
+            base_on: true,
+            outline_effective: false,
+        };
+        let cache = super::build_cache(&diff, &key, None);
+        let roles: Vec<super::Role> = cache.items.iter().map(|it| it.role).collect();
+        let last_base = roles
+            .iter()
+            .rposition(|r| *r == super::Role::Base)
+            .expect("both layers push a base item");
+        let first_diff = roles
+            .iter()
+            .position(|r| matches!(r, super::Role::Added | super::Role::Removed))
+            .expect("both layers push diff items");
+        assert!(
+            last_base < first_diff,
+            "a base item follows a diff item: layer N's opaque base would cover layer N-1's diff"
+        );
+        // Both layers contribute both kinds, so the ordering claim is not vacuous.
+        let bases: Vec<usize> = cache
+            .items
+            .iter()
+            .filter(|it| it.role == super::Role::Base)
+            .map(|it| it.layer_index)
+            .collect();
+        let diffs: Vec<usize> = cache
+            .items
+            .iter()
+            .filter(|it| it.role != super::Role::Base)
+            .map(|it| it.layer_index)
+            .collect();
+        assert_eq!(bases, vec![0, 1]);
+        assert_eq!(diffs, vec![0, 0, 1, 1]);
     }
 }

@@ -4,8 +4,11 @@
 Usage:  python etchy-server.py [PORT] [ROOT]
 Serves ROOT (default: this script's dir) on 0.0.0.0:PORT (default 8080).
 Feedback records are appended as one JSON object per line, stamped with the
-server time, client IP and User-Agent. The feedback file and this script are
-never served over GET.
+server time, client IP and User-Agent. The feedback file, the screenshots/
+directory beside it and this script are never served over GET or HEAD: every
+request path is resolved to a real file first (percent-decoding, "." and "//"
+included) and compared against those locations, and directory listings are
+refused.
 
 Feedback file location (in priority order):
   1. $ETCHY_FEEDBACK  — absolute/relative path (set by deploy/setup.sh to write
@@ -25,9 +28,46 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 ROOT = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(os.path.abspath(__file__))
 FEEDBACK = os.environ.get("ETCHY_FEEDBACK") or os.path.join(ROOT, "feedback.jsonl")
 os.makedirs(os.path.dirname(os.path.abspath(FEEDBACK)), exist_ok=True)
-# Block serving the feedback file (by basename, wherever it lives) and this script.
-BLOCKED = {"/feedback.jsonl", "/etchy-server.py", "/" + os.path.basename(FEEDBACK)}
+# Pasted screenshots are decoded into a screenshots/ dir beside the feedback file.
+SHOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(FEEDBACK)), "screenshots")
+SCRIPT = os.path.abspath(__file__)
+# Never served, by basename, wherever a copy sits under ROOT (the staged serve dir
+# holds a copy of this script; the feedback file may have been renamed).
+BLOCKED_NAMES = {"feedback.jsonl", "etchy-server.py", os.path.basename(FEEDBACK)}
 _lock = threading.Lock()
+
+
+def _real(path):
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _inside(path, directory):
+    try:
+        return os.path.commonpath([path, directory]) == directory
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def is_blocked(request_path, root, feedback_path, script_path, shots_dir):
+    """True if REQUEST_PATH, served from ROOT, would reach something private.
+
+    The decision is made on the resolved real path, not the request string, so
+    `/feedback%2Ejsonl`, `/./feedback.jsonl` and `//feedback.jsonl` all resolve
+    to the same file as `/feedback.jsonl` and are blocked alike. Blocked: the
+    feedback file, the script itself, anything inside the screenshots dir, and
+    any file whose basename is in BLOCKED_NAMES.
+    """
+
+    class _Dir:  # translate_path only reads self.directory
+        directory = root
+
+    local = SimpleHTTPRequestHandler.translate_path(_Dir(), request_path)
+    real = _real(local)
+    if real in (_real(feedback_path), _real(script_path)):
+        return True
+    if _inside(real, _real(shots_dir)):
+        return True
+    return os.path.basename(real) in BLOCKED_NAMES
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -42,8 +82,12 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def _blocked(self):
-        p = self.path.split("?", 1)[0].rstrip("/").lower()
-        return p in BLOCKED
+        return is_blocked(self.path, self.directory, FEEDBACK, SCRIPT, SHOTS_DIR)
+
+    def list_directory(self, path):
+        # No directory listings: a bare directory URL is a 404 like any missing file.
+        self.send_error(404)
+        return None
 
     def do_GET(self):
         if self._blocked():
@@ -77,7 +121,7 @@ class Handler(SimpleHTTPRequestHandler):
         def _save_shot(durl, idx):
             header, b64 = durl.split(",", 1)
             ext = "jpg" if "image/jpeg" in header else "webp" if "image/webp" in header else "png"
-            sdir = os.path.join(os.path.dirname(os.path.abspath(FEEDBACK)), "screenshots")
+            sdir = SHOTS_DIR
             os.makedirs(sdir, exist_ok=True)
             stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S_%f")
             fname = f"{stamp}-{idx}-{self.client_address[0].replace(':', '_')}.{ext}"

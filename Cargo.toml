@@ -15,7 +15,7 @@ edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Cimos/etchy"
-authors = ["Simon Maddison"]
+authors = ["Cimos"]
 
 # Shared dependency versions (verified choices live in docs/DEVELOPER_GUIDE.md).
 # Real deps land per-crate as each module is built in Milestone 1+.

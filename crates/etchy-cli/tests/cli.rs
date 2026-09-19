@@ -114,7 +114,9 @@ fn closed_stdout_pipe_does_not_panic() {
     // resulting broken pipe and the process exits 101, outside the 0/1/2
     // contract. Reproduce by spawning with a piped stdout and dropping the read
     // end before etchy writes: the diff runs, then the first write finds the pipe
-    // closed. The fix must exit cleanly (0), never 101.
+    // closed. The fix must exit cleanly, never 101 — and with the verdict the run
+    // reached, not an unconditional 0 (#296): losing the reader loses the text,
+    // not the 0/1 gate result.
     let root = scratch("brokenpipe");
     let old = root.join("old");
     let new = root.join("new");
@@ -123,30 +125,68 @@ fn closed_stdout_pipe_does_not_panic() {
     write_layer(&old, "F_Cu.gbr", "");
     write_layer(&new, "F_Cu.gbr", "X25000000Y25000000D03*\n");
 
-    for format in ["summary", "json", "md"] {
-        let mut child = etchy()
-            .arg("--format")
-            .arg(format)
-            .arg(&old)
-            .arg(&new)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        // Close the only reader of the pipe immediately, without reading a byte.
-        drop(child.stdout.take());
-        let status = child.wait().unwrap();
-        assert_ne!(
-            status.code(),
-            Some(101),
-            "a closed pipe must not panic (--format {format})"
-        );
-        assert_eq!(
-            status.code(),
-            Some(0),
-            "a closed pipe exits cleanly (--format {format})"
-        );
+    // (new revision, expected exit): a changed pair is 1, an identical pair 0.
+    for (rhs, expected) in [(&new, 1), (&old, 0)] {
+        for format in ["summary", "json", "md"] {
+            let mut child = etchy()
+                .arg("--format")
+                .arg(format)
+                .arg(&old)
+                .arg(rhs)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            // Close the only reader of the pipe immediately, without reading a byte.
+            drop(child.stdout.take());
+            let status = child.wait().unwrap();
+            assert_ne!(
+                status.code(),
+                Some(101),
+                "a closed pipe must not panic (--format {format})"
+            );
+            assert_eq!(
+                status.code(),
+                Some(expected),
+                "a closed pipe keeps the run's verdict (--format {format})"
+            );
+        }
     }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn separator_only_gate_layers_is_an_error() {
+    let root = scratch("gate-layers-separators");
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+
+    // A real change on copper. `--gate-layers ,` used to parse to a filter that
+    // matched no layer, so this pair passed the gate and exited 0 (#294). It
+    // must be a loud exit 2 before the diff even runs.
+    write_layer(&old, "F_Cu.gbr", "");
+    write_layer(&new, "F_Cu.gbr", "X25000000Y25000000D03*\n");
+
+    let out = etchy()
+        .arg("--gate-layers")
+        .arg(",")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "separator-only --gate-layers should exit 2"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--gate-layers has no groups"),
+        "stderr: {stderr}"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }

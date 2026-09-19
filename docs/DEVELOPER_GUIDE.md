@@ -147,7 +147,7 @@ so HTML/SVG/JSON cannot disagree.
 ## Trust & testing strategy (the top-tier requirement)
 
 - **Golden corpus** (`corpus/`): synthesized board pairs with *precisely injected*
-  deltas (exact ground truth) + public KiCad demo boards + Simon's non-confidential
+  deltas (exact ground truth) + public KiCad demo boards + the owner's non-confidential
   boards. Each has committed expected outputs.
 - **Snapshot tests** (`insta`, or `goldenfile`): the SVG/heatmap/JSON outputs are
   snapshotted; CI fails on drift; `cargo insta review` to accept intended changes.
