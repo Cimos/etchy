@@ -717,73 +717,127 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
+    /// Flash an aperture macro at `at`.
+    ///
+    /// RS-274X §4.5.1.2: a primitive with exposure **off** erases only from the
+    /// macro's *own* image drawn so far, and the erased part is transparent when
+    /// the aperture is flashed. So a macro that contains any exposure-off primitive
+    /// is resolved into its own polygon set first (sequential union / subtract in
+    /// primitive order) and the result is pushed with the layer polarity; pushing
+    /// the off-primitive as a layer-wide clear would erase copper drawn *before* the
+    /// flash (a track under a ring's hole) and depend on draw order (#306). A
+    /// macro with only exposure-on primitives is pushed primitive by primitive —
+    /// the layer union merges them identically, without the extra boolean pass.
     fn flash_macro(&mut self, am: &ApertureMacro, at: Pt) -> Result<()> {
         let (ax, ay) = (at.x as f64, at.y as f64);
+        let mut prims: Vec<(bool, Contour)> = Vec::with_capacity(am.content.len());
         for content in &am.content {
-            match content {
-                MacroContent::Comment(_) | MacroContent::VariableDefinition(_) => {}
-                MacroContent::Circle(c) => {
-                    let exp = mbool(&c.exposure)?;
-                    let d = self.dim(md(&c.diameter)?)?;
-                    let (cx, cy) = self.macro_pt(&c.center, c.angle.as_ref(), ax, ay)?;
-                    self.push(geom::ngon(cx, cy, d / 2.0), exp);
-                }
-                MacroContent::CenterLine(l) => {
-                    let exp = mbool(&l.exposure)?;
-                    let (w, h) = (
-                        self.dim(md(&l.dimensions.0)?)?,
-                        self.dim(md(&l.dimensions.1)?)?,
-                    );
-                    let ang = md(&l.angle)?;
-                    let (cx, cy) = self.macro_offset(&l.center, ang, ax, ay)?;
-                    self.push(geom::rect_rot(cx, cy, w, h, ang), exp);
-                }
-                MacroContent::Outline(o) => {
-                    let exp = mbool(&o.exposure)?;
-                    let ang = md(&o.angle)?;
-                    let mut c: Contour = Vec::with_capacity(o.points.len());
-                    for (px, py) in &o.points {
-                        let (lx, ly) = (self.dim(md(px)?)?, self.dim(md(py)?)?);
-                        let (rx, ry) = geom::rotate(lx, ly, ang);
-                        c.push(Pt::new(snap_nm(ax + rx)?, snap_nm(ay + ry)?));
-                    }
-                    // A macro Outline's winding is the exporter's choice; normalize
-                    // it by polarity (dark→CCW, clear→CW) so a CW dark pad doesn't
-                    // cancel against an overlapping CCW track under the NonZero union
-                    // (the track→pad notch — #13). Every other primitive is already
-                    // correctly wound, so only this one is normalized.
-                    let c = crate::geo::wind(c, self.polarity_dark == exp);
-                    self.push(c, exp);
-                }
-                MacroContent::VectorLine(v) => {
-                    let exp = mbool(&v.exposure)?;
-                    let ang = md(&v.angle)?;
-                    let w = self.dim(md(&v.width)?)?;
-                    let (sx, sy) = self.macro_rot_pt(&v.start, ang, ax, ay)?;
-                    let (ex, ey) = self.macro_rot_pt(&v.end, ang, ax, ay)?;
-                    self.push(geom::stadium(sx, sy, ex, ey, w / 2.0), exp);
-                }
-                MacroContent::Polygon(p) => {
-                    let exp = mbool(&p.exposure)?;
-                    let n = match p.vertices {
-                        MacroInteger::Value(v) => v as usize,
-                        _ => return Err(unsupported("macro polygon with variable vertex count")),
-                    };
-                    if !(3..=64).contains(&n) {
-                        return Err(unsupported("macro polygon vertex count out of range"));
-                    }
-                    let ang = md(&p.angle)?;
-                    let (cx, cy) = self.macro_offset(&p.center, ang, ax, ay)?;
-                    self.push(
-                        polygon_ngon(cx, cy, self.dim(md(&p.diameter)?)? / 2.0, n, ang),
-                        exp,
-                    );
-                }
-                MacroContent::Moire(_) => return Err(unsupported("macro moiré primitive")),
-                MacroContent::Thermal(_) => return Err(unsupported("macro thermal primitive")),
+            if let Some(p) = self.macro_primitive(content, ax, ay)? {
+                prims.push(p);
             }
         }
+        if prims.iter().all(|(exp, _)| *exp) {
+            for (_, c) in prims {
+                self.push(c, true);
+            }
+            return Ok(());
+        }
+        // Resolve the aperture image locally: runs of same-exposure primitives are
+        // one boolean pass each, in order (like the layer's polarity spans).
+        let mut acc: Vec<Contour> = Vec::new();
+        let mut i = 0;
+        while i < prims.len() {
+            let exp = prims[i].0;
+            let mut run: Vec<Contour> = Vec::new();
+            while i < prims.len() && prims[i].0 == exp {
+                run.push(std::mem::take(&mut prims[i].1));
+                i += 1;
+            }
+            let set = if exp {
+                boolean::union(&acc, &run)
+            } else {
+                boolean::difference(&acc, &run)
+            };
+            acc = boolean::flatten(&set);
+        }
+        // Outers arrive CCW and holes CW, so pushing them flat keeps the holes
+        // transparent under the layer's NonZero union/difference (a track under
+        // the hole keeps winding +1 in a dark span; nothing is subtracted there in
+        // a clear span).
+        for c in acc {
+            self.push(c, true);
+        }
         Ok(())
+    }
+
+    /// One macro primitive → its exposure and contour in absolute nm (`None` for
+    /// comments / variable definitions). Every contour is wound CCW (a solid), so
+    /// the caller can union / subtract them uniformly; an Outline's winding is the
+    /// exporter's choice and is normalized here (the track→pad notch, #13).
+    fn macro_primitive(
+        &self,
+        content: &MacroContent,
+        ax: f64,
+        ay: f64,
+    ) -> Result<Option<(bool, Contour)>> {
+        Ok(Some(match content {
+            MacroContent::Comment(_) | MacroContent::VariableDefinition(_) => return Ok(None),
+            MacroContent::Circle(c) => {
+                let exp = mbool(&c.exposure)?;
+                let d = self.dim(md(&c.diameter)?)?;
+                let (cx, cy) = self.macro_pt(&c.center, c.angle.as_ref(), ax, ay)?;
+                (exp, geom::ngon(cx, cy, d / 2.0))
+            }
+            MacroContent::CenterLine(l) => {
+                let exp = mbool(&l.exposure)?;
+                let (w, h) = (
+                    self.dim(md(&l.dimensions.0)?)?,
+                    self.dim(md(&l.dimensions.1)?)?,
+                );
+                let ang = md(&l.angle)?;
+                let (cx, cy) = self.macro_offset(&l.center, ang, ax, ay)?;
+                (exp, geom::rect_rot(cx, cy, w, h, ang))
+            }
+            MacroContent::Outline(o) => {
+                let exp = mbool(&o.exposure)?;
+                let ang = md(&o.angle)?;
+                let mut c: Contour = Vec::with_capacity(o.points.len());
+                for (px, py) in &o.points {
+                    let (lx, ly) = (self.dim(md(px)?)?, self.dim(md(py)?)?);
+                    let (rx, ry) = geom::rotate(lx, ly, ang);
+                    c.push(Pt::new(snap_nm(ax + rx)?, snap_nm(ay + ry)?));
+                }
+                // A CW dark pad would cancel against an overlapping CCW track under
+                // the NonZero union (#13); every other primitive is already CCW.
+                (exp, crate::geo::wind(c, true))
+            }
+            MacroContent::VectorLine(v) => {
+                let exp = mbool(&v.exposure)?;
+                let ang = md(&v.angle)?;
+                let w = self.dim(md(&v.width)?)?;
+                let (sx, sy) = self.macro_rot_pt(&v.start, ang, ax, ay)?;
+                let (ex, ey) = self.macro_rot_pt(&v.end, ang, ax, ay)?;
+                (exp, geom::stadium(sx, sy, ex, ey, w / 2.0))
+            }
+            MacroContent::Polygon(p) => {
+                let exp = mbool(&p.exposure)?;
+                let n = match p.vertices {
+                    MacroInteger::Value(v) => v as usize,
+                    _ => return Err(unsupported("macro polygon with variable vertex count")),
+                };
+                if !(3..=64).contains(&n) {
+                    return Err(unsupported("macro polygon vertex count out of range"));
+                }
+                let ang = md(&p.angle)?;
+                let (cx, cy) = self.macro_offset(&p.center, ang, ax, ay)?;
+                (
+                    exp,
+                    polygon_ngon(cx, cy, self.dim(md(&p.diameter)?)? / 2.0, n, ang),
+                )
+            }
+            MacroContent::Moire(_) => return Err(unsupported("macro moiré primitive")),
+            MacroContent::Thermal(_) => return Err(unsupported("macro thermal primitive")),
+        }))
     }
 
     /// A macro-local centre `(x, y)` (doc units) rotated by `angle` about the macro
@@ -1189,6 +1243,94 @@ mod tests {
         );
         // Sanity: area exceeds the 1 mm² pad alone (the track adds copper).
         assert!(ps.area_mm2() > 1.2, "area {} too small", ps.area_mm2());
+    }
+
+    // ---- #306: macro exposure-off cuts the aperture image, not the layer ----
+
+    /// Area of a strip `|y| <= half` clipped to a disk of radius `r` (both mm).
+    fn strip_in_disk(r: f64, half: f64) -> f64 {
+        let seg = |y: f64| y * (r * r - y * y).sqrt() + r * r * (y / r).asin();
+        seg(half) - seg(-half)
+    }
+
+    /// `RING`: a 2.0 mm disk with a 1.0 mm exposure-off disk cut out of it.
+    const RING: &str = "%AMRING*\n1,1,2.0,0,0*\n1,0,1.0,0,0*%\n";
+
+    #[test]
+    fn macro_exposure_off_leaves_copper_under_the_hole() {
+        // #306: a 0.3 mm track through the origin, then RING flashed at the origin.
+        // Exposure-off erases from the MACRO image only, and the hole is transparent
+        // when flashed, so the track must run unbroken through the ring's hole.
+        // Copper = annulus + track − (track ∩ annulus). The old layer-wide clear
+        // also severed the track inside r < 0.5 (−0.295 mm²).
+        let g = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n{RING}%ADD10RING*%\n%ADD11C,0.3*%\n\
+             D11*\nX-3000000Y0D02*\nG01*\nX3000000Y0D01*\n\
+             D10*\nX0Y0D03*\nM02*\n"
+        );
+        let ps = resolve_layer(g.as_bytes()).unwrap();
+        let annulus = std::f64::consts::PI * (1.0 - 0.25);
+        // A D01 stroke has round end caps: 6 mm × 0.3 mm plus a 0.15 mm-radius disk.
+        let track = 0.3 * 6.0 + std::f64::consts::PI * 0.15 * 0.15;
+        let overlap = strip_in_disk(1.0, 0.15) - strip_in_disk(0.5, 0.15);
+        let ideal = annulus + track - overlap;
+        let a = ps.area_mm2();
+        assert!((a - ideal).abs() < 0.02, "area {a} vs {ideal}");
+        // One connected region, and the hole is split by the track into two
+        // half-moon holes rather than one severed track.
+        assert_eq!(ps.shapes.len(), 1, "ring + track are one connected region");
+        assert_eq!(
+            ps.shapes[0].len(),
+            3,
+            "two half-moon holes either side of the track"
+        );
+    }
+
+    #[test]
+    fn macro_exposure_off_draw_order_independent() {
+        // The same geometry with the flash BEFORE the track must give the same
+        // copper: the fix removes the draw-order dependence, not just one ordering.
+        let hdr = format!("%FSLAX46Y46*%\n%MOMM*%\n{RING}%ADD10RING*%\n%ADD11C,0.3*%\n");
+        let track = "D11*\nX-3000000Y0D02*\nG01*\nX3000000Y0D01*\n";
+        let flash = "D10*\nX0Y0D03*\n";
+        let a = area_mm2(&format!("{hdr}{track}{flash}M02*\n"));
+        let b = area_mm2(&format!("{hdr}{flash}{track}M02*\n"));
+        assert!(
+            (a - b).abs() < 1e-6,
+            "flash-then-track {b} vs track-then-flash {a}"
+        );
+    }
+
+    #[test]
+    fn macro_exposure_off_in_clear_polarity_adds_no_copper() {
+        // In %LPC the whole aperture image is a clearance and its hole is still
+        // transparent: flashing RING far from any copper must change nothing. The
+        // old code turned the exposure-off disk into a DARK span (clear × off =
+        // dark) and conjured a 0.785 mm² disk of copper out of nothing.
+        let g = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n{RING}%ADD10RING*%\n%ADD11R,10X10*%\n\
+             D11*\nX5000000Y5000000D03*\n\
+             %LPC*%\nD10*\nX20000000Y20000000D03*\n%LPD*%\nM02*\n"
+        );
+        let a = area_mm2(&g);
+        assert!(
+            (a - 100.0).abs() < 1e-6,
+            "area {a} vs the 100 mm² pad alone"
+        );
+    }
+
+    #[test]
+    fn macro_exposure_off_ring_alone_is_an_annulus_with_a_hole() {
+        let g = format!("%FSLAX46Y46*%\n%MOMM*%\n{RING}%ADD10RING*%\nD10*\nX0Y0D03*\nM02*\n");
+        let ps = resolve_layer(g.as_bytes()).unwrap();
+        let ideal = std::f64::consts::PI * (1.0 - 0.25);
+        let a = ps.area_mm2();
+        assert!(
+            (a / ideal - 1.0).abs() < 0.01,
+            "annulus area {a} vs {ideal}"
+        );
+        assert_eq!(ps.shapes.len(), 1);
+        assert_eq!(ps.shapes[0].len(), 2, "outer ring + one hole");
     }
 
     // ---- #90: aperture-macro primitive geometry (area/shape + rotation/offset) ----
