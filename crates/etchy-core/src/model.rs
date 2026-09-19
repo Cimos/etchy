@@ -118,6 +118,16 @@ impl LayerKind {
     }
 }
 
+/// The X2 `%TF.FilePolarity` file attribute: whether the layer's objects draw
+/// material (`Positive`, the default) or its absence (`Negative`, e.g. a plane
+/// layer exported as clearances). etchy resolves the objects as drawn either way;
+/// the polarity decides what a geometric difference *means* (#317).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FilePolarity {
+    Positive,
+    Negative,
+}
+
 /// One resolved layer: its kind, an opaque label (e.g. the filename, used only in
 /// diagnostics — never as a path), and its filled geometry.
 #[derive(Debug, Clone)]
@@ -128,6 +138,11 @@ pub struct Layer {
     /// viewer without deep-copying it per layer (was the parallel-diff memory
     /// spike, #81). Clones are refcount bumps.
     pub geometry: Arc<PolygonSet>,
+    /// `true` when the file declares `%TF.FilePolarity,Negative*%`: its geometry
+    /// is the *absence* of material, so `added`/`removed` are swapped when the
+    /// layer is diffed and a negative layer never pairs against a positive one
+    /// (#317). Always `false` for Excellon and placement layers.
+    pub negative: bool,
 }
 
 /// A whole fab pack: the set of resolved layers for one revision.
@@ -391,6 +406,7 @@ mod tests {
                 Pt::new(x1, y1),
                 Pt::new(x0, y1),
             ]]])),
+            negative: false,
         }
     }
 
@@ -524,6 +540,7 @@ mod tests {
                 Pt::new(1, 1),
                 Pt::new(0, 1),
             ]]])),
+            negative: false,
         };
         let a = Board {
             layers: vec![mk("M.GM1"), mk("M.GM2")],
@@ -550,6 +567,7 @@ mod tests {
                 Pt::new(1, 1),
                 Pt::new(0, 1),
             ]]])),
+            negative: false,
         };
         let a = Board {
             layers: vec![mk("revA-F_Cu.gbr")],
@@ -781,6 +799,7 @@ mod tests {
                     Pt::new(1_000_000, 1_000_000),
                     Pt::new(0, 1_000_000),
                 ]]])),
+                negative: false,
             }
         };
         let old = Board {

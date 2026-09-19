@@ -656,12 +656,23 @@ fn board_from_files(
             None => (name.as_str(), ""),
         };
         let mut kind = etchy_core::classify(stem, ext);
+        let mut negative = false;
         // Gerber layer, Excellon/NC drill, pick-and-place, or neither (job file,
         // README) — skip the last. Drill (#62) and P&P (#115) route through their
         // own front-ends so those changes diff instead of being silently dropped.
         let geometry = if etchy_core::looks_like_gerber(&bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(&bytes).ok();
+            }
+            // A negative image (#317): the objects are clearances. The engine swaps
+            // added/removed for such a layer so the report still speaks in copper;
+            // say so, since the overlay draws the objects as exported.
+            if etchy_core::file_polarity(&bytes) == Some(etchy_core::FilePolarity::Negative) {
+                negative = true;
+                warnings.push(format!(
+                    "{name}: negative-polarity image (%TF.FilePolarity,Negative) — \
+                     added/removed are reported as material, not as drawn objects"
+                ));
             }
             // Cross-check the filename classification against the file's own X2
             // `.FileFunction` attribute (#239): adopt it where the filename was
@@ -700,6 +711,7 @@ fn board_from_files(
             kind,
             label: name,
             geometry,
+            negative,
         });
     }
     Ok((Board { layers }, fmt, warnings))
@@ -974,6 +986,29 @@ mod tests {
         assert_eq!(board.layers[0].kind, etchy_core::LayerKind::TopCopper);
         assert_eq!(warns.len(), 1);
         assert!(warns[0].contains("top-copper") && warns[0].contains("bottom-copper"));
+    }
+
+    #[test]
+    fn negative_file_polarity_tags_the_layer_and_warns() {
+        // #317: %TF.FilePolarity,Negative marks the layer so the engine swaps
+        // added/removed, and the loader says so (the overlay draws the objects as
+        // exported). A positive or unattributed file stays untagged and silent.
+        let neg = b"%FSLAX46Y46*%\n%MOMM*%\n%TF.FilePolarity,Negative*%\n\
+                    %ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n"
+            .to_vec();
+        let (board, _, warns) =
+            board_from_files(vec![("board-In1_Cu.gbr".to_string(), neg)]).unwrap();
+        assert!(board.layers[0].negative);
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("board-In1_Cu.gbr") && warns[0].contains("Negative"));
+
+        let pos = b"%FSLAX46Y46*%\n%MOMM*%\n%TF.FilePolarity,Positive*%\n\
+                    %ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n"
+            .to_vec();
+        let (board, _, warns) =
+            board_from_files(vec![("board-In1_Cu.gbr".to_string(), pos)]).unwrap();
+        assert!(!board.layers[0].negative);
+        assert!(warns.is_empty(), "positive must not warn: {warns:?}");
     }
 
     #[test]

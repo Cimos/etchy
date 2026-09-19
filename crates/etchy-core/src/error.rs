@@ -44,6 +44,18 @@ pub enum EngineError {
     #[error("invalid aperture: {detail}")]
     InvalidAperture { detail: String },
 
+    /// One revision of a layer declares `%TF.FilePolarity,Negative` and the other
+    /// does not: their images are complements, so a diff between them would
+    /// report the whole layer changed with the signs inverted (#317).
+    #[error(
+        "layer polarity differs: {label_old} vs {label_new} — one is a negative image \
+         (%TF.FilePolarity,Negative); re-export both revisions with the same polarity"
+    )]
+    PolarityMismatch {
+        label_old: String,
+        label_new: String,
+    },
+
     /// A flash/draw referenced an aperture code that was never defined.
     #[error("operation references undefined aperture D{code}")]
     UndefinedAperture { code: i32 },

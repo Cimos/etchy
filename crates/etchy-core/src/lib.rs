@@ -42,8 +42,12 @@ pub use imagediff::{
     classify_pair_size, crop_top_left, diff_images, Image, ImageDiffOptions, ImageDiffResult,
     ImageDiffStats, PairSizing, SIZE_TOLERANCE_PX,
 };
-pub use model::{pair_layers, same_board_guard, Board, DrillKind, Layer, LayerKind, LayerPairing};
-pub use naming::{classify, drill_kind, file_function, looks_like_gerber, reconcile_kind};
+pub use model::{
+    pair_layers, same_board_guard, Board, DrillKind, FilePolarity, Layer, LayerKind, LayerPairing,
+};
+pub use naming::{
+    classify, drill_kind, file_function, file_polarity, looks_like_gerber, reconcile_kind,
+};
 pub use pagealign::{
     align_pages, dissimilarity, fingerprint, PageAlignment, PageFingerprint, PageMatch, Pairing,
     MAX_ALIGN_PAGES,
@@ -87,17 +91,26 @@ pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
     // Order is preserved, so the result is identical to the old sequential loop.
     // Geometry is shared via Arc inside diff_one_layer (#81), so the parallel fan-out
     // holds refcount handles, not per-layer deep copies (no 16x memory spike).
-    let (reports, views): (Vec<LayerReport>, Vec<LayerView>) = {
+    // A pairing can fail (a negative layer against a positive one, #317); the
+    // first error wins and aborts the whole compare — never a partial report.
+    let pairs: Vec<(LayerReport, LayerView)> = {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;
-            pairings.into_par_iter().map(diff_one_layer).unzip()
+            pairings
+                .into_par_iter()
+                .map(diff_one_layer)
+                .collect::<Result<Vec<_>>>()?
         }
         #[cfg(target_arch = "wasm32")]
         {
-            pairings.into_iter().map(diff_one_layer).unzip()
+            pairings
+                .into_iter()
+                .map(diff_one_layer)
+                .collect::<Result<Vec<_>>>()?
         }
     };
+    let (reports, views): (Vec<LayerReport>, Vec<LayerView>) = pairs.into_iter().unzip();
     Ok(BoardDiff {
         report: DiffReport::new(reports, Vec::new()),
         layers: views,
@@ -107,7 +120,11 @@ pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
 /// Diff a single layer pairing into its (report, view). Pure and independent across
 /// layers, so `compare_detailed` can run it in parallel (perf) without affecting
 /// output order or determinism.
-fn diff_one_layer(pairing: LayerPairing) -> (LayerReport, LayerView) {
+///
+/// Errors only on a polarity mismatch: a `%TF.FilePolarity,Negative` layer paired
+/// with a positive one describes the *complement* of the other's image, so any
+/// diff between them is a full-layer lie — refused loud (#317).
+fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     // `a`/`b` are `Arc<PolygonSet>` handles shared with the source Board, so the
     // per-layer `.clone()`s below are refcount bumps, not deep copies — the parallel
     // fan-out doesn't multiply peak memory (#81). `empty` is the shared placeholder
@@ -115,15 +132,27 @@ fn diff_one_layer(pairing: LayerPairing) -> (LayerReport, LayerView) {
     let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
     // (a, b) are the (old, new) geometry for this kind; one is empty for a one-sided
     // layer. An empty one-sided layer stays Unchanged (no false gate).
-    let (kind, label_old, label_new, a, b, default_status) = match pairing {
-        LayerPairing::Both { kind, old, new } => (
-            kind,
-            Some(old.label.clone()),
-            Some(new.label.clone()),
-            old.geometry.clone(),
-            new.geometry.clone(),
-            LayerStatus::Changed,
-        ),
+    let (kind, label_old, label_new, a, b, default_status, negative) = match pairing {
+        LayerPairing::Both { kind, old, new } => {
+            if old.negative != new.negative {
+                return Err(EngineError::PolarityMismatch {
+                    label_old: old.label.clone(),
+                    label_new: new.label.clone(),
+                });
+            }
+            (
+                kind,
+                Some(old.label.clone()),
+                Some(new.label.clone()),
+                old.geometry.clone(),
+                new.geometry.clone(),
+                LayerStatus::Changed,
+                old.negative,
+            )
+        }
+        // A one-sided layer is never swapped: its status (AddedLayer/RemovedLayer)
+        // is about the layer's presence, and its diff is simply its geometry as
+        // drawn, negative or not.
         LayerPairing::OnlyOld(l) => (
             l.kind,
             Some(l.label.clone()),
@@ -131,6 +160,7 @@ fn diff_one_layer(pairing: LayerPairing) -> (LayerReport, LayerView) {
             l.geometry.clone(),
             empty,
             LayerStatus::RemovedLayer,
+            false,
         ),
         LayerPairing::OnlyNew(l) => (
             l.kind,
@@ -139,10 +169,17 @@ fn diff_one_layer(pairing: LayerPairing) -> (LayerReport, LayerView) {
             empty,
             l.geometry.clone(),
             LayerStatus::AddedLayer,
+            false,
         ),
     };
 
-    let d = diff_layer(&a, &b); // removed = a−b, added = b−a
+    let mut d = diff_layer(&a, &b); // removed = a−b, added = b−a
+    if negative {
+        // Both revisions are negative images: the drawn objects are clearances, so
+        // geometry that appears in `b` is material that *went away*. Swap so
+        // `added`/`removed` keep meaning copper (#317).
+        std::mem::swap(&mut d.added, &mut d.removed);
+    }
     let change = d.measure();
     let status = if change.is_unchanged() {
         LayerStatus::Unchanged
@@ -161,7 +198,7 @@ fn diff_one_layer(pairing: LayerPairing) -> (LayerReport, LayerView) {
         removed: d.removed,
         change,
     };
-    (report, view)
+    Ok((report, view))
 }
 
 #[cfg(test)]
@@ -191,11 +228,13 @@ mod tests {
             kind: LayerKind::TopCopper,
             label: "F_Cu".into(),
             geometry: Arc::new(polygonize_gerber(a_txt.as_bytes()).unwrap()),
+            negative: false,
         };
         let lb = Layer {
             kind: LayerKind::TopCopper,
             label: "F_Cu".into(),
             geometry: Arc::new(polygonize_gerber(b_txt.as_bytes()).unwrap()),
+            negative: false,
         };
         let old = Board { layers: vec![la] };
         let new = Board { layers: vec![lb] };
@@ -210,6 +249,128 @@ mod tests {
 
     const HDR: &str = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
 
+    #[test]
+    fn negative_layer_pair_swaps_added_and_removed() {
+        // #317: on a %TF.FilePolarity,Negative layer the objects are clearances.
+        // New geometry in `b` is material that went away, so the report must say
+        // "removed", not "added" — the same input as a positive pair, mirrored.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let corners = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let a_txt = format!("{hdr}{corners}M02*\n");
+        let b_txt = format!("{hdr}{corners}X25000000Y25000000D03*\nM02*\n");
+        let mk = |txt: &str, negative: bool| Layer {
+            kind: LayerKind::InnerCopper(1),
+            label: "In1_Cu".into(),
+            geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
+            negative,
+        };
+        let pos = compare(
+            &Board {
+                layers: vec![mk(&a_txt, false)],
+            },
+            &Board {
+                layers: vec![mk(&b_txt, false)],
+            },
+        )
+        .unwrap();
+        let neg = compare_detailed(
+            &Board {
+                layers: vec![mk(&a_txt, true)],
+            },
+            &Board {
+                layers: vec![mk(&b_txt, true)],
+            },
+        )
+        .unwrap();
+        let p = &pos.layers[0];
+        let n = &neg.report.layers[0];
+        assert!(p.added_area_mm2 > 0.0 && p.removed_area_mm2 == 0.0);
+        assert_eq!(n.removed_area_mm2, p.added_area_mm2, "swapped area");
+        assert_eq!(n.added_area_mm2, p.removed_area_mm2);
+        assert_eq!(n.removed_regions, p.added_regions, "swapped region count");
+        assert_eq!(n.added_regions, p.removed_regions);
+        // The view's geometry is swapped the same way, so overlay and report agree.
+        let v = &neg.layers[0];
+        assert!(!v.removed.is_empty() && v.added.is_empty());
+        assert_eq!(v.status, LayerStatus::Changed);
+    }
+
+    #[test]
+    fn one_sided_negative_layer_is_reported_as_drawn() {
+        // #317: a negative plane present only in the old revision is a removed
+        // layer whose geometry is `removed`, exactly like a positive one — the
+        // swap applies to paired negative layers only.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let corners = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let cu = |kind: LayerKind, negative: bool| Layer {
+            kind,
+            label: format!("{kind:?}"),
+            geometry: Arc::new(
+                polygonize_gerber(format!("{hdr}{corners}M02*\n").as_bytes()).unwrap(),
+            ),
+            negative,
+        };
+        // Top copper on both sides so the same-board guard has a shared extent.
+        let old = Board {
+            layers: vec![
+                cu(LayerKind::TopCopper, false),
+                cu(LayerKind::InnerCopper(1), true),
+            ],
+        };
+        let new = Board {
+            layers: vec![cu(LayerKind::TopCopper, false)],
+        };
+        let d = compare_detailed(&old, &new).unwrap();
+        let inner = d
+            .layers
+            .iter()
+            .find(|l| l.kind == LayerKind::InnerCopper(1))
+            .unwrap();
+        assert_eq!(inner.status, LayerStatus::RemovedLayer);
+        assert!(!inner.removed.is_empty() && inner.added.is_empty());
+        let row = d
+            .report
+            .layers
+            .iter()
+            .find(|l| l.kind == "inner-copper" && l.inner_index == Some(1))
+            .unwrap();
+        assert!(row.removed_area_mm2 > 0.0 && row.added_area_mm2 == 0.0);
+    }
+
+    #[test]
+    fn negative_vs_positive_layer_fails_loud() {
+        // #317: one revision negative, the other positive — complements, so any
+        // diff is a whole-layer lie. Refused, naming both files.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let txt = format!("{hdr}X5000000Y5000000D03*\nX50000000Y50000000D03*\nM02*\n");
+        let g = Arc::new(polygonize_gerber(txt.as_bytes()).unwrap());
+        let mk = |label: &str, negative: bool| Layer {
+            kind: LayerKind::InnerCopper(1),
+            label: label.into(),
+            geometry: Arc::clone(&g),
+            negative,
+        };
+        let err = compare(
+            &Board {
+                layers: vec![mk("revA-In1_Cu.gbr", true)],
+            },
+            &Board {
+                layers: vec![mk("revB-In1_Cu.gbr", false)],
+            },
+        )
+        .unwrap_err();
+        match err {
+            EngineError::PolarityMismatch {
+                label_old,
+                label_new,
+            } => {
+                assert_eq!(label_old, "revA-In1_Cu.gbr");
+                assert_eq!(label_new, "revB-In1_Cu.gbr");
+            }
+            other => panic!("expected PolarityMismatch, got {other:?}"),
+        }
+    }
+
     /// A copper layer flashed at the given `X…Y…` positions (nm), through the real
     /// Gerber pipeline, wrapped as a [`Layer`] of `kind`.
     fn cu_layer(kind: LayerKind, label: &str, flashes: &str) -> Layer {
@@ -218,6 +379,7 @@ mod tests {
             kind,
             label: label.into(),
             geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
+            negative: false,
         }
     }
 
@@ -305,6 +467,7 @@ mod tests {
                 kind: LayerKind::TopCopper,
                 label: "F_Cu".into(),
                 geometry: Arc::clone(&ga),
+                negative: false,
             }],
         };
         let new = Board {
@@ -312,6 +475,7 @@ mod tests {
                 kind: LayerKind::TopCopper,
                 label: "F_Cu".into(),
                 geometry: Arc::clone(&gb),
+                negative: false,
             }],
         };
         let diff = compare_detailed(&old, &new).unwrap();

@@ -3,7 +3,7 @@
 //! filesystem walk and pass strings/bytes here, keeping path/discovery policy in
 //! the surfaces while the (rename-tolerant) classification stays in one place.
 
-use crate::model::{DrillKind, LayerKind};
+use crate::model::{DrillKind, FilePolarity, LayerKind};
 
 /// Content sniff for a Gerber layer. RS-274X requires a format-spec (`%FS`) and a
 /// mode (`%MO`) statement, each its own `%…%` block on a line. We look for either
@@ -82,6 +82,36 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
     } else {
         LayerKind::Other
     }
+}
+
+/// Parse the X2 `.FilePolarity` file attribute out of a Gerber's bytes (#317):
+/// `%TF.FilePolarity,Negative*%`, or its X1-compatible comment form
+/// `G04 #@! TF.FilePolarity,Negative*` (spec §5.1). `None` when the attribute is
+/// absent or malformed — callers treat that as positive, the spec default.
+///
+/// Byte-sniffed like [`file_function`], but not line-based: exporters may pack
+/// several `%…%` blocks on one line, and missing a `Negative` here would silently
+/// invert every sign on the layer, so the token is searched wherever it follows a
+/// `%` or a `#@!` marker. The first declaration wins.
+pub fn file_polarity(bytes: &[u8]) -> Option<FilePolarity> {
+    const TOKEN: &str = "TF.FilePolarity,";
+    let text = String::from_utf8_lossy(bytes);
+    text.match_indices(TOKEN).find_map(|(at, _)| {
+        // Only an extended-code block or a standard-comment attribute counts —
+        // not the token quoted in an ordinary comment.
+        let before = text[..at].trim_end();
+        let marked = before.ends_with('%') || before.ends_with("#@!");
+        if !marked {
+            return None;
+        }
+        let rest = &text[at + TOKEN.len()..];
+        let end = rest.find(['*', '%', '\n', '\r']).unwrap_or(rest.len());
+        match rest[..end].trim().to_ascii_uppercase().as_str() {
+            "POSITIVE" => Some(FilePolarity::Positive),
+            "NEGATIVE" => Some(FilePolarity::Negative),
+            _ => None,
+        }
+    })
 }
 
 /// Parse the X2 `.FileFunction` file attribute (`%TF.FileFunction,<args>*%`) out
@@ -405,6 +435,48 @@ mod tests {
         assert_eq!(
             file_function(&ff("NonPlated,1,2,NPTH")),
             Some(LayerKind::Drill(DrillKind::NonPlated))
+        );
+    }
+
+    #[test]
+    fn file_polarity_parses_both_values_and_defaults_to_none() {
+        // #317: the attribute is a standalone %TF block; case and a missing `*`
+        // are tolerated, anything else is None (callers treat None as positive).
+        let g = |v: &str| format!("%FSLAX46Y46*%\n%TF.FilePolarity,{v}*%\n%MOMM*%\n");
+        assert_eq!(
+            file_polarity(g("Negative").as_bytes()),
+            Some(FilePolarity::Negative)
+        );
+        assert_eq!(
+            file_polarity(g("Positive").as_bytes()),
+            Some(FilePolarity::Positive)
+        );
+        assert_eq!(
+            file_polarity(g("negative").as_bytes()),
+            Some(FilePolarity::Negative)
+        );
+        assert_eq!(
+            file_polarity(b"%TF.FilePolarity,Negative%\n"),
+            Some(FilePolarity::Negative)
+        );
+        assert_eq!(file_polarity(g("Sideways").as_bytes()), None);
+        assert_eq!(file_polarity(b"%FSLAX46Y46*%\n%MOMM*%\n"), None);
+        // A .FileFunction line is not a polarity.
+        assert_eq!(file_polarity(b"%TF.FileFunction,Copper,L1,Top*%\n"), None);
+        // The X1-compatible comment form (spec §5.1) counts…
+        assert_eq!(
+            file_polarity(b"G04 #@! TF.FilePolarity,Negative*\n%FSLAX46Y46*%\n"),
+            Some(FilePolarity::Negative)
+        );
+        // …and so does a block that shares its line with other blocks.
+        assert_eq!(
+            file_polarity(b"%FSLAX46Y46*%%MOMM*%%TF.FilePolarity,Negative*%%LPD*%\n"),
+            Some(FilePolarity::Negative)
+        );
+        // The token quoted in an ordinary comment is not a declaration.
+        assert_eq!(
+            file_polarity(b"G04 exporter note: TF.FilePolarity,Negative is unsupported*\n"),
+            None
         );
     }
 
