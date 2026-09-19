@@ -47,6 +47,10 @@ etchy deliberately does **not** do.
   **warns** about this rather than silently massaging it. Incremental notation
   (`%FS…I…`, or the deprecated `G91`) is not rendered at all — it fails loud
   rather than being read as absolute (#305).
+- **Gerber arcs need a declared quadrant mode.** An arc (`G02`/`G03` draw)
+  before any `G74`/`G75` fails loud: pre-2012 RS-274X made single-quadrant the
+  implicit default while every modern exporter emits `G75`, so guessing either
+  way risks a wrong centre with no error. Add `G75*` to the file.
 - **Excellon scope.** Drill hits (circles), `G85` canned slots, routed
   (`M15`…`M16` / `G01`) slots, `R` repeat codes, headerless files, inline digit
   formats, and feed/speed tool fields are supported. **Arc routing** (`G02`/`G03`
