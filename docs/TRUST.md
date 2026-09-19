@@ -30,6 +30,16 @@ etchy deliberately does **not** do.
   invariants that make a diff trustworthy — `diff(A, A) = ∅`, add/remove symmetry
   (`removed(A,B) = added(B,A)`), non-negative finite areas, and determinism; and a
   fuzz-lite pass asserts the parser never panics on arbitrary bytes.
+- **Aperture macros are resolved as images.** A macro primitive with exposure
+  off erases only from that aperture's own image, and the hole it leaves is
+  transparent when flashed (RS-274X §4.5.1.2) — a track running under a ring
+  pad's hole stays unbroken, in dark and clear polarity alike, whatever the draw
+  order. It is never applied as a layer-wide clear.
+- **Negative images keep their meaning.** A layer declaring
+  `%TF.FilePolarity,Negative` draws clearances, so its `added`/`removed` are
+  swapped to keep speaking in material, and the CLI says so. A negative layer
+  paired with a positive re-export of the same layer is refused (their images
+  are complements), never diffed.
 - **Amplification limits.** Per-layer ceilings on emitted contours, total points,
   and polarity spans mean a tiny crafted file fails loud instead of exhausting a
   CI runner's CPU/RAM. Schematic-PDF inputs are bounded the same way — a per-page

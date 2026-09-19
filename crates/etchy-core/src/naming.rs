@@ -3,7 +3,7 @@
 //! filesystem walk and pass strings/bytes here, keeping path/discovery policy in
 //! the surfaces while the (rename-tolerant) classification stays in one place.
 
-use crate::model::{DrillKind, LayerKind};
+use crate::model::{DrillKind, FilePolarity, LayerKind};
 
 /// Content sniff for a Gerber layer. RS-274X requires a format-spec (`%FS`) and a
 /// mode (`%MO`) statement, each its own `%…%` block on a line. We look for either
@@ -94,6 +94,26 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
 /// Byte-sniffed like [`looks_like_gerber`] / [`crate::gerber_format`] — the
 /// attribute is a standalone `%…%` block, so we don't need the full parse. The
 /// first `.FileFunction` declaration wins.
+/// Parse the X2 `.FilePolarity` file attribute (`%TF.FilePolarity,Positive*%` /
+/// `%TF.FilePolarity,Negative*%`) out of a Gerber's bytes (#317). `None` when the
+/// attribute is absent or malformed — callers treat that as positive, which is
+/// the spec default. Byte-sniffed like [`file_function`]; the first declaration
+/// wins.
+pub fn file_polarity(bytes: &[u8]) -> Option<FilePolarity> {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines().find_map(|l| {
+        let l = l.trim();
+        let l = l.strip_prefix('%').unwrap_or(l);
+        let rest = l.strip_prefix("TF.FilePolarity,")?;
+        let value = rest.trim_end_matches('%').trim_end_matches('*').trim();
+        match value.to_ascii_uppercase().as_str() {
+            "POSITIVE" => Some(FilePolarity::Positive),
+            "NEGATIVE" => Some(FilePolarity::Negative),
+            _ => None,
+        }
+    })
+}
+
 pub fn file_function(bytes: &[u8]) -> Option<LayerKind> {
     let text = String::from_utf8_lossy(bytes);
     let body = text.lines().find_map(|l| {
@@ -406,6 +426,33 @@ mod tests {
             file_function(&ff("NonPlated,1,2,NPTH")),
             Some(LayerKind::Drill(DrillKind::NonPlated))
         );
+    }
+
+    #[test]
+    fn file_polarity_parses_both_values_and_defaults_to_none() {
+        // #317: the attribute is a standalone %TF block; case and a missing `*`
+        // are tolerated, anything else is None (callers treat None as positive).
+        let g = |v: &str| format!("%FSLAX46Y46*%\n%TF.FilePolarity,{v}*%\n%MOMM*%\n");
+        assert_eq!(
+            file_polarity(g("Negative").as_bytes()),
+            Some(FilePolarity::Negative)
+        );
+        assert_eq!(
+            file_polarity(g("Positive").as_bytes()),
+            Some(FilePolarity::Positive)
+        );
+        assert_eq!(
+            file_polarity(g("negative").as_bytes()),
+            Some(FilePolarity::Negative)
+        );
+        assert_eq!(
+            file_polarity(b"%TF.FilePolarity,Negative%\n"),
+            Some(FilePolarity::Negative)
+        );
+        assert_eq!(file_polarity(g("Sideways").as_bytes()), None);
+        assert_eq!(file_polarity(b"%FSLAX46Y46*%\n%MOMM*%\n"), None);
+        // A .FileFunction line is not a polarity.
+        assert_eq!(file_polarity(b"%TF.FileFunction,Copper,L1,Top*%\n"), None);
     }
 
     #[test]

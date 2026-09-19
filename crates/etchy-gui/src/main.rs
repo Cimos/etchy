@@ -273,10 +273,12 @@ fn board_from_files(
         // Gerber, Excellon/NC drill (#62), or pick-and-place (#115); anything else
         // is skipped. Best-effort: a layer that fails to parse is dropped rather
         // than crashing the demo.
+        let mut negative = false;
         let geometry = if etchy_core::looks_like_gerber(bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(bytes).ok();
             }
+            negative = etchy_core::file_polarity(bytes) == Some(etchy_core::FilePolarity::Negative);
             etchy_core::polygonize_gerber(bytes).ok()
         } else if etchy_core::looks_like_excellon(bytes) {
             kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
@@ -292,6 +294,7 @@ fn board_from_files(
                 kind,
                 label: name.clone(),
                 geometry: std::sync::Arc::new(geometry),
+                negative,
             });
         }
     }

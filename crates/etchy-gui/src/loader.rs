@@ -75,6 +75,7 @@ pub fn board_from_bytes(
             None => (name.as_str(), ""),
         };
         let mut kind = etchy_core::classify(stem, ext);
+        let mut negative = false;
         // Gerber layer, Excellon/NC drill, pick-and-place, or neither (skip). Drill
         // (#62) and P&P (#115) route through their own front-ends so those changes
         // diff instead of being silently dropped.
@@ -82,6 +83,10 @@ pub fn board_from_bytes(
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(&bytes).ok();
             }
+            // #317: a negative image's objects are clearances; the engine swaps
+            // added/removed for such a layer so the diff speaks in material.
+            negative =
+                etchy_core::file_polarity(&bytes) == Some(etchy_core::FilePolarity::Negative);
             std::sync::Arc::new(
                 etchy_core::polygonize_gerber(&bytes)
                     .with_context(|| format!("processing layer {name}"))?,
@@ -108,6 +113,7 @@ pub fn board_from_bytes(
             kind,
             label: name,
             geometry,
+            negative,
         });
     }
     Ok((Board { layers }, fmt))
