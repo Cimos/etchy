@@ -86,7 +86,7 @@ serve() {
   say "serving on 0.0.0.0:$PORT  ->  http://${ip:-<this-host-ip>}:$PORT/"
   say "feedback files stay local and gitignored; do not commit them."
   say "to prepare a merge: python3 deploy/collect-feedback.py --merged (scrub its output before sharing; see deploy/feedback/README.md)."
-  ETCHY_FEEDBACK="$fb" exec python3 "$SERVE_DIR/etchy-server.py" "$PORT" "$SERVE_DIR"
+  ETCHY_BIND=${ETCHY_BIND:-0.0.0.0} ETCHY_FEEDBACK="$fb" exec python3 "$SERVE_DIR/etchy-server.py" "$PORT" "$SERVE_DIR"
 }
 
 check_toolchain

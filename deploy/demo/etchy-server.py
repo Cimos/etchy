@@ -2,7 +2,8 @@
 """etchy demo server: static files (GET) + POST /feedback -> feedback.jsonl.
 
 Usage:  python etchy-server.py [PORT] [ROOT]
-Serves ROOT (default: this script's dir) on 0.0.0.0:PORT (default 8080).
+Serves ROOT (default: this script's dir) on 127.0.0.1:PORT (default 8080).
+Set ETCHY_BIND=0.0.0.0 to serve the LAN.
 Feedback records are appended as one JSON object per line, stamped with the
 server time, client IP and User-Agent. The feedback file, the screenshots/
 directory beside it and this script are never served over GET or HEAD: every
@@ -26,6 +27,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 ROOT = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(os.path.abspath(__file__))
+BIND = os.environ.get("ETCHY_BIND", "127.0.0.1")
 FEEDBACK = os.environ.get("ETCHY_FEEDBACK") or os.path.join(ROOT, "feedback.jsonl")
 os.makedirs(os.path.dirname(os.path.abspath(FEEDBACK)), exist_ok=True)
 # Pasted screenshots are decoded into a screenshots/ dir beside the feedback file.
@@ -169,6 +171,6 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"etchy demo: serving {ROOT} on 0.0.0.0:{PORT}  (POST /feedback -> {FEEDBACK})")
+    httpd = ThreadingHTTPServer((BIND, PORT), Handler)
+    print(f"etchy demo: serving {ROOT} on {BIND}:{PORT}  (POST /feedback -> {FEEDBACK})")
     httpd.serve_forever()
