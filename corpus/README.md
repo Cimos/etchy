@@ -7,7 +7,7 @@ Planned sources:
 - **`synthetic/`** — board pairs with *precisely injected* deltas (exact ground
   truth: known added/removed copper area, known moved features).
 - **`kicad-demos/`** — public KiCad demo boards turned into revision pairs (realism).
-- **`real/`** — Simon's non-confidential boards (actual use cases).
+- **`real/`** — the owner's non-confidential boards (actual use cases).
 
 Each entry carries committed **expected outputs** (JSON magnitudes + SVG/heatmap
 snapshots via `insta`). Property tests (`diff(A,A)=∅`, add/remove symmetry,

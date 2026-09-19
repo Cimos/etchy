@@ -50,6 +50,25 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// The per-page summary row for `page`, split into its nine columns:
+/// `page old new present added_px removed_px changed_px changed% regions`.
+/// Only a line of exactly that shape qualifies, so the header, the
+/// "N page(s) diffed" count line and the result line can never stand in for
+/// a missing row.
+#[cfg(feature = "pdf")]
+fn page_row(stdout: &str, page: usize) -> Option<Vec<&str>> {
+    stdout
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .find(|f| {
+            f.len() == 9
+                && f[0] == page.to_string()
+                && f[4..7].iter().all(|n| n.parse::<u64>().is_ok())
+                && f[7].ends_with('%')
+                && f[8].parse::<u32>().is_ok()
+        })
+}
+
 #[cfg(feature = "pdf")]
 mod with_pdf {
     use super::*;
@@ -68,7 +87,16 @@ mod with_pdf {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("differences found"), "summary: {stdout}");
         // The summary carries the per-page table; the fixture's edit is on page 1.
-        assert!(stdout.lines().any(|l| l.trim_start().starts_with('1')));
+        // Match the row itself, not any line that happens to start with a `1`
+        // (the count line "1 page(s) diffed ..." always does — #301).
+        let row = page_row(&stdout, 1).unwrap_or_else(|| panic!("no row for page 1: {stdout}"));
+        assert_eq!(row[1], "1", "old column of the page-1 row: {stdout}");
+        assert_eq!(row[2], "1", "new column of the page-1 row: {stdout}");
+        assert_eq!(row[3], "both", "present column of the page-1 row: {stdout}");
+        let changed_px: u64 = row[6].parse().expect("changed_px is a count");
+        assert!(changed_px > 0, "page 1 has changed pixels: {stdout}");
+        let regions: u32 = row[8].parse().expect("regions is a count");
+        assert!(regions > 0, "page 1 has changed regions: {stdout}");
         let png = out_dir.join("page-1.png");
         assert!(png.is_file(), "--out writes page-1.png");
         assert!(
@@ -652,6 +680,75 @@ mod with_pdf {
         }
         let _ = std::fs::remove_file(&big);
         let _ = std::fs::remove_file(&small);
+    }
+
+    #[test]
+    fn a_total_raster_over_the_budget_fails_loud_before_rendering() {
+        // Ten 100x100 pt sheets at 3600 DPI are 5000x5000 px = 25 MP each — under
+        // the 50 MP per-page cap and far under the page-count cap — but 250 MP a
+        // side and 500 MP for the pair, over the 400 MP whole-run budget. Under
+        // the per-page cap alone this pair rasterizes ~2 GB and the OS kills the
+        // process with no message (#297); it must be exit 2 naming the totals.
+        // Neither document breaches the budget on its own: the check has to sum
+        // BOTH sides.
+        let pages: Vec<PageSpec> = (0..10).map(|i| sheet(10 + i * 5, 10)).collect();
+        let old = write_multi_page_pdf("297-budget-old", &pages);
+        let new = write_multi_page_pdf("297-budget-new", &pages);
+        let out = etchy()
+            .arg("--dpi")
+            .arg("3600")
+            .arg(&old)
+            .arg(&new)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "over the total raster budget must exit 2, not be OOM-killed: {stderr}"
+        );
+        assert!(
+            stderr.contains("500 MP in total")
+                && stderr.contains("old 10 pages ~250 MP")
+                && stderr.contains("new 10 pages ~250 MP")
+                && stderr.contains("400 MP total raster budget"),
+            "the error names the per-document and total pixel counts and the budget: {stderr}"
+        );
+        assert!(
+            stderr.contains("lower --dpi"),
+            "the error tells the user to lower --dpi: {stderr}"
+        );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
+    }
+
+    #[test]
+    fn a_modest_multi_page_pair_under_the_budget_still_diffs() {
+        // The same ten-sheet pair at 720 DPI is 1000x1000 px a page: 10 MP a side,
+        // 20 MP for the pair — well inside every cap, so it must run to a real
+        // result (identical documents: exit 0), not trip the new budget check.
+        let pages: Vec<PageSpec> = (0..10).map(|i| sheet(10 + i * 5, 10)).collect();
+        let old = write_multi_page_pdf("297-modest-old", &pages);
+        let new = write_multi_page_pdf("297-modest-new", &pages);
+        let out = etchy()
+            .arg("--dpi")
+            .arg("720")
+            .arg(&old)
+            .arg(&new)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "a modest multi-page pair must diff normally: {stderr}"
+        );
+        assert!(
+            !stderr.contains("raster budget"),
+            "under the budget the check must stay silent: {stderr}"
+        );
+        let _ = std::fs::remove_file(&old);
+        let _ = std::fs::remove_file(&new);
     }
 
     #[test]

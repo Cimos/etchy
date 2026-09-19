@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::io::{BufReader, Cursor};
 
 use gerber_parser::gerber_types::{
-    Aperture as GtAperture, ApertureMacro, Command, CoordinateOffset, Coordinates, DCode,
-    ExtendedCode, FunctionCode, GCode, InterpolationMode, MacroBoolean, MacroContent, MacroDecimal,
-    MacroInteger, Operation, Polarity as GtPolarity, QuadrantMode, Unit,
+    Aperture as GtAperture, ApertureMacro, Command, CoordinateMode, CoordinateOffset, Coordinates,
+    DCode, ExtendedCode, FunctionCode, GCode, InterpolationMode, MacroBoolean, MacroContent,
+    MacroDecimal, MacroInteger, Operation, Polarity as GtPolarity, QuadrantMode, Unit,
 };
 use gerber_parser::parse;
 
@@ -30,19 +30,21 @@ use crate::geom;
 /// pass even runs (#83). We fail loud at this bound instead of grinding or
 /// OOM-ing. Set generously so legitimate dense/curvy boards never trip it;
 /// lowered under test so the guard can be exercised without huge allocations.
+/// Shared with the Excellon front-end (`R` repeat codes, #308) so one layer means
+/// one budget regardless of format.
 #[cfg(not(test))]
-const MAX_CONTOURS_PER_LAYER: usize = 5_000_000;
+pub(crate) const MAX_CONTOURS_PER_LAYER: usize = 5_000_000;
 #[cfg(test)]
-const MAX_CONTOURS_PER_LAYER: usize = 5_000;
+pub(crate) const MAX_CONTOURS_PER_LAYER: usize = 5_000;
 
 /// Per-layer total-point ceiling (#83). The contour count alone doesn't bound
 /// this — one region loop or a near-full arc can carry thousands of points, so a
 /// handful of contours can still amplify into a huge point set (and a slow/greedy
 /// boolean pass). Fail loud once the summed vertex count crosses the bound.
 #[cfg(not(test))]
-const MAX_POINTS_PER_LAYER: usize = 20_000_000;
+pub(crate) const MAX_POINTS_PER_LAYER: usize = 20_000_000;
 #[cfg(test)]
-const MAX_POINTS_PER_LAYER: usize = 30_000;
+pub(crate) const MAX_POINTS_PER_LAYER: usize = 30_000;
 
 /// Per-layer polarity-span ceiling (#83). Each span is one boolean pass over the
 /// accumulated geometry, so a file that toggles `%LP` on every object turns the
@@ -212,6 +214,8 @@ pub fn coordinate_mismatch_warning(old: &GerberFormat, new: &GerberFormat) -> Op
 /// codes `G70/G71/G90` (units come from `%MO`); strip the deprecated `G54`
 /// aperture-select prefix. Fails loud on `G91` (incremental coordinates), which
 /// would otherwise be a silent misread. `%…%` extended blocks pass through intact.
+/// A command that never gets its `*` — before a `%` block or at end of file — is a
+/// parse error, not a silent drop (#313): losing it would delete a flash or draw.
 fn normalize(bytes: &[u8]) -> Result<String> {
     let text = String::from_utf8_lossy(bytes);
     let mut out = String::with_capacity(text.len());
@@ -231,6 +235,7 @@ fn normalize(bytes: &[u8]) -> Result<String> {
         }
         match ch {
             '%' => {
+                check_terminated(&buf, "before '%'")?;
                 buf.clear();
                 buf.push('%');
                 in_ext = true;
@@ -246,7 +251,37 @@ fn normalize(bytes: &[u8]) -> Result<String> {
             _ => buf.push(ch),
         }
     }
+    if in_ext {
+        return Err(EngineError::Parse(format!(
+            "unterminated extended command block at end of file: {}",
+            excerpt(buf.trim())
+        )));
+    }
+    check_terminated(&buf, "at end of file")?;
     Ok(out)
+}
+
+/// Fail loud if `buf` still holds a command that never received its `*` (#313).
+/// Whitespace alone is fine — blank lines between commands are legitimate.
+fn check_terminated(buf: &str, place: &str) -> Result<()> {
+    let tok = buf.trim();
+    if tok.is_empty() {
+        return Ok(());
+    }
+    Err(EngineError::Parse(format!(
+        "unterminated command {place}: {}",
+        excerpt(tok)
+    )))
+}
+
+/// First 40 chars of `s` for an error message (char-boundary safe).
+fn excerpt(s: &str) -> String {
+    const MAX: usize = 40;
+    let mut e: String = s.chars().take(MAX).collect();
+    if s.chars().count() > MAX {
+        e.push('…');
+    }
+    e
 }
 
 fn emit_command(tok: &str, out: &mut String) -> Result<()> {
@@ -365,8 +400,8 @@ impl<'a> Machine<'a> {
             Command::FunctionCode(FunctionCode::GCode(g)) => match g {
                 GCode::InterpolationMode(m) => self.interp = *m,
                 GCode::QuadrantMode(q) => self.quadrant = Some(*q),
-                GCode::RegionMode(true) => self.begin_region(),
-                GCode::RegionMode(false) => self.end_region(),
+                GCode::RegionMode(true) => self.begin_region()?,
+                GCode::RegionMode(false) => self.end_region()?,
                 GCode::Comment(_)
                 | GCode::Unit(_)
                 | GCode::CoordinateMode(_)
@@ -406,8 +441,18 @@ impl<'a> Machine<'a> {
     fn extended(&mut self, ec: &ExtendedCode) -> Result<()> {
         match ec {
             ExtendedCode::LoadPolarity(p) => self.polarity_dark = matches!(p, GtPolarity::Dark),
-            ExtendedCode::CoordinateFormat(_)
-            | ExtendedCode::Unit(_)
+            // #305: `%FS…I…` declares incremental notation — every coordinate is an
+            // offset from the previous point. `resolve()` reads coordinates as
+            // absolute, so accepting the file would render wrong geometry silently.
+            // (The deprecated `G91` form is caught earlier, in `normalize`.)
+            ExtendedCode::CoordinateFormat(fs) => {
+                if fs.coordinate_mode == CoordinateMode::Incremental {
+                    return Err(unsupported(
+                        "incremental coordinate notation (%FS…I) is not supported",
+                    ));
+                }
+            }
+            ExtendedCode::Unit(_)
             | ExtendedCode::ApertureDefinition(_)
             | ExtendedCode::ApertureMacro(_)
             | ExtendedCode::FileAttribute(_)
@@ -456,13 +501,24 @@ impl<'a> Machine<'a> {
 
     // --- regions ---
 
-    fn begin_region(&mut self) {
+    fn begin_region(&mut self) -> Result<()> {
+        // A second `G36` before the `G37` would silently discard every loop
+        // collected so far (#314): fail loud instead.
+        if self.in_region {
+            return Err(unsupported("G36 inside an open region"));
+        }
         self.in_region = true;
         self.region_loops.clear();
         self.cur_loop.clear();
+        Ok(())
     }
 
-    fn end_region(&mut self) {
+    fn end_region(&mut self) -> Result<()> {
+        // `G37` with no region open has nothing to close; the file is malformed
+        // and used to pass as a no-op (#314).
+        if !self.in_region {
+            return Err(unsupported("G37 outside a region"));
+        }
         if !self.cur_loop.is_empty() {
             self.region_loops.push(std::mem::take(&mut self.cur_loop));
         }
@@ -475,9 +531,18 @@ impl<'a> Machine<'a> {
             self.region_loops.clear();
         }
         self.in_region = false;
+        Ok(())
     }
 
     fn region_segment(&mut self, to: Pt, offset: &Option<CoordinateOffset>) -> Result<()> {
+        // A contour starts at the current point (RS-274X 4.10: the first `D01`
+        // after the `D02` begins it there). A `D02` inside the region seeds the
+        // loop itself; when the region opens straight into `D01`s the start vertex
+        // was never recorded and the contour lost its first corner (#314). The arc
+        // path below relies on this too — it skips the first arc point as `cur`.
+        if self.cur_loop.is_empty() {
+            self.cur_loop.push(self.cur);
+        }
         if self.is_arc(offset) {
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
             let center = self.arc_center(to, offset, ccw)?;
@@ -628,6 +693,9 @@ impl<'a> Machine<'a> {
                 self.push(c, true);
             }
             GtAperture::Polygon(p) => {
+                if p.hole_diameter.is_some() {
+                    return Err(unsupported("drilled (hole) polygon aperture"));
+                }
                 let n = p.vertices as usize;
                 if !(3..=64).contains(&n) {
                     return Err(unsupported(
@@ -987,13 +1055,15 @@ mod tests {
     fn drilled_apertures_fail_loud() {
         // #240: an aperture with a hole (annular pad) must fail loud, not silently
         // report the solid-disk area — otherwise a copper-annulus change diffs as if
-        // the whole pad were solid (a silent miss). Pin circle / rectangle / obround.
+        // the whole pad were solid (a silent miss). Pin circle / rectangle / obround
+        // and (#307) polygon.
         // Each is flashed once; the SAME aperture without the hole is checked to
         // resolve, so the failure is provably the hole, not a parse problem.
         let cases = [
             ("C,0.5X0.2", "C,0.5"),         // drilled circle vs solid circle
             ("R,0.6X0.4X0.2", "R,0.6X0.4"), // drilled rect vs solid rect
             ("O,0.6X0.4X0.2", "O,0.6X0.4"), // drilled obround vs solid obround
+            ("P,1.0X6X0X0.4", "P,1.0X6"),   // drilled polygon vs solid polygon (#307)
         ];
         for (drilled, solid) in cases {
             let g = format!("%FSLAX46Y46*%\n%MOMM*%\n%ADD10{drilled}*%\nD10*\nX0Y0D03*\nM02*\n");
@@ -1027,6 +1097,68 @@ mod tests {
             3,
             "all three compact-line flashes must render"
         );
+    }
+
+    #[test]
+    fn unterminated_command_before_extended_block_fails_loud() {
+        // A flash missing its `*` right before a `%LP` block used to be silently
+        // discarded (#313): the layer resolved Ok with the pad gone. Must fail loud.
+        let g = format!("{HDR}X0Y0D03%LPC*%\nM02*\n");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::Parse(msg)) => {
+                assert!(
+                    msg.contains("unterminated") && msg.contains("X0Y0D03"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_command_at_eof_fails_loud() {
+        // Same silent drop at end of file: a final flash with no `*` (#313).
+        let g = format!("{HDR}X0Y0D03*\nX5Y5D03");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::Parse(msg)) => {
+                assert!(
+                    msg.contains("unterminated") && msg.contains("X5Y5D03"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unclosed_extended_block_at_eof_fails_loud() {
+        // An extended block opened with `%` and never closed was dropped too (#313).
+        let g = format!("{HDR}X0Y0D03*\n%LPC*");
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::Parse(msg)) => {
+                assert!(
+                    msg.contains("unterminated") && msg.contains("%LPC"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_whitespace_after_m02_still_resolves() {
+        // Blank lines, spaces and tabs after the final `M02*` are not a command (#313).
+        let g = format!("{HDR}X0Y0D03*\nM02*\n\n  \n\t\n   ");
+        let ps = resolve_layer(g.as_bytes()).expect("trailing whitespace must be fine");
+        assert_eq!(ps.region_count(), 1);
+    }
+
+    #[test]
+    fn crlf_line_endings_still_resolve() {
+        // Windows exports: CRLF between every command, including after `M02*` (#313).
+        let g = "%FSLAX46Y46*%\r\n%MOMM*%\r\n%ADD10C,0.5*%\r\nD10*\r\nX0Y0D03*\r\nM02*\r\n";
+        let ps = resolve_layer(g.as_bytes()).expect("CRLF file must resolve");
+        assert_eq!(ps.region_count(), 1);
     }
 
     #[test]
@@ -1132,6 +1264,57 @@ mod tests {
     }
 
     #[test]
+    fn region_without_leading_d02_keeps_its_start_vertex() {
+        // #314: the contour starts at the current point. `X0Y0D02*` BEFORE `G36*`
+        // then two `D01`s is a right triangle (0,0)-(2,0)-(2,2) = 2 mm². Without
+        // the start vertex the loop was 2 points, dropped by the `len < 3` guard,
+        // and the region vanished with no error — a silent miss.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nX0Y0D02*\nG36*\nX2000000Y0D01*\nX2000000Y2000000D01*\nG37*\nM02*\n";
+        let a = area_mm2(g);
+        assert!((a - 2.0).abs() < 0.001, "triangle region area {a} vs 2.0");
+    }
+
+    #[test]
+    fn region_with_leading_d02_is_unchanged_by_the_seed() {
+        // #314 guard: a region that opens with its own `D02` must render exactly as
+        // before — the seed only fires when no `D02` has started the loop. Same
+        // 2×2 square as `region_fills_its_outline`, with and without a stale
+        // current point set before `G36*`; both must be 4 mm² and identical.
+        let with_d02 = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\nX0Y0D02*\nG01*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y2000000D01*\nX0Y0D01*\nG37*\nM02*\n";
+        let stale_cur = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nX9000000Y9000000D02*\nG36*\nX0Y0D02*\nG01*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y2000000D01*\nX0Y0D01*\nG37*\nM02*\n";
+        let a = area_mm2(with_d02);
+        let b = area_mm2(stale_cur);
+        assert!((a - 4.0).abs() < 0.001, "region area {a} vs 4.0");
+        assert!(
+            (a - b).abs() < 1e-9,
+            "a stale current point before G36 must not leak into the region: {a} vs {b}"
+        );
+    }
+
+    #[test]
+    fn nested_g36_fails_loud() {
+        // #314: a second `G36` while a region is open used to reset the collected
+        // loops silently. It is a malformed file — fail loud.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\nX0Y0D02*\nX2000000Y0D01*\nX2000000Y2000000D01*\nX0Y0D01*\nG36*\nX5000000Y5000000D02*\nX6000000Y5000000D01*\nX6000000Y6000000D01*\nX5000000Y5000000D01*\nG37*\nM02*\n";
+        let err = resolve_layer(g.as_bytes());
+        assert!(
+            matches!(err, Err(EngineError::Unsupported { .. })),
+            "nested G36 must fail loud, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn g37_outside_a_region_fails_loud() {
+        // #314: `G37` with no open region used to be a silent no-op.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nX0Y0D03*\nG37*\nM02*\n";
+        let err = resolve_layer(g.as_bytes());
+        assert!(
+            matches!(err, Err(EngineError::Unsupported { .. })),
+            "stray G37 must fail loud, got {err:?}"
+        );
+    }
+
+    #[test]
     fn region_with_inner_loop_keeps_the_hole() {
         // A 4×4 mm filled region with a 2×2 mm inner loop (a pour clearance) → the
         // even-odd fill makes the inner loop a hole: 16 − 4 = 12 mm². Regression guard
@@ -1172,6 +1355,30 @@ mod tests {
         assert!(
             (a - 88.0).abs() < 0.05,
             "sequential polarity area {a} vs 88.0"
+        );
+    }
+
+    #[test]
+    fn incremental_format_spec_fails_loud() {
+        // #305: `%FSLIX24Y24*%` declares incremental notation (the 'I' after the
+        // zero-omission letter). The parser stored the mode but the engine resolved
+        // every coordinate as absolute — wrong geometry, no error. The identical
+        // file with `%FSLAX24Y24*%` must still resolve, so the failure is provably
+        // the mode, not the rest of the file.
+        let body = "%MOMM*%\n%ADD10C,0.5*%\nD10*\nX1000Y1000D03*\nX1000Y0D03*\nM02*\n";
+        let inc = format!("%FSLIX24Y24*%\n{body}");
+        let err = resolve_layer(inc.as_bytes());
+        match err {
+            Err(EngineError::Unsupported { feature }) => assert!(
+                feature.contains("incremental coordinate notation"),
+                "unexpected feature text: {feature}"
+            ),
+            other => panic!("incremental %FS must fail loud, got {other:?}"),
+        }
+        let abs = format!("%FSLAX24Y24*%\n{body}");
+        assert!(
+            resolve_layer(abs.as_bytes()).is_ok(),
+            "the same file in absolute notation must resolve"
         );
     }
 

@@ -8,7 +8,7 @@ two: raw item → requirement ID and/or issue → outcome.
 **Sources:** the in-app feedback widget (`deploy/feedback/*.jsonl`, gitignored —
 timestamps + severities quoted from it), the hosted M1 demo round
 (`docs/feedback-m1.md`), review-page decision submissions, and the GitHub issue
-tracker. Reporter is Simon unless noted. Repeated reports of one problem are
+tracker. Reporter is the owner unless noted. Repeated reports of one problem are
 merged into a single row (count noted).
 
 **Outcome legend:** ✅ shipped · 🔶 built, in an open PR · 🔜 open (issue) ·

@@ -4,7 +4,7 @@ etchy is intended to be open-source, but during development it accumulated some
 data and internal references that **must be dealt with before the repository is
 made public**. This is the last gate before flipping visibility — work through
 it top to bottom. Grouped by severity; each item notes whether it's an owner
-decision (Simon) or a mechanical fix.
+decision (the owner) or a mechanical fix.
 
 Status of this list is from the 2026-07-13 go-public audit (four-dimension
 sweep: licence, confidential data/secrets, README/docs, repo hygiene). The good
@@ -82,10 +82,10 @@ excludes `deploy/feedback/` screenshots and uploads.
       already-public board — confirm the source repo's licence covers
       redistributing the bundled copy (provenance note now in place).
 - [ ] **README release claims vs reality.** README status line and Install
-      section point users at [Releases] + `SHA256SUMS`. v0.1.0 is not cut
-      (Actions billing parked). Either publish the Release with per-OS archives
-      + checksums before flipping, or soften README §Install to
-      "build from source / container" until binaries ship (both already work).
+      section point users at [Releases] + `SHA256SUMS`. CI is green and
+      `v0.1.0-rc1` is published as a pre-release with four archives plus
+      `SHA256SUMS`; public `v0.1.0` is not cut until this checklist is complete.
+      Keep README §Install explicit about the pre-release status until then.
 
 ## 4. Hardening — should-do
 
@@ -122,6 +122,7 @@ excludes `deploy/feedback/` screenshots and uploads.
 ```sh
 # secrets / private data
 git grep -nE 'BEGIN [A-Z ]*PRIVATE KEY|ghp_|github_pat_|AKIA[0-9A-Z]{16}'
+# grep for the owner's personal names (first and last) and any personal email
 # board identifiers: TERMS='term1|term2|…' from #264 (not listed here on purpose)
 grep -rinE "$TERMS" docs/ crates/ deploy/ *.md
 # private-range LAN IPs / user paths (a few version-string false positives are normal)

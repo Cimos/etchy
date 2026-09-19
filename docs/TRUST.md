@@ -32,7 +32,10 @@ etchy deliberately does **not** do.
   fuzz-lite pass asserts the parser never panics on arbitrary bytes.
 - **Amplification limits.** Per-layer ceilings on emitted contours, total points,
   and polarity spans mean a tiny crafted file fails loud instead of exhausting a
-  CI runner's CPU/RAM.
+  CI runner's CPU/RAM. Schematic-PDF inputs are bounded the same way — a per-page
+  pixel cap (50 MP), a page-count cap (1024 per document), and a whole-run raster
+  budget across both documents (`MAX_TOTAL_PIXELS`, 400 MP ≈ 1.6 GB RGBA) — all
+  checked from the page sizes before a single page is rendered.
 
 ## Limitations (by design or not-yet)
 
@@ -41,7 +44,9 @@ etchy deliberately does **not** do.
 - **Coordinate-format mismatch is flagged, not reconciled.** If the two revisions
   were exported with different `%FS`/unit settings, identical geometry quantizes
   onto different grids and produces spurious sub-µm "rim" differences; etchy
-  **warns** about this rather than silently massaging it.
+  **warns** about this rather than silently massaging it. Incremental notation
+  (`%FS…I…`, or the deprecated `G91`) is not rendered at all — it fails loud
+  rather than being read as absolute (#305).
 - **Gerber arcs need a declared quadrant mode.** An arc (`G02`/`G03` draw)
   before any `G74`/`G75` fails loud: pre-2012 RS-274X made single-quadrant the
   implicit default while every modern exporter emits `G75`, so guessing either
@@ -55,8 +60,11 @@ etchy deliberately does **not** do.
 - **Pick-and-place is placement geometry, not a BOM.** Each component is rendered
   as a marker at its centroid + rotation and diffed geometrically (moved / rotated
   / added / removed parts show up); etchy does **not** compare values, footprints,
-  or nets. Coordinates are assumed millimetres, and all parts land on one
-  `placement` layer (top/bottom sides aren't split yet).
+  or nets. Coordinates are converted to millimetres from the unit the file
+  declares (Altium `Center-X(mil)` / `(in)` column brackets, KiCad
+  `## Unit = inches`); an unrecognised unit, or X and Y in different units,
+  fails loud, and a file that declares no unit is assumed millimetres. All parts
+  land on one `placement` layer (top/bottom sides aren't split yet).
 - **Region counts use a small noise floor** so sub-nanometre tessellation slivers
   aren't counted as changes; the changed *area* is always exact.
 - **Schematic-PDF diff is not implemented yet** (the `etchy-pdf` crate is a
