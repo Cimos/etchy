@@ -4,7 +4,7 @@
 > **etchy** (broader PCB visual + geometric diff scope) was decided in Round 8–9
 > below. Kept under the new name as the historical record of that decision.
 
-Living capture of the assume-nothing requirements interview (Simon × Claude),
+Living capture of the assume-nothing requirements interview (owner × assistant),
 the basis for `ROADMAP.md` and `DEVELOPER_GUIDE.md`. Answers are authoritative;
 where they contradict the current implementation, the answer wins and the gap
 becomes roadmap work.
@@ -163,13 +163,13 @@ native, not a Tk shell or web app.
 
 - **Name: `etchy`.** (`etch` is taken on crates.io — a text formatter, 480k dl;
   `etchr`/`sketch` also taken. `etchy` verified free on crates.io.) Reads as
-  `etchy old new`. GitHub `Cimos/etchy` (Simon's namespace, free).
+  `etchy old new`. GitHub `Cimos/etchy` (the owner's namespace, free).
 - **License: dual `MIT OR Apache-2.0`** (Rust-ecosystem convention; adds patent grant).
 - **Milestone-1 MVP includes the egui GUI** — engine + CLI + native viewer + the
   HTML/SVG/JSON outputs all in the first usable cut (bigger M1, but the GUI ships
   with it rather than later).
 - **Trust corpus = all sources:** synthesized known-delta board pairs (ground
-  truth), public KiCad demo boards (realism), Simon's own non-confidential
+  truth), public KiCad demo boards (realism), the owner's own non-confidential
   boards, plus fuzzing/property tests (invariants: diff(A,A)=∅, symmetry, etc.).
 - **Repo: fresh `Cimos/etchy`.** Clean start; `Cimos/Gerber-Diff-Tool` stays
   frozen at v0.11 with its existing releases.
@@ -204,4 +204,3 @@ native, not a Tk shell or web app.
   real), validated polygon ops, fail-loud over wrong-but-quiet; fuzz/property tests.
 - **GUI:** native egui/iced single-binary viewer (overlay / before / after /
   split / swipe / onion + heatmap, pan-zoom). Secondary priority but in M1.
-

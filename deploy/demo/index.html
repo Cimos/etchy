@@ -216,7 +216,7 @@
     el('etfb-panel').addEventListener('keydown',function(e){
       if((e.ctrlKey||e.metaKey)&&(e.key==='Enter'||e.keyCode===13)){e.preventDefault();etfbSend();}});
     function done(ok){shots=[];renderShots();etfbClose();el('etfb-text').value='';el('etfb-name').value='';el('etfb-text').style.borderColor='';
-      var t=el('etfb-toast');t.textContent=ok?'✓ Thanks — sent!':"⚠ Couldn't send — please tell Simon directly";
+      var t=el('etfb-toast');t.textContent=ok?'✓ Thanks — sent!':"⚠ Couldn't send — please open a GitHub issue instead";
       t.style.borderColor=ok?'#36d39a':'#e8b34a';t.style.color=ok?'#bff5e0':'#f0d49a';t.style.background=ok?'#10331f':'#33270f';
       t.classList.add('show');setTimeout(function(){t.classList.remove('show');},2800);}
     // Capture the live canvas as a PNG data-URI (#27). Returns null if the canvas

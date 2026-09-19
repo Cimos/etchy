@@ -13,9 +13,10 @@ ground-up in **Rust**. Successor to the Python tool gerber-diff (frozen at
 `Cimos/Gerber-Diff-Tool` v0.11). `etchy old/ new/` → crisp SVG overlay + change
 heatmap + JSON magnitudes, on any Gerber/Excellon fab pack.
 
-**Status (2026-07):** engine/CLI/CI surfaces shipped through M2; PDF engine
-merged (CLI wiring #63 open); the GUI shell redesign is built and in review
-(PR chain #167→#175→#182→#202); v0.1.0 blocked on GitHub Actions billing.
+**Status (2026-09):** engine/CLI/CI surfaces shipped through M2; PDF engine
+and CLI wiring are merged; the GUI shell redesign is merged; CI on `main` is
+green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` is gated on
+the checklist in `PRE_PUBLIC.md`.
 
 ## Decisions that constrain the work (from `docs/PRODUCT_DISCOVERY.md`)
 
@@ -54,6 +55,5 @@ merged (CLI wiring #63 open); the GUI shell redesign is built and in review
 ## Next work
 
 See `docs/ROADMAP.md` "Where we are" and `docs/REQUIREMENTS.md` for statuses.
-Current front: land the GUI shell PR chain (#167→#175→#182→#202), fix native
-WSLg clicks (#203), wire the `.pdf` CLI path (#63), then cut v0.1.0 once
-GitHub Actions billing is restored (+ publish the container to ghcr).
+Current front: fix native WSLg clicks (#203), then complete `PRE_PUBLIC.md`, cut
+public v0.1.0, and publish the container to ghcr.

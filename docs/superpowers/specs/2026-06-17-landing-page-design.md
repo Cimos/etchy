@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-17
 **Status:** Approved design, pending implementation plan
-**Owner:** Cimos (Simon)
+**Owner:** Cimos
 
 ## Goal
 

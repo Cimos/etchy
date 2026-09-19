@@ -2,7 +2,9 @@ name: etchy PCB diff
 description: >-
   Diff two revisions of a board's fab output and gate the pipeline on the result.
   Writes a Markdown summary to the job step-summary and (optionally) a sticky PR
-  comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error.
+  comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error. Any other
+  code (a panic, an OOM kill, a missing binary) is treated as an error, never
+  as "no change".
 author: Cimos
 branding:
   icon: layers
@@ -20,7 +22,7 @@ inputs:
     required: false
     default: "true"
   comment:
-    description: Post the layer-by-layer diff as a sticky PR comment. Only needs the consumer's job to grant pull-requests:write — the token is supplied automatically.
+    description: Post the layer-by-layer diff as a sticky PR comment for this input pair. Only needs the consumer's job to grant pull-requests:write — the token is supplied automatically.
     required: false
     default: "false"
 
@@ -32,8 +34,9 @@ outputs:
 runs:
   using: composite
   steps:
-    # Build etchy from this repo (no release binary published yet). Cargo's own
-    # cache + the toolchain are the consumer workflow's responsibility. Use the
+    # Building etchy from source is the current design. Downloading a release
+    # asset with checksum verification is a later option. Cargo's own cache +
+    # the toolchain are the consumer workflow's responsibility. Use the
     # runner-provided $GITHUB_ACTION_PATH env var, not a ${{ }} template, so no
     # value is expanded into the script.
     - shell: bash
@@ -62,8 +65,8 @@ runs:
         md="$("$etchy" --format md -- "$OLD_DIR" "$NEW_DIR")"
         code=$?
         set -e
+        case "$code" in 0|1) ;; *) echo "etchy exited $code" >&2; exit 2;; esac
         printf '%s\n' "$md" >> "$GITHUB_STEP_SUMMARY"
-        [ "$code" -eq 2 ] && { echo "etchy errored" >&2; exit 2; }
         echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
         # Post/refresh the sticky PR comment with the layer-by-layer table. A
         # comment failure (missing permission, not a PR event) is a warning, not
@@ -72,9 +75,28 @@ runs:
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::warning::comment:true but no token available — skipping PR comment"
           else
-            printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --edit-last --body-file - \
-              || printf '%s\n' "$md" | gh pr comment "$PR_NUMBER" --body-file - \
-              || echo "::warning::could not post PR comment — grant the job pull-requests:write"
+            marker_key="$(printf '%s' "$OLD_DIR|$NEW_DIR" | sha256sum | cut -c1-16)"
+            marker="<!-- etchy-diff:${marker_key} -->"
+            if comment_id="$(
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+                --paginate \
+                --jq ".[] | select(.body | startswith(\"$marker\")) | .id" \
+                | sed -n '1p'
+            )"; then
+              if [ -n "$comment_id" ]; then
+                printf '%s\n%s\n' "$marker" "$md" \
+                  | gh api -X PATCH \
+                    "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+                    -f body=@- >/dev/null \
+                  || echo "::warning::could not update PR comment — grant the job pull-requests:write"
+              else
+                printf '%s\n%s\n' "$marker" "$md" \
+                  | gh pr comment "$PR_NUMBER" --body-file - \
+                  || echo "::warning::could not post PR comment — grant the job pull-requests:write"
+              fi
+            else
+              echo "::warning::could not find existing PR comment — grant the job pull-requests:write"
+            fi
           fi
         fi
         [ "$FAIL_ON_DIFF" = "true" ] && [ "$code" -eq 1 ] && exit 1 || true

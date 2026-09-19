@@ -172,7 +172,7 @@ pub enum LayerPairing<'a> {
 /// every layer as removed + added. Within a kind that has several layers (e.g.
 /// mechanical "other" layers), exact-filename matches pair first and the rest pair
 /// positionally by stack order — but a positional guess is only accepted when the
-/// two layers' extents plausibly overlap (see [`positional_pair_plausible`]), so
+/// two layers' extents plausibly overlap (see [`positional_pair_score`]), so
 /// two unrelated same-kind files are never silently collapsed onto one "changed"
 /// layer (#238). A layer with no counterpart is `OnlyOld`/`OnlyNew` (a legitimately
 /// added/removed layer, not an error).
@@ -221,29 +221,53 @@ pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> 
         // regions of the board can't be one physical layer's two revisions, so we
         // report them as an honest removed + added rather than one misleading
         // "changed" layer (#238).
-        let mut leftover_new = news
+        //
+        // The two sides may list same-kind layers in a different order, so pairing
+        // strictly by encounter position would fail the gate on every pair even
+        // when a cross pairing passes (#318). Instead, score every plausible
+        // (old, new) combination in the bucket and take the best-overlap pair
+        // first, then the next best among what is left, and so on. Ties break by
+        // index so the result is deterministic. Buckets are small (a handful of
+        // mechanical layers at most), so the quadratic scan is negligible.
+        let leftover_new: Vec<&Layer> = news
             .iter()
             .enumerate()
             .filter(|&(j, _)| !new_used[j])
-            .map(|(_, n)| *n);
-        let mut unmatched_old = unmatched_old.into_iter();
-        loop {
-            match (unmatched_old.next(), leftover_new.next()) {
-                (Some(o), Some(n)) => {
-                    if positional_pair_plausible(o, n) {
-                        out.push(LayerPairing::Both {
-                            kind,
-                            old: o,
-                            new: n,
-                        });
-                    } else {
-                        out.push(LayerPairing::OnlyOld(o));
-                        out.push(LayerPairing::OnlyNew(n));
-                    }
+            .map(|(_, n)| *n)
+            .collect();
+        let mut scored: Vec<(u32, usize, usize)> = Vec::new();
+        for (i, o) in unmatched_old.iter().enumerate() {
+            for (j, n) in leftover_new.iter().enumerate() {
+                if let Some(score) = positional_pair_score(o, n) {
+                    scored.push((score, i, j));
                 }
-                (Some(o), None) => out.push(LayerPairing::OnlyOld(o)),
-                (None, Some(n)) => out.push(LayerPairing::OnlyNew(n)),
-                (None, None) => break,
+            }
+        }
+        // Highest score first; equal scores fall back to old index, then new index.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let mut old_partner: Vec<Option<usize>> = vec![None; unmatched_old.len()];
+        let mut new_taken = vec![false; leftover_new.len()];
+        for (_, i, j) in scored {
+            if old_partner[i].is_none() && !new_taken[j] {
+                old_partner[i] = Some(j);
+                new_taken[j] = true;
+            }
+        }
+        // Emit in old-side order (a pair sits where its old layer does), then any
+        // new layer nothing claimed.
+        for (o, partner) in unmatched_old.iter().zip(old_partner) {
+            match partner {
+                Some(j) => out.push(LayerPairing::Both {
+                    kind,
+                    old: o,
+                    new: leftover_new[j],
+                }),
+                None => out.push(LayerPairing::OnlyOld(o)),
+            }
+        }
+        for (n, taken) in leftover_new.iter().zip(new_taken) {
+            if !taken {
+                out.push(LayerPairing::OnlyNew(n));
             }
         }
     }
@@ -260,12 +284,19 @@ pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> 
 /// diff reports an honest removed + added instead of one misleading "changed"
 /// layer (#238).
 ///
+/// Returns `None` when the pair is implausible, otherwise `Some(score)` where the
+/// score is the overlap as a fraction of the smaller layer's extent, in parts per
+/// million — higher means a better match. [`pair_layers`] uses the score to pick
+/// the best-overlap pairs within a kind bucket (#318); the accept/refuse line is
+/// unchanged from the original gate.
+///
 /// This gates *only* positional guesses — exact-filename matches are intentional
 /// and never checked. Empty or degenerate geometry can't be judged geometrically,
-/// so it passes (an empty diff is harmless and never a silent miss).
-fn positional_pair_plausible(old: &Layer, new: &Layer) -> bool {
+/// so it passes with the lowest score (an empty diff is harmless and never a
+/// silent miss, but a real geometric match should win over it).
+fn positional_pair_score(old: &Layer, new: &Layer) -> Option<u32> {
     let (Some(o), Some(n)) = (old.geometry.bbox_nm(), new.geometry.bbox_nm()) else {
-        return true; // one side has no geometry — nothing to compare on
+        return Some(0); // one side has no geometry — nothing to compare on
     };
     // Intersection of the two axis-aligned bounding boxes.
     let ix0 = o[0].max(n[0]);
@@ -273,18 +304,22 @@ fn positional_pair_plausible(old: &Layer, new: &Layer) -> bool {
     let ix1 = o[2].min(n[2]);
     let iy1 = o[3].min(n[3]);
     if ix1 <= ix0 || iy1 <= iy0 {
-        return false; // disjoint (or edge-touching) extents — not one layer
+        return None; // disjoint (or edge-touching) extents — not one layer
     }
     let inter = (ix1 - ix0) as i128 * (iy1 - iy0) as i128;
     let area = |bb: [i64; 4]| (bb[2] - bb[0]) as i128 * (bb[3] - bb[1]) as i128;
     let smaller = area(o).min(area(n));
     if smaller <= 0 {
-        return true; // a zero-width bbox can't be judged by overlap
+        return Some(0); // a zero-width bbox can't be judged by overlap
     }
     // Generous: the overlap need only reach 10% of the smaller layer's extent.
     // Tuned to catch clearly-unrelated (near-disjoint) files while never splitting
     // a heavily-edited but co-located revision of the same layer.
-    inter * 10 >= smaller
+    if inter * 10 < smaller {
+        return None;
+    }
+    // `inter <= smaller`, so the ppm fraction is at most 1_000_000.
+    Some((inter * 1_000_000 / smaller) as u32)
 }
 
 /// Coarse same-board plausibility check: the two revisions' whole-board union
@@ -598,6 +633,133 @@ mod tests {
         let pairs = pair_layers(&a, &b);
         assert_eq!(pairs.len(), 1, "co-located rename must still pair");
         assert!(matches!(pairs[0], LayerPairing::Both { .. }));
+    }
+
+    /// The `(old, new)` labels of every `Both` pairing, in emitted order.
+    fn both_labels<'a>(pairs: &[LayerPairing<'a>]) -> Vec<(&'a str, &'a str)> {
+        pairs
+            .iter()
+            .filter_map(|p| match p {
+                LayerPairing::Both { old, new, .. } => {
+                    Some((old.label.as_str(), new.label.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn positional_pairing_matches_best_overlap_across_order() {
+        // #318: two renamed same-kind layers listed in opposite order across the
+        // revisions. Pairing strictly by encounter position (notes↔keepout',
+        // keepout↔notes') fails the plausibility gate on both pairs and reports
+        // four one-sided layers, even though the cross pairing passes. The bucket
+        // must be assigned by best overlap instead: two changed pairs.
+        let mm = 1_000_000;
+        let a = Board {
+            layers: vec![
+                labeled(LayerKind::Other, "rev1-notes.gbr", [0, 0, 40 * mm, 40 * mm]),
+                labeled(
+                    LayerKind::Other,
+                    "rev1-keepout.gbr",
+                    [60 * mm, 60 * mm, 100 * mm, 100 * mm],
+                ),
+            ],
+        };
+        let b = Board {
+            layers: vec![
+                labeled(
+                    LayerKind::Other,
+                    "rev2-keepout.gbr",
+                    [61 * mm, 60 * mm, 100 * mm, 100 * mm],
+                ),
+                labeled(LayerKind::Other, "rev2-notes.gbr", [0, 0, 40 * mm, 41 * mm]),
+            ],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(
+            pairs.len(),
+            2,
+            "two renamed layers must give two changed pairs"
+        );
+        assert_eq!(
+            both_labels(&pairs),
+            vec![
+                ("rev1-notes.gbr", "rev2-notes.gbr"),
+                ("rev1-keepout.gbr", "rev2-keepout.gbr"),
+            ],
+            "each layer pairs with its co-located counterpart, emitted in old order"
+        );
+    }
+
+    #[test]
+    fn positional_pairing_same_order_is_unchanged() {
+        // The same two layers listed in the same order on both sides pair exactly
+        // as they did before #318: like-with-like, in stack order.
+        let mm = 1_000_000;
+        let a = Board {
+            layers: vec![
+                labeled(LayerKind::Other, "rev1-notes.gbr", [0, 0, 40 * mm, 40 * mm]),
+                labeled(
+                    LayerKind::Other,
+                    "rev1-keepout.gbr",
+                    [60 * mm, 60 * mm, 100 * mm, 100 * mm],
+                ),
+            ],
+        };
+        let b = Board {
+            layers: vec![
+                labeled(LayerKind::Other, "rev2-notes.gbr", [0, 0, 40 * mm, 41 * mm]),
+                labeled(
+                    LayerKind::Other,
+                    "rev2-keepout.gbr",
+                    [61 * mm, 60 * mm, 100 * mm, 100 * mm],
+                ),
+            ],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(
+            both_labels(&pairs),
+            vec![
+                ("rev1-notes.gbr", "rev2-notes.gbr"),
+                ("rev1-keepout.gbr", "rev2-keepout.gbr"),
+            ]
+        );
+    }
+
+    #[test]
+    fn positional_pairing_best_overlap_leaves_unrelated_layer_one_sided() {
+        // Best-overlap assignment must not loosen the gate: with an extra new
+        // layer that overlaps nothing on the old side, the co-located pair still
+        // pairs and the stranger is still reported as added.
+        let mm = 1_000_000;
+        let a = Board {
+            layers: vec![labeled(
+                LayerKind::Other,
+                "rev1-notes.gbr",
+                [0, 0, 40 * mm, 40 * mm],
+            )],
+        };
+        let b = Board {
+            layers: vec![
+                labeled(
+                    LayerKind::Other,
+                    "rev2-keepout.gbr",
+                    [60 * mm, 60 * mm, 100 * mm, 100 * mm],
+                ),
+                labeled(LayerKind::Other, "rev2-notes.gbr", [0, 0, 40 * mm, 41 * mm]),
+            ],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(
+            both_labels(&pairs),
+            vec![("rev1-notes.gbr", "rev2-notes.gbr")]
+        );
+        assert!(pairs
+            .iter()
+            .any(|p| matches!(p, LayerPairing::OnlyNew(l) if l.label == "rev2-keepout.gbr")));
     }
 
     #[test]
