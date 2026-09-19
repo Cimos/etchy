@@ -339,10 +339,14 @@ struct Machine<'a> {
     cur: Pt,
     ap: Option<i32>,
     interp: InterpolationMode,
-    /// Arc quadrant mode (`G74` single / `G75` multi). Defaults to multi: modern
-    /// exporters emit `G75` and it matches the historic behaviour; a `G74` seen in
-    /// the stream switches the I/J interpretation to single-quadrant (#234).
-    quadrant: QuadrantMode,
+    /// Arc quadrant mode (`G74` single / `G75` multi), `None` until the file
+    /// declares one. A `G74` switches the I/J interpretation to single-quadrant
+    /// (#234). There is no default: pre-2012 RS-274X made single-quadrant the
+    /// implicit mode while modern exporters always emit `G75`, so an arc drawn
+    /// before either code is ambiguous and fails loud rather than being read as
+    /// multi-quadrant with a possibly wrong centre (#312). Linear-only files
+    /// never consult it.
+    quadrant: Option<QuadrantMode>,
     polarity_dark: bool,
 
     in_region: bool,
@@ -375,7 +379,7 @@ impl<'a> Machine<'a> {
             cur: Pt::new(0, 0),
             ap: None,
             interp: InterpolationMode::Linear,
-            quadrant: QuadrantMode::Multi,
+            quadrant: None,
             polarity_dark: true,
             in_region: false,
             region_loops: Vec::new(),
@@ -395,7 +399,7 @@ impl<'a> Machine<'a> {
             }
             Command::FunctionCode(FunctionCode::GCode(g)) => match g {
                 GCode::InterpolationMode(m) => self.interp = *m,
-                GCode::QuadrantMode(q) => self.quadrant = *q,
+                GCode::QuadrantMode(q) => self.quadrant = Some(*q),
                 GCode::RegionMode(true) => self.begin_region()?,
                 GCode::RegionMode(false) => self.end_region()?,
                 GCode::Comment(_)
@@ -632,11 +636,17 @@ impl<'a> Machine<'a> {
         let j = o.y.map(f64::from).unwrap_or(0.0) * self.nm_per_unit;
         let (fx, fy) = (self.cur.x as f64, self.cur.y as f64);
         match self.quadrant {
+            // No G74/G75 yet: the I/J reading is ambiguous (legacy default was
+            // single, modern files always declare G75) — fail loud, not guess (#312).
+            None => Err(unsupported(
+                "arc before any G74/G75 quadrant mode declaration — add G75 \
+                 (multi-quadrant) to the file",
+            )),
             // Multi-quadrant (G75): I/J are signed offsets to the centre.
-            QuadrantMode::Multi => Ok((fx + i, fy + j)),
+            Some(QuadrantMode::Multi) => Ok((fx + i, fy + j)),
             // Single-quadrant (G74): I/J are magnitudes; pick the valid <=90° corner
             // or fail loud on an inconsistent arc rather than render a wrong centre.
-            QuadrantMode::Single => geom::single_quadrant_center(
+            Some(QuadrantMode::Single) => geom::single_quadrant_center(
                 fx,
                 fy,
                 to.x as f64,
@@ -1553,6 +1563,69 @@ mod tests {
             (a74 - a75).abs() > 0.1,
             "G74 area {a74} and G75 area {a75} must differ (mode was ignored?)"
         );
+    }
+
+    #[test]
+    fn arc_before_any_quadrant_mode_fails_loud() {
+        // #312: the g74_single_quadrant_arc_honoured input with its `G74*` removed.
+        // With no G74/G75 the I/J reading is ambiguous (legacy default single,
+        // modern files always declare G75); the pre-fix code silently assumed
+        // multi-quadrant and put the centre at (2mm,0). It must fail loud instead.
+        let r = 1_000_000;
+        let g = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG36*\n\
+             X0Y0D02*\nG01*\nX{r}Y0D01*\nG03*\nX0Y{r}I{r}J0D01*\nG01*\nX0Y0D01*\nG37*\nM02*\n"
+        );
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::Unsupported { feature }) => assert!(
+                feature.contains("arc before any G74/G75 quadrant mode declaration")
+                    && feature.contains("add G75"),
+                "message must name the missing declaration and the fix: {feature}"
+            ),
+            other => panic!("undeclared-mode arc must fail loud, got {other:?}"),
+        }
+        // A stroked (non-region) arc takes the same path and must fail the same way.
+        let stroked = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\n\
+             X{r}Y0D02*\nG03*\nX0Y{r}I{r}J0D01*\nM02*\n"
+        );
+        assert!(
+            matches!(
+                resolve_layer(stroked.as_bytes()),
+                Err(EngineError::Unsupported { .. })
+            ),
+            "undeclared-mode stroked arc must fail loud"
+        );
+    }
+
+    #[test]
+    fn arc_after_g75_declaration_resolves() {
+        // #312: the same input with `G75*` declared where the `G74*` was resolves,
+        // and keeps the multi-quadrant reading (centre at (2mm,0), not (0,0)).
+        let r = 1_000_000;
+        let g = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG75*\nG36*\n\
+             X0Y0D02*\nG01*\nX{r}Y0D01*\nG03*\nX0Y{r}I{r}J0D01*\nG01*\nX0Y0D01*\nG37*\nM02*\n"
+        );
+        let a = area_mm2(&g);
+        let quarter_disk = std::f64::consts::PI / 4.0;
+        assert!(a > 0.0, "G75 arc must resolve to copper, got {a}");
+        assert!(
+            (a - quarter_disk).abs() > 0.1,
+            "G75 must keep the multi-quadrant centre, not the G74 one ({a})"
+        );
+    }
+
+    #[test]
+    fn linear_only_file_needs_no_quadrant_mode() {
+        // #312: a file with no G74/G75 and no arcs must be unaffected — the mode
+        // is only consulted when an arc is actually drawn.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n\
+                 X0Y0D02*\nG01*\nX2000000Y0D01*\nX2000000Y1000000D03*\nM02*\n";
+        let a = area_mm2(g);
+        // 2 mm × 0.5 mm stroke with round caps (2×0.5 + π·0.25² ≈ 1.196) plus a
+        // separate 0.5 mm pad (≈ 0.196) 1 mm away from the stroke.
+        assert!(a > 1.0, "linear-only file must resolve to copper, got {a}");
     }
 
     #[test]

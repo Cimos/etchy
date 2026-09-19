@@ -30,6 +30,7 @@ if (-not $py) { throw "python not found on PATH." }
 
 $fb = Join-Path $repo ("deploy\feedback\{0}.jsonl" -f $env:COMPUTERNAME)
 $env:ETCHY_FEEDBACK = $fb
+if (-not $env:ETCHY_BIND) { $env:ETCHY_BIND = '0.0.0.0' }
 Write-Host "• feedback -> $fb" -ForegroundColor Cyan
 Write-Host "• serving $ServeDir on 0.0.0.0:$Port  (Ctrl+C to stop)" -ForegroundColor Cyan
 Write-Host "• feedback files stay local and gitignored; do not commit them." -ForegroundColor Cyan
