@@ -84,6 +84,36 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
     }
 }
 
+/// Parse the X2 `.FilePolarity` file attribute out of a Gerber's bytes (#317):
+/// `%TF.FilePolarity,Negative*%`, or its X1-compatible comment form
+/// `G04 #@! TF.FilePolarity,Negative*` (spec §5.1). `None` when the attribute is
+/// absent or malformed — callers treat that as positive, the spec default.
+///
+/// Byte-sniffed like [`file_function`], but not line-based: exporters may pack
+/// several `%…%` blocks on one line, and missing a `Negative` here would silently
+/// invert every sign on the layer, so the token is searched wherever it follows a
+/// `%` or a `#@!` marker. The first declaration wins.
+pub fn file_polarity(bytes: &[u8]) -> Option<FilePolarity> {
+    const TOKEN: &str = "TF.FilePolarity,";
+    let text = String::from_utf8_lossy(bytes);
+    text.match_indices(TOKEN).find_map(|(at, _)| {
+        // Only an extended-code block or a standard-comment attribute counts —
+        // not the token quoted in an ordinary comment.
+        let before = text[..at].trim_end();
+        let marked = before.ends_with('%') || before.ends_with("#@!");
+        if !marked {
+            return None;
+        }
+        let rest = &text[at + TOKEN.len()..];
+        let end = rest.find(['*', '%', '\n', '\r']).unwrap_or(rest.len());
+        match rest[..end].trim().to_ascii_uppercase().as_str() {
+            "POSITIVE" => Some(FilePolarity::Positive),
+            "NEGATIVE" => Some(FilePolarity::Negative),
+            _ => None,
+        }
+    })
+}
+
 /// Parse the X2 `.FileFunction` file attribute (`%TF.FileFunction,<args>*%`) out
 /// of a Gerber's bytes and map it to a [`LayerKind`] (#239). X2 files declare
 /// their true layer role machine-readably, so this is authoritative where the
@@ -94,26 +124,6 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
 /// Byte-sniffed like [`looks_like_gerber`] / [`crate::gerber_format`] — the
 /// attribute is a standalone `%…%` block, so we don't need the full parse. The
 /// first `.FileFunction` declaration wins.
-/// Parse the X2 `.FilePolarity` file attribute (`%TF.FilePolarity,Positive*%` /
-/// `%TF.FilePolarity,Negative*%`) out of a Gerber's bytes (#317). `None` when the
-/// attribute is absent or malformed — callers treat that as positive, which is
-/// the spec default. Byte-sniffed like [`file_function`]; the first declaration
-/// wins.
-pub fn file_polarity(bytes: &[u8]) -> Option<FilePolarity> {
-    let text = String::from_utf8_lossy(bytes);
-    text.lines().find_map(|l| {
-        let l = l.trim();
-        let l = l.strip_prefix('%').unwrap_or(l);
-        let rest = l.strip_prefix("TF.FilePolarity,")?;
-        let value = rest.trim_end_matches('%').trim_end_matches('*').trim();
-        match value.to_ascii_uppercase().as_str() {
-            "POSITIVE" => Some(FilePolarity::Positive),
-            "NEGATIVE" => Some(FilePolarity::Negative),
-            _ => None,
-        }
-    })
-}
-
 pub fn file_function(bytes: &[u8]) -> Option<LayerKind> {
     let text = String::from_utf8_lossy(bytes);
     let body = text.lines().find_map(|l| {
@@ -453,6 +463,21 @@ mod tests {
         assert_eq!(file_polarity(b"%FSLAX46Y46*%\n%MOMM*%\n"), None);
         // A .FileFunction line is not a polarity.
         assert_eq!(file_polarity(b"%TF.FileFunction,Copper,L1,Top*%\n"), None);
+        // The X1-compatible comment form (spec §5.1) counts…
+        assert_eq!(
+            file_polarity(b"G04 #@! TF.FilePolarity,Negative*\n%FSLAX46Y46*%\n"),
+            Some(FilePolarity::Negative)
+        );
+        // …and so does a block that shares its line with other blocks.
+        assert_eq!(
+            file_polarity(b"%FSLAX46Y46*%%MOMM*%%TF.FilePolarity,Negative*%%LPD*%\n"),
+            Some(FilePolarity::Negative)
+        );
+        // The token quoted in an ordinary comment is not a declaration.
+        assert_eq!(
+            file_polarity(b"G04 exporter note: TF.FilePolarity,Negative is unsupported*\n"),
+            None
+        );
     }
 
     #[test]

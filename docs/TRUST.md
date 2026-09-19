@@ -34,7 +34,9 @@ etchy deliberately does **not** do.
   off erases only from that aperture's own image, and the hole it leaves is
   transparent when flashed (RS-274X §4.5.1.2) — a track running under a ring
   pad's hole stays unbroken, in dark and clear polarity alike, whatever the draw
-  order. It is never applied as a layer-wide clear.
+  order. It is never applied as a layer-wide clear. The boolean passes that
+  resolve such a macro image count against the same per-layer span ceiling as
+  polarity spans, so a crafted macro cannot turn one flash into hours of work.
 - **Negative images keep their meaning.** A layer declaring
   `%TF.FilePolarity,Negative` draws clearances, so its `added`/`removed` are
   swapped to keep speaking in material, and the CLI says so. A negative layer

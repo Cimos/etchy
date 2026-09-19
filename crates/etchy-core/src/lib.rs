@@ -150,6 +150,9 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
                 old.negative,
             )
         }
+        // A one-sided layer is never swapped: its status (AddedLayer/RemovedLayer)
+        // is about the layer's presence, and its diff is simply its geometry as
+        // drawn, negative or not.
         LayerPairing::OnlyOld(l) => (
             l.kind,
             Some(l.label.clone()),
@@ -157,7 +160,7 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
             l.geometry.clone(),
             empty,
             LayerStatus::RemovedLayer,
-            l.negative,
+            false,
         ),
         LayerPairing::OnlyNew(l) => (
             l.kind,
@@ -166,16 +169,15 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
             empty,
             l.geometry.clone(),
             LayerStatus::AddedLayer,
-            l.negative,
+            false,
         ),
     };
 
     let mut d = diff_layer(&a, &b); // removed = a−b, added = b−a
     if negative {
-        // The drawn objects are clearances, so geometry that appears in `b` is
-        // material that *went away*. Swap so `added`/`removed` keep meaning copper
-        // (#317). A one-sided negative layer is left as drawn: its status
-        // (AddedLayer/RemovedLayer) is about the layer, not its material.
+        // Both revisions are negative images: the drawn objects are clearances, so
+        // geometry that appears in `b` is material that *went away*. Swap so
+        // `added`/`removed` keep meaning copper (#317).
         std::mem::swap(&mut d.added, &mut d.removed);
     }
     let change = d.measure();
@@ -291,6 +293,48 @@ mod tests {
         let v = &neg.layers[0];
         assert!(!v.removed.is_empty() && v.added.is_empty());
         assert_eq!(v.status, LayerStatus::Changed);
+    }
+
+    #[test]
+    fn one_sided_negative_layer_is_reported_as_drawn() {
+        // #317: a negative plane present only in the old revision is a removed
+        // layer whose geometry is `removed`, exactly like a positive one — the
+        // swap applies to paired negative layers only.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let corners = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let cu = |kind: LayerKind, negative: bool| Layer {
+            kind,
+            label: format!("{kind:?}"),
+            geometry: Arc::new(
+                polygonize_gerber(format!("{hdr}{corners}M02*\n").as_bytes()).unwrap(),
+            ),
+            negative,
+        };
+        // Top copper on both sides so the same-board guard has a shared extent.
+        let old = Board {
+            layers: vec![
+                cu(LayerKind::TopCopper, false),
+                cu(LayerKind::InnerCopper(1), true),
+            ],
+        };
+        let new = Board {
+            layers: vec![cu(LayerKind::TopCopper, false)],
+        };
+        let d = compare_detailed(&old, &new).unwrap();
+        let inner = d
+            .layers
+            .iter()
+            .find(|l| l.kind == LayerKind::InnerCopper(1))
+            .unwrap();
+        assert_eq!(inner.status, LayerStatus::RemovedLayer);
+        assert!(!inner.removed.is_empty() && inner.added.is_empty());
+        let row = d
+            .report
+            .layers
+            .iter()
+            .find(|l| l.kind == "inner-copper" && l.inner_index == Some(1))
+            .unwrap();
+        assert!(row.removed_area_mm2 > 0.0 && row.added_area_mm2 == 0.0);
     }
 
     #[test]
