@@ -21,7 +21,7 @@ jobs:
       # SHA-pin third-party actions in real use: actions/checkout@<sha> # v4
       - uses: actions/checkout@v4
       # --- the five lines that add etchy ---
-      - uses: Cimos/etchy@main # pin to a tag/SHA on release
+      - uses: Cimos/etchy@v0.1.0
         with:
           old: fab/rev-a
           new: fab/rev-b

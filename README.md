@@ -46,7 +46,7 @@ add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
 
 ```yaml
-      - uses: Cimos/etchy@main
+      - uses: Cimos/etchy@v0.1.0
         with:
           old: fab/rev-a
           new: fab/rev-b
