@@ -66,17 +66,15 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 
 ## Install
 
-- **Prebuilt binaries** — download the archive for your OS from
-  [Releases](../../releases) (Linux static-musl, macOS x86_64/arm64, Windows) and
-  verify it against `SHA256SUMS`.
+- **From source** — `cargo install --path crates/etchy-cli` (needs a Rust toolchain).
 - **Container** (headless CLI, distroless, ~11 MB) — build it locally:
 
   ```sh
   docker build -t etchy .
   docker run --rm -v "$PWD:/work" etchy --format summary /work/old /work/new
   ```
-
-- **From source** — `cargo install --path crates/etchy-cli` (needs a Rust toolchain).
+- **Prebuilt binaries** — when a release is published, the archives and a
+  `SHA256SUMS` file are on the [Releases](../../releases) page.
 
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
 changed-first layer list, overlay / before / after / split / swipe modes, pan /
@@ -112,10 +110,6 @@ ingestion is an accepted post-1.0 goal ([#122](../../issues/122)); KiCad
 - [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) — architecture + the verified Rust crate stack.
 - [`docs/PRODUCT_DISCOVERY.md`](docs/PRODUCT_DISCOVERY.md) — the requirements interview behind every decision.
 - [`deploy/SETUP.md`](deploy/SETUP.md) — stand up the hosted web demo + feedback widget on a new machine.
-
-> ⚠ **Before making this repo public**, work through [`PRE_PUBLIC.md`](PRE_PUBLIC.md) —
-> notably, demo feedback under `deploy/feedback/` contains tester IP/UA/names that
-> must be scrubbed first.
 
 ## Workspace
 

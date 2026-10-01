@@ -16,7 +16,7 @@ heatmap + JSON magnitudes, on any Gerber/Excellon fab pack.
 **Status (2026-09):** engine/CLI/CI surfaces shipped through M2; PDF engine
 and CLI wiring are merged; the GUI shell redesign is merged; CI on `main` is
 green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` is gated on
-the checklist in `PRE_PUBLIC.md`.
+the go-public checklist.
 
 ## Decisions that constrain the work (from `docs/PRODUCT_DISCOVERY.md`)
 
@@ -55,5 +55,5 @@ the checklist in `PRE_PUBLIC.md`.
 ## Next work
 
 See `docs/ROADMAP.md` "Where we are" and `docs/REQUIREMENTS.md` for statuses.
-Current front: fix native WSLg clicks (#203), then complete `PRE_PUBLIC.md`, cut
+Current front: fix native WSLg clicks (#203), then cut
 public v0.1.0, and publish the container to ghcr.
