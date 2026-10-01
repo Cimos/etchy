@@ -6,8 +6,7 @@ numbered requirements with their source and current status.
 
 - **Companions:** [`PRODUCT_DISCOVERY.md`](PRODUCT_DISCOVERY.md) (why these
   decisions), [`design/GUI_SPEC.md`](design/GUI_SPEC.md) (the full viewer
-  behaviour spec), [`TRUST.md`](TRUST.md) (trust model), [`FEEDBACK_LOG.md`](FEEDBACK_LOG.md)
-  (dated feedback → requirement traceability), [`ROADMAP.md`](ROADMAP.md)
+  behaviour spec), [`TRUST.md`](TRUST.md) (trust model), [`ROADMAP.md`](ROADMAP.md)
   (sequencing), [`DEVELOPER_GUIDE.md`](DEVELOPER_GUIDE.md) (architecture).
 - **Status legend:** ✅ shipped on `main` · 🔶 built, in an open PR · 🔜 accepted,
   not built · 📋 future (post-1.0) · ↔ superseded by a later decision.

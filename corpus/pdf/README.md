@@ -38,7 +38,6 @@ These PDFs are derived from KiCad's bundled demo project. The Debian
 Developers). etchy itself is MIT/Apache-2.0; these two files are **test fixtures
 only** — they are not compiled into or linked with any etchy binary.
 
-**Open licence question (for the owner's review):** whether shipping GPL-2+-derived
-fixture PDFs in an MIT/Apache repo needs a per-file licence note or a
-replacement fixture (e.g. a schematic drawn from scratch). Flagged in the PR
-that added these files.
+**Licence of these two files: GPL-2+.** They keep the GPL-2+ licence of the
+KiCad demo they derive from (copyright KiCad Developers). The rest of the
+repository stays MIT/Apache-2.0.

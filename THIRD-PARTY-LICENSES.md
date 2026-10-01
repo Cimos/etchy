@@ -29,8 +29,7 @@ licenses` to reproduce.
 - **Synthetic corpus** — `corpus/synthetic/`: generated test fixtures, etchy's
   own (see `corpus/tools/`).
 - **Schematic PDF fixtures** — `corpus/pdf/{old,new}.pdf`: see
-  `corpus/pdf/README.md` for provenance and the open licence question tracked
-  in `PRE_PUBLIC.md`.
+  `corpus/pdf/README.md` for provenance and licence (GPL-2+, test fixtures only).
 
 ## Brand
 

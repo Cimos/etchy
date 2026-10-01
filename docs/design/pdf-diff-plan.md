@@ -100,7 +100,7 @@ Two ceilings sit on top of it:
 3. **`run_pdf()` + detection** in `main.rs`: `%PDF`-magic + extension sniff, both-must-be-PDF guard, the `#[cfg]` + not-built error, read files (reuse the `MAX_LAYER_FILE_BYTES` read guard), call `diff_pdfs`, render output, write per-page PNGs, map exit codes.
 4. **`--dpi` + output-dir flag** (Q3) + the "gates not valid for PDF" guard.
 5. **Fixtures + CLI integration test.** Commit a tiny **non-confidential** schematic PDF pair (a KiCad demo schematic exported to PDF, one small edit between them) under `corpus/pdf/`. Integration test: run the CLI on the pair, assert exit 1 + expected page/pixel deltas + PNG written; run identical-vs-identical → exit 0. (Decision Q4 — fixture source.)
-6. **Docs.** Update `REQUIREMENTS.md` CLI-6 → ✅, `ROADMAP.md` M3, `FEEDBACK_LOG.md` if applicable; **fix the stale "pdfium" → "hayro"** in `DEVELOPER_GUIDE.md:31`, `README.md:104`, `CLAUDE.md:42`.
+6. **Docs.** Update `REQUIREMENTS.md` CLI-6 → ✅, `ROADMAP.md` M3; **fix the stale "pdfium" → "hayro"** in `DEVELOPER_GUIDE.md:31`, `README.md:104`, `CLAUDE.md:42`.
 7. **Local-verify** (CI billing-blocked): `cargo test -p etchy-pdf --features pdf`, `cargo test -p etchy-cli --features pdf`, `cargo clippy` (both), `cargo fmt --check`, `cargo deny check licenses` (hayro tree), and confirm the **default** (no-pdf) build + the wasm GUI build are untouched.
 
 ## 5. Release packaging (Decision Q1 — the big one)
