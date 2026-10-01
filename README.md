@@ -73,6 +73,7 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
   docker build -t etchy .
   docker run --rm -v "$PWD:/work" etchy --format summary /work/old /work/new
   ```
+
 - **Prebuilt binaries** — when a release is published, the archives and a
   `SHA256SUMS` file are on the [Releases](../../releases) page.
 

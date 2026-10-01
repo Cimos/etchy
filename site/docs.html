@@ -112,17 +112,17 @@
         <label for="i-ctr">Container</label>
       </div>
       <div class="i-panel p-win"><pre class="code"><span class="c"># PowerShell — unpack the archive, then add the folder to your PATH</span>
-Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.1.0-rc1/etchy-v0.1.0-rc1-windows-x86_64.zip -OutFile etchy.zip
+Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.1.0/etchy-v0.1.0-windows-x86_64.zip -OutFile etchy.zip
 Expand-Archive etchy.zip -DestinationPath .
-.\etchy-v0.1.0-rc1-windows-x86_64\etchy.exe --version</pre></div>
+.\etchy-v0.1.0-windows-x86_64\etchy.exe --version</pre></div>
       <div class="i-panel p-lin"><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
-curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0-rc1/etchy-v0.1.0-rc1-linux-x86_64.tar.gz
-tar xzf etchy-v0.1.0-rc1-linux-x86_64.tar.gz
-sudo mv etchy-v0.1.0-rc1-linux-x86_64/etchy /usr/local/bin/</pre></div>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0/etchy-v0.1.0-linux-x86_64.tar.gz
+tar xzf etchy-v0.1.0-linux-x86_64.tar.gz
+sudo mv etchy-v0.1.0-linux-x86_64/etchy /usr/local/bin/</pre></div>
       <div class="i-panel p-mac"><pre class="code"><span class="c"># Apple Silicon — use …-macos-x86_64.tar.gz on Intel</span>
-curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0-rc1/etchy-v0.1.0-rc1-macos-aarch64.tar.gz
-tar xzf etchy-v0.1.0-rc1-macos-aarch64.tar.gz
-sudo mv etchy-v0.1.0-rc1-macos-aarch64/etchy /usr/local/bin/</pre></div>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0/etchy-v0.1.0-macos-aarch64.tar.gz
+tar xzf etchy-v0.1.0-macos-aarch64.tar.gz
+sudo mv etchy-v0.1.0-macos-aarch64/etchy /usr/local/bin/</pre></div>
       <div class="i-panel p-cargo"><pre class="code"><span class="c"># from a clone — etchy is not on crates.io yet</span>
 git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy
 cargo install --path crates/etchy-cli --features pdf</pre></div>

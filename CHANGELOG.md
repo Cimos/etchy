@@ -9,6 +9,8 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-10-02
+
 ### Added
 - **Schematic-PDF diff, end to end (#63):** `etchy old.pdf new.pdf` runs a
   page-by-page pixel diff in the CLI (summary / JSON / Markdown, `--dpi`,
@@ -283,5 +285,6 @@ production fab packs, with the release pipeline proven across four platforms.
   toolchain; the verified real dependencies (clap, i_overlay, eframe,
   pdfium-render, askama, …) are added per-module starting in Milestone 1.
 
-[Unreleased]: https://github.com/Cimos/etchy/compare/v0.1.0-rc1...HEAD
+[Unreleased]: https://github.com/Cimos/etchy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Cimos/etchy/compare/v0.1.0-rc1...v0.1.0
 [0.1.0-rc1]: https://github.com/Cimos/etchy/releases/tag/v0.1.0-rc1

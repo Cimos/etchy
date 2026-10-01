@@ -15,8 +15,7 @@ heatmap + JSON magnitudes, on any Gerber/Excellon fab pack.
 
 **Status (2026-09):** engine/CLI/CI surfaces shipped through M2; PDF engine
 and CLI wiring are merged; the GUI shell redesign is merged; CI on `main` is
-green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` is gated on
-the go-public checklist.
+green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` is next.
 
 ## Decisions that constrain the work (from `docs/PRODUCT_DISCOVERY.md`)
 
