@@ -127,8 +127,8 @@ sudo mv etchy-v0.1.0-macos-aarch64/etchy /usr/local/bin/</pre></div>
 git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy
 cargo install --path crates/etchy-cli --features pdf</pre></div>
       <div class="i-panel p-ctr"><pre class="code"><span class="c"># distroless, ~11 MB, no shell or libc inside; build it from the repo</span>
-docker build -t etchy .
-docker run --rm -v "$PWD:/work" etchy --format summary -- /work/old /work/new</pre></div>
+docker pull ghcr.io/cimos/etchy:v0.1.0
+docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.0 --format summary -- /work/old /work/new</pre></div>
     </div>
 
     <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS).</p>
