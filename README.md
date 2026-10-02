@@ -67,15 +67,17 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 ## Install
 
 - **From source** — `cargo install --path crates/etchy-cli` (needs a Rust toolchain).
-- **Container** (headless CLI, distroless, ~11 MB) — build it locally:
+- **Container** (headless CLI, distroless, ~11 MB):
 
   ```sh
-  docker build -t etchy .
-  docker run --rm -v "$PWD:/work" etchy --format summary /work/old /work/new
+  docker pull ghcr.io/cimos/etchy:v0.1.0
+  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.0 --format summary /work/old /work/new
   ```
 
-- **Prebuilt binaries** — when a release is published, the archives and a
-  `SHA256SUMS` file are on the [Releases](../../releases) page.
+  Or build it yourself with `docker build -t etchy .`.
+
+- **Prebuilt binaries** — archives for Linux, macOS and Windows, plus a
+  `SHA256SUMS` file, are on the [Releases](../../releases) page.
 
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
 changed-first layer list, overlay / before / after / split / swipe modes, pan /

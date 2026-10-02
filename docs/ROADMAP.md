@@ -57,8 +57,8 @@ eyes-only Focus visibility model (#224), the PDF diff end-to-end (CLI + GUI,
 #63), and the five-line CI Action (CLI-8) are on `main`; release binaries and
 the container now build with the `pdf` feature on. CI on `main` has been green
 since 2026-08-01, and `v0.1.0-rc1` was published as a pre-release on 2026-07-01
-with four archives plus `SHA256SUMS`. **M4 is the only thing left: cut public
-`v0.1.0` and publish the container to ghcr.** The remaining tracked
+with four archives plus `SHA256SUMS`. **M4 is done: `v0.1.0` was released on
+2026-10-02 with the container on ghcr, and the repository is public.** The remaining tracked
 non-blockers are the WSLg native-click defect (#203, a fractional-scale pointer offset — the Windows
 cross-build sidesteps it) and post-1.0 "accepted future" work (more EDA
 filename schemes, KiCad ingestion, the perf design tasks).
@@ -70,7 +70,7 @@ filename schemes, KiCad ingestion, the perf design tasks).
 | M2 — CI surface | ✅ done | Composite GitHub Action, Markdown PR summary, versioned JSON v1, exit codes 0/1/2, input caps, **threshold gates** (`--fail-on-area/-regions`, `--gate-layers`) and **git-refs invocation** (`etchy refA refB [subdir]`) |
 | M3 — PDF + dense-board hardening | ✅ done | rayon per-layer diff, per-layer DoS ceilings, robust region counts, **pure-Rust PDF page-diff engine** (`etchy_core::imagediff` + `etchy-pdf`/hayro), and the `.pdf` **CLI + GUI** paths (#63): `etchy old.pdf new.pdf` behind `--features pdf` (summary/JSON/md, `--dpi`, `--out` overlay PNGs, per-page pixel cap); release binaries + container ship `pdf` on |
 | GUI shell redesign | ✅ done | VS Code-style shell (activity rail, Layers + Export tabs, Measure as a plain tool toggle with no panel, Settings rail panel, hotkey editor, trust chips) and the eyes-only **Focus** visibility model (#224) — merged via #167→#175→#182→#202 plus the follow-up polish (#226/#229/#232/#233) |
-| M4 — 1.0 (distribution / docs) | 🚧 in progress | CI green; release pipeline proven end-to-end with the `v0.1.0-rc1` pre-release (4 archives + `SHA256SUMS`); Dockerfile done; landing/docs site + TRUST.md live. Complete [`PRE_PUBLIC.md`](../PRE_PUBLIC.md), then cut public v0.1.0 + publish the container to ghcr |
+| M4 — 1.0 (distribution / docs) | ✅ done | `v0.1.0` released 2026-10-02 (4 archives + `SHA256SUMS`), container on `ghcr.io/cimos/etchy`, landing/docs site live, repository public |
 
 ### Phase 0 — Foundations & de-risking ✅
 The big-bang rewrite's main risk is time-to-first-value; Phase 0 buys down the

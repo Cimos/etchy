@@ -1,0 +1,48 @@
+name: Container
+
+# Publish the headless CLI image to ghcr.io on a version tag. Plain `docker`
+# commands only, so there is no third-party action to audit or pin.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "bad tag: $TAG"; exit 1; }
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.version=${TAG}" \
+            --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
+            -t "$image:$TAG" .
+          docker push "$image:$TAG"
+          # Pre-release tags (with a '-') never move `latest`.
+          case "$TAG" in
+            *-*) ;;
+            *) docker tag "$image:$TAG" "$image:latest" && docker push "$image:latest" ;;
+          esac
