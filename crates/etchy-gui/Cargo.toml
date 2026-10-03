@@ -64,6 +64,11 @@ rfd = { version = "0.17.2", features = ["file-handle-inner"] }
 # keeps it lean, and the pure-Rust png decoder works on wasm too.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
+# Embeds the app icon into etchy-gui.exe so Windows shows it on the taskbar,
+# Start menu and in Explorer (#390). MIT.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
 [dev-dependencies]
 # Round-trip test for the persisted Settings struct (#52).
 serde_json.workspace = true
