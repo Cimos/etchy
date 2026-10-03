@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{EngineError, Result};
 use crate::geo::{PolygonSet, NM_PER_MM};
 
@@ -15,7 +17,8 @@ use crate::geo::{PolygonSet, NM_PER_MM};
 /// drills). Carrying the plating in [`LayerKind::Drill`] keeps them distinct
 /// identities so pairing can only match like with like (#237) — a PTH file can
 /// never pair against an NPTH file across two revisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DrillKind {
     /// Plated through-holes (PTH).
     Plated,
@@ -26,7 +29,8 @@ pub enum DrillKind {
 }
 
 /// Rename-tolerant layer identity used to pair the two revisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum LayerKind {
     TopCopper,
     BottomCopper,

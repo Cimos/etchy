@@ -2,13 +2,196 @@
 //! derive from, so the three can never disagree. `schema_version` is the
 //! integration contract consumers/CI gate on.
 
-use serde::Serialize;
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 use crate::diff::LayerChange;
 use crate::model::LayerKind;
+use crate::native::{BoardSide, NativeDiagnostic, PointNm, RecordAccounting};
 
 /// Schema version of the machine-readable JSON output — the integration contract.
 pub const SCHEMA_VERSION: u32 = 1;
+pub const NATIVE_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObjectKind {
+    Footprint,
+    Pad,
+    Track,
+    Arc,
+    Via,
+    Zone,
+    Keepout,
+    Text,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObjectChangeStatus {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObjectChangeFlag {
+    Moved,
+    Rotated,
+    Flipped,
+    Modified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectIdentity {
+    pub reference: Option<String>,
+    pub pad_number: Option<String>,
+    pub old_id: Option<String>,
+    pub new_id: Option<String>,
+}
+
+impl ObjectIdentity {
+    fn sort_key(&self) -> (&str, &str, &str, &str) {
+        (
+            self.reference.as_deref().unwrap_or(""),
+            self.pad_number.as_deref().unwrap_or(""),
+            self.old_id.as_deref().unwrap_or(""),
+            self.new_id.as_deref().unwrap_or(""),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectSnapshot {
+    pub position_nm: Option<PointNm>,
+    pub angle_udeg: Option<i32>,
+    pub side: Option<BoardSide>,
+    pub layer_ids: Vec<String>,
+    pub layer_span: Option<[String; 2]>,
+    pub net_label: Option<String>,
+    pub bounds_nm: Option<[i64; 4]>,
+    pub properties: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectChange {
+    pub kind: ObjectKind,
+    pub status: ObjectChangeStatus,
+    pub flags: Vec<ObjectChangeFlag>,
+    pub identity: ObjectIdentity,
+    pub old: Option<ObjectSnapshot>,
+    pub new: Option<ObjectSnapshot>,
+    pub changed_fields: Vec<String>,
+}
+
+impl ObjectChange {
+    fn sort_key(&self) -> (ObjectKind, (&str, &str, &str, &str), &str, i64, i64) {
+        let snapshot = self.old.as_ref().or(self.new.as_ref());
+        let layer = snapshot
+            .and_then(|s| s.layer_ids.first())
+            .map(String::as_str)
+            .unwrap_or("");
+        let position = snapshot.and_then(|s| s.position_nm).unwrap_or(PointNm {
+            x: i64::MIN,
+            y: i64::MIN,
+        });
+        (
+            self.kind,
+            self.identity.sort_key(),
+            layer,
+            position.x,
+            position.y,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeInputReport {
+    pub family: String,
+    pub old_format_version: String,
+    pub new_format_version: String,
+    pub projection_policy: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ObjectSummary {
+    pub added: u64,
+    pub removed: u64,
+    pub modified: u64,
+    pub by_kind: BTreeMap<ObjectKind, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeDiagnosticsReport {
+    pub partial: bool,
+    pub warnings: Vec<NativeDiagnostic>,
+    pub record_accounting: Vec<RecordAccounting>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeDiffReport {
+    pub schema_version: u32,
+    pub input: NativeInputReport,
+    pub object_summary: ObjectSummary,
+    pub object_changes: Vec<ObjectChange>,
+    pub native_diagnostics: NativeDiagnosticsReport,
+}
+
+impl NativeDiffReport {
+    pub fn empty(input: NativeInputReport) -> Self {
+        Self {
+            schema_version: NATIVE_SCHEMA_VERSION,
+            input,
+            object_summary: ObjectSummary::default(),
+            object_changes: Vec::new(),
+            native_diagnostics: NativeDiagnosticsReport {
+                partial: false,
+                warnings: Vec::new(),
+                record_accounting: Vec::new(),
+            },
+        }
+    }
+
+    pub fn with_object_changes(
+        input: NativeInputReport,
+        mut object_changes: Vec<ObjectChange>,
+        native_diagnostics: NativeDiagnosticsReport,
+    ) -> Self {
+        object_changes.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        for change in &mut object_changes {
+            change.flags.sort();
+            change.flags.dedup();
+            change.changed_fields.sort();
+            change.changed_fields.dedup();
+        }
+        let mut object_summary = ObjectSummary::default();
+        for change in &object_changes {
+            match change.status {
+                ObjectChangeStatus::Added => object_summary.added += 1,
+                ObjectChangeStatus::Removed => object_summary.removed += 1,
+                ObjectChangeStatus::Modified => object_summary.modified += 1,
+            }
+            *object_summary.by_kind.entry(change.kind).or_default() += 1;
+        }
+        Self {
+            schema_version: NATIVE_SCHEMA_VERSION,
+            input,
+            object_summary,
+            object_changes,
+            native_diagnostics,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("NativeDiffReport serializes")
+    }
+
+    pub fn to_json_pretty(&self) -> String {
+        serde_json::to_string_pretty(self).expect("NativeDiffReport serializes")
+    }
+}
 
 /// Per-layer pairing status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -195,6 +378,45 @@ fn md_code_span(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn native_input() -> NativeInputReport {
+        NativeInputReport {
+            family: "kicad-pcb".into(),
+            old_format_version: "20240108".into(),
+            new_format_version: "20250101".into(),
+            projection_policy: "kicad-native-v1".into(),
+        }
+    }
+
+    fn snapshot(x: i64, layer: &str) -> ObjectSnapshot {
+        ObjectSnapshot {
+            position_nm: Some(PointNm { x, y: 0 }),
+            angle_udeg: Some(0),
+            side: Some(BoardSide::Front),
+            layer_ids: vec![layer.into()],
+            layer_span: None,
+            net_label: None,
+            bounds_nm: None,
+            properties: BTreeMap::new(),
+        }
+    }
+
+    fn change(kind: ObjectKind, reference: &str, x: i64) -> ObjectChange {
+        ObjectChange {
+            kind,
+            status: ObjectChangeStatus::Modified,
+            flags: vec![ObjectChangeFlag::Modified],
+            identity: ObjectIdentity {
+                reference: Some(reference.into()),
+                pad_number: None,
+                old_id: Some(format!("old-{reference}")),
+                new_id: Some(format!("new-{reference}")),
+            },
+            old: Some(snapshot(0, "F.Cu")),
+            new: Some(snapshot(x, "F.Cu")),
+            changed_fields: vec!["position".into()],
+        }
+    }
+
     #[test]
     fn empty_report_has_no_changes() {
         let r = DiffReport::new(vec![], vec![]);
@@ -286,5 +508,77 @@ mod tests {
         assert_eq!(r.totals.layers_changed, 1);
         assert_eq!(r.layers[0].status, LayerStatus::Changed); // changed-first
         assert!(r.to_json().contains("\"schema_version\":1"));
+    }
+
+    #[test]
+    fn v1_json_snapshot_is_byte_for_byte_stable() {
+        let actual = DiffReport::new(vec![], vec![]).to_json();
+        assert_eq!(
+            actual,
+            include_str!("../tests/expected/report-v1.json").trim_end_matches('\n')
+        );
+    }
+
+    #[test]
+    fn object_change_report_round_trips() {
+        let report = NativeDiffReport::with_object_changes(
+            native_input(),
+            vec![change(ObjectKind::Footprint, "U1", 1_000_000)],
+            NativeDiagnosticsReport {
+                partial: false,
+                warnings: vec![],
+                record_accounting: vec![],
+            },
+        );
+        let json = report.to_json();
+        let decoded: NativeDiffReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn object_changes_have_stable_order() {
+        let report = NativeDiffReport::with_object_changes(
+            native_input(),
+            vec![
+                change(ObjectKind::Via, "", 10),
+                change(ObjectKind::Footprint, "U2", 0),
+                change(ObjectKind::Footprint, "U1", 20),
+            ],
+            NativeDiagnosticsReport {
+                partial: false,
+                warnings: vec![],
+                record_accounting: vec![],
+            },
+        );
+        let keys: Vec<_> = report
+            .object_changes
+            .iter()
+            .map(|c| (c.kind, c.identity.reference.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                (ObjectKind::Footprint, "U1"),
+                (ObjectKind::Footprint, "U2"),
+                (ObjectKind::Via, ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_v2_json_matches_example() {
+        let report = NativeDiffReport::with_object_changes(
+            native_input(),
+            vec![change(ObjectKind::Footprint, "U1", 1_000_000)],
+            NativeDiagnosticsReport {
+                partial: false,
+                warnings: vec![],
+                record_accounting: vec![],
+            },
+        );
+        assert_eq!(
+            report.to_json_pretty(),
+            include_str!("../tests/expected/native-report-v2.json").trim_end_matches('\n')
+        );
     }
 }

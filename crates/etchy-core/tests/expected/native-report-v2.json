@@ -1,0 +1,70 @@
+{
+  "schema_version": 2,
+  "input": {
+    "family": "kicad-pcb",
+    "old_format_version": "20240108",
+    "new_format_version": "20250101",
+    "projection_policy": "kicad-native-v1"
+  },
+  "object_summary": {
+    "added": 0,
+    "removed": 0,
+    "modified": 1,
+    "by_kind": {
+      "footprint": 1
+    }
+  },
+  "object_changes": [
+    {
+      "kind": "footprint",
+      "status": "modified",
+      "flags": [
+        "modified"
+      ],
+      "identity": {
+        "reference": "U1",
+        "pad_number": null,
+        "old_id": "old-U1",
+        "new_id": "new-U1"
+      },
+      "old": {
+        "position_nm": [
+          0,
+          0
+        ],
+        "angle_udeg": 0,
+        "side": "front",
+        "layer_ids": [
+          "F.Cu"
+        ],
+        "layer_span": null,
+        "net_label": null,
+        "bounds_nm": null,
+        "properties": {}
+      },
+      "new": {
+        "position_nm": [
+          1000000,
+          0
+        ],
+        "angle_udeg": 0,
+        "side": "front",
+        "layer_ids": [
+          "F.Cu"
+        ],
+        "layer_span": null,
+        "net_label": null,
+        "bounds_nm": null,
+        "properties": {}
+      },
+      "changed_fields": [
+        "position"
+      ]
+    }
+  ],
+  "native_diagnostics": {
+    "partial": false,
+    "warnings": [],
+    "record_accounting": []
+  }
+}
