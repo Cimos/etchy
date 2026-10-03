@@ -265,25 +265,18 @@ represents a warning only as free text.
 9. IPC-2581 or ODB++ input.
 10. Auto-registration or comparing different boards.
 
-## 15. Open questions for the owner
+## 15. Owner decisions (2026-10-03)
 
-1. Ship object changes with KiCad geometry in 0.2.0, or stage the UI/report list
-   in 0.2.1 while keeping the shared model and JSON fields in 0.2.0? The plan
-   recommends one 0.2.0 release so exit status and report schema do not change
-   immediately after launch.
-2. Should `--allow-unfilled-zones` exist at all in stable builds, or should a
-   missing saved fill always be an error? This spec recommends the explicit
-   partial mode for interactive diagnosis and `--native-warnings error` for CI.
-3. Should object-only TrueType/project-variable text make exit 1 when unchanged
-   between revisions? This spec says no: it warns, and exit status follows actual
-   old/new changes. CI can upgrade the warning to exit 2.
-4. Is fabrication-layer geometry (`F.Fab`/`B.Fab`) enabled by default in reports,
-   or present but hidden by default like other documentation layers?
-5. For blind/buried/microvia holes, add new `LayerKind` variants in JSON/UI or
-   keep one drill group with explicit span metadata? The plan recommends explicit
-   native drill variants to prevent through-drill pairing mistakes.
-6. Approve JSON schema v2 for native runs while retaining v1 for existing input,
-   or require every run to move to v2 in 0.2.0?
-7. What maximum browser input and projected-point budgets are acceptable for the
-   public demo host? Measure first, then lock numbers before release.
-
+1. Object changes ship with KiCad geometry in one 0.2.0 release.
+2. A zone with no saved fill is an error by default; `--allow-unfilled-zones`
+   continues with a high-severity warning and lists the zone as unprojected.
+3. Undrawn TrueType or project-variable text warns only and does not change
+   the exit code; CI can promote warnings to exit 2.
+4. `F.Fab`/`B.Fab` geometry is present but hidden by default, like other
+   documentation layers.
+5. Blind, buried and micro via holes get separate native drill layers carrying
+   their span.
+6. Native runs use JSON schema v2; Gerber and PDF runs keep v1 unchanged.
+7. Altium: spike on `altium-format` 0.1.x now, pinned to an exact version.
+8. Still open: browser input and projected-point budgets for the public demo
+   host. Measure first, then lock the numbers before release.
