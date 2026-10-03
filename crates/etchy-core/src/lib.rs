@@ -23,6 +23,7 @@ pub mod gerber;
 pub mod imagediff;
 pub mod model;
 pub mod naming;
+pub mod native;
 pub mod pagealign;
 pub mod placement;
 pub mod report;
@@ -48,12 +49,17 @@ pub use model::{
 pub use naming::{
     classify, drill_kind, file_function, file_polarity, looks_like_gerber, reconcile_kind,
 };
+pub use native::*;
 pub use pagealign::{
     align_pages, dissimilarity, fingerprint, PageAlignment, PageFingerprint, PageMatch, Pairing,
     MAX_ALIGN_PAGES,
 };
 pub use placement::{looks_like_placement, resolve_placement};
-pub use report::{DiffReport, LayerReport, LayerStatus, Totals, SCHEMA_VERSION};
+pub use report::{
+    DiffReport, LayerReport, LayerStatus, NativeDiagnosticsReport, NativeDiffReport,
+    NativeInputReport, ObjectChange, ObjectChangeFlag, ObjectChangeStatus, ObjectIdentity,
+    ObjectKind, ObjectSnapshot, ObjectSummary, Totals, NATIVE_SCHEMA_VERSION, SCHEMA_VERSION,
+};
 pub use view::{BoardDiff, LayerView};
 
 use std::sync::Arc;
