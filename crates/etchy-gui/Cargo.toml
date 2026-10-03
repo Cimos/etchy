@@ -106,11 +106,26 @@ category = "DeveloperTool"
 license-file = "../../LICENSE-MIT"
 icons = ["../../assets/brand/png/etchy-app-icon-512.png"]
 out-dir = "../../target/packager"
-before-packaging-command = "cargo build --release -p etchy-gui"
-binaries = [{ path = "etchy-gui", main = true }]
+# The installers carry the `etchy` command-line tool too, on PATH: /usr/bin in
+# the .deb, the install folder in the .msi, and a brew `binary` link on macOS.
+before-packaging-command = "cargo build --release -p etchy-gui -p etchy-cli --features etchy-cli/pdf"
+binaries = [{ path = "etchy-gui", main = true }, { path = "etchy" }]
 
 [package.metadata.packager.deb]
 depends = ["libxkbcommon0", "libgl1", "libegl1"]
+
+[package.metadata.packager.wix]
+component-refs = ["EtchyPath"]
+fragments = ["""<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="EtchyPath" Guid="5d0b1a52-8a4e-5f43-9a43-2c1f0f6e7c11" KeyPath="yes">
+        <Environment Id="EtchyPathEnv" Name="PATH" Value="[INSTALLDIR]" Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>"""]
 
 [package.metadata.packager.macos]
 minimum-system-version = "11.0"

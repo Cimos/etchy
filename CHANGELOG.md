@@ -15,7 +15,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - **Desktop viewer installers:** each release now ships `etchy-viewer-…` as a
   Windows `.msi`, a macOS `.dmg` (Apple Silicon) and a Linux `.AppImage` and
   `.deb`, built by cargo-packager in the release workflow. A Homebrew cask is
-  available from the `cimos/etchy` tap.
+  available from the `cimos/etchy` tap. The `.msi`, `.deb` and Homebrew
+  installs also put the `etchy` command-line tool on PATH.
+- The Windows viewer carries the etchy app icon (#390).
 - `README-CLI.txt` in every command-line archive, explaining that it is a
   terminal tool and how to run it.
 

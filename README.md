@@ -86,7 +86,8 @@ drag-and-drop), and a Help menu. A **web viewer** build also exists (see `deploy
 
 **Install the viewer** from the [Releases](../../releases) page: `etchy-viewer-…`
 as a Windows `.msi`, a macOS `.dmg` (Apple Silicon), or a Linux `.AppImage` /
-`.deb`. On macOS, `brew install --cask cimos/etchy/etchy` also works. The
+`.deb`. The installers also put the `etchy` command-line tool on your PATH
+(not the AppImage). On macOS, `brew install --cask cimos/etchy/etchy` also works. The
 installers are not code-signed yet, so Windows SmartScreen and macOS Gatekeeper
 ask once before the first run.
 
