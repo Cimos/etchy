@@ -34,12 +34,13 @@ and machine-readable magnitudes — on any Gerber/Excellon fab pack.
 
 **In:** Gerber RS-274X/X2, Excellon drill, schematic-PDF (pixel page-diff, kept).
 **Out (explicit non-goals):** net/connectivity diff, BOM/component diff,
-DRC/rule-checking, Altium / IPC-2581 / ODB++ ingestion. Anything here is "Beyond
-1.0", not forgotten — see the bottom.
-**Accepted future goal (post-1.0, not yet scheduled):** native KiCad
-`.kicad_pcb` ingestion, so KiCad users can skip the gerber-export step. Tracked
-in #122. KiCad *schematic* (`.kicad_sch`) diff stays out — that's connectivity,
-a different tool.
+DRC/rule-checking, IPC-2581 / ODB++ ingestion, native schematic files
+(`.kicad_sch` / `.SchDoc`). Anything here is "Beyond 1.0", not forgotten — see
+the bottom.
+**Next (0.2.0):** native KiCad `.kicad_pcb` boards, parsed directly, with a
+per-layer diff plus a list of changed objects. Altium `.PcbDoc` follows as an
+experimental feature. Tracked in #122; spec and phased plan in
+[`design/native-cad-ingestion/`](design/native-cad-ingestion/plan.md).
 
 ---
 
@@ -150,12 +151,8 @@ and trust the result.
 
 ## Beyond 1.0 (parked, not forgotten)
 Revisit only if demand appears; each was explicitly deferred in discovery:
-- **Native KiCad `.kicad_pcb` ingestion (#122) — accepted future goal.** Via a
-  parser or a `kicad-cli` plot bridge → lets KiCad users skip the gerber export,
-  and unlocks object identity + git-native rev-to-rev. Post-1.0, not scheduled.
-- Native Altium ingestion (harder — less-open format).
-- Structured change-lists & per-object deltas ("via moved 0.3 mm") — needs object
-  identity from native CAD.
+- Native KiCad, the object change list and Altium have moved out of this list:
+  they are the 0.2.0 / 0.3.0 plan above.
 - IPC-2581 / ODB++ ingestion (carry net + component data).
 - Net/connectivity diff, BOM/component diff. (DRC remains out — different tool.)
 

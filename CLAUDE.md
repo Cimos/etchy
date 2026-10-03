@@ -27,9 +27,12 @@ green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 
   loud on mismatch.
 - **Trust bar is top-tier: no silent misses.** Golden corpus + property + fuzz
   tests; fail-loud over wrong-but-quiet.
-- **Inputs:** Gerber RS-274X/X2, Excellon, schematic PDF (pixel). **Non-goals:**
-  native CAD ingestion (KiCad/Altium/IPC-2581/ODB++), net/connectivity diff,
-  BOM/component diff, DRC. Hold this line — don't drift into an ECAD-review tool.
+- **Inputs:** Gerber RS-274X/X2, Excellon, schematic PDF (pixel); native KiCad
+  `.kicad_pcb` (then Altium `.PcbDoc`) parsed directly is the 0.2.0 work — see
+  `docs/design/native-cad-ingestion/`. **Non-goals:** IPC-2581/ODB++, native
+  schematics, net/connectivity diff, BOM/component diff, DRC. The native object
+  change list shows net names as labels only. Hold this line — don't drift into
+  an ECAD-review tool.
 - **Distribution:** static CLI binaries + distroless container; desktop viewer as
   .msi / .dmg / .AppImage / .deb, plus a Homebrew tap and winget. Not pip.
 
@@ -55,5 +58,5 @@ green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 
 ## Next work
 
 See `docs/ROADMAP.md` "Where we are" and `docs/REQUIREMENTS.md` for statuses.
-Current front: fix native WSLg clicks (#203), then 0.1.x follow-ups.
+Current front: native KiCad parsing (0.2.0 plan in `docs/design/native-cad-ingestion/plan.md`); WSLg clicks (#203).
 v0.1.0 is released, the container is on ghcr, and the repo is public.

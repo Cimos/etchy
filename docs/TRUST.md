@@ -79,11 +79,13 @@ etchy deliberately does **not** do.
   land on one `placement` layer (top/bottom sides aren't split yet).
 - **Region counts use a small noise floor** so sub-nanometre tessellation slivers
   aren't counted as changes; the changed *area* is always exact.
-- **Schematic-PDF diff is not implemented yet** (the `etchy-pdf` crate is a
-  feature-gated stub; see the roadmap).
-- **Explicit non-goals:** net/connectivity diff, BOM/component diff, DRC, and
-  native Altium / IPC-2581 / ODB++ ingestion. Native KiCad `.kicad_pcb` ingestion
-  is an accepted *post-1.0* goal.
+- **Explicit non-goals:** net/connectivity diff, BOM/component diff, DRC,
+  IPC-2581 / ODB++ ingestion, and native schematic files.
+- **Native board input (planned):** KiCad `.kicad_pcb`, then Altium `.PcbDoc`,
+  parsed directly. The result describes the board file under etchy's published
+  rules, not a fab pack: plot and export settings are not applied. Every record
+  is drawn, deliberately skipped and counted, or an error; see
+  [`design/native-cad-ingestion/spec.md`](design/native-cad-ingestion/spec.md).
 
 ## Found a silent miss?
 

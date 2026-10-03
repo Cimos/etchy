@@ -22,9 +22,9 @@ numbered requirements with their source and current status.
 | SCOPE-1 | etchy compares two revisions of the **same board's** fab output and shows + measures exactly what changed. | discovery | ✅ |
 | SCOPE-2 | Inputs are **Gerber RS-274X/X2**, **Excellon** drill, **pick-and-place** centroid files, and **schematic PDF** (pixel page-diff, CLI + GUI on both platforms). | discovery, #115, #63 | ✅ |
 | SCOPE-3 | Surfaces are **CLI/CI first**, native **egui** GUI second; both ship. The GUI also builds to wasm for the web demo. | discovery | ✅ |
-| SCOPE-4 | **Non-goals** (hold the line): native CAD ingestion (Altium/IPC-2581/ODB++), net/connectivity diff, BOM/component diff, DRC. | discovery | standing |
-| SCOPE-5 | Native KiCad `.kicad_pcb` ingestion is an **accepted future goal**, post-1.0. | #122 | 📋 |
-| SCOPE-6 | Distribution is per-OS **static binaries** + a **distroless container** — never pip/OS package managers. | discovery, #135 | ✅ (container publish to ghcr 🔜) |
+| SCOPE-4 | **Non-goals** (hold the line): IPC-2581/ODB++ ingestion, native schematic files (`.kicad_sch`/`.SchDoc`), net/connectivity diff, BOM/component diff, DRC. Native board input may list changed objects: It reports changes to stored PCB objects and shows their stored net names as labels; it does not infer electrical connectivity, compare net topology, validate routing, or compare a bill of materials, values, variants or fitted parts. | discovery; owner 2026-10-03 | standing |
+| SCOPE-5 | Native board files are **parsed directly**, not exported to Gerbers: KiCad `.kicad_pcb` first (planned 0.2.0), Altium `.PcbDoc` later behind an experimental flag. Output is the per-layer geometry diff plus an object change list, and describes the board file, not a fab pack. Spec: [`design/native-cad-ingestion/spec.md`](design/native-cad-ingestion/spec.md). | #122; owner 2026-10-03 | 🔜 |
+| SCOPE-6 | Distribution is per-OS **static CLI binaries**, a **distroless container** (ghcr), and **desktop viewer installers** (.msi, .dmg, .AppImage, .deb) with a Homebrew tap and a winget listing. Never pip. | discovery, #135; owner 2026-10-03 | ✅ |
 | SCOPE-7 | Licensing stays permissive (`MIT OR Apache-2.0`); `cargo deny` blocks copyleft deps. | discovery | ✅ |
 
 ## 2. Diff engine (etchy-core)
