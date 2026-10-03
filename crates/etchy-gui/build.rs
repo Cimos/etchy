@@ -42,4 +42,19 @@ fn main() {
     }
     let sha = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
     println!("cargo:rustc-env=ETCHY_BUILD_SHA={sha}");
+    windows_icon();
 }
+
+#[cfg(windows)]
+fn windows_icon() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=../../assets/brand/etchy-app-icon.ico");
+        winresource::WindowsResource::new()
+            .set_icon("../../assets/brand/etchy-app-icon.ico")
+            .compile()
+            .expect("embed the Windows app icon");
+    }
+}
+
+#[cfg(not(windows))]
+fn windows_icon() {}

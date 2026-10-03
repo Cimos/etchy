@@ -64,6 +64,11 @@ rfd = { version = "0.17.2", features = ["file-handle-inner"] }
 # keeps it lean, and the pure-Rust png decoder works on wasm too.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
+# Embeds the app icon into etchy-gui.exe so Windows shows it on the taskbar,
+# Start menu and in Explorer (#390). MIT.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
 [dev-dependencies]
 # Round-trip test for the persisted Settings struct (#52).
 serde_json.workspace = true
@@ -88,3 +93,39 @@ web-sys = { version = "0.3", features = [
 ] }
 js-sys = "0.3"
 include_dir = "0.7"
+
+# Desktop installers (.msi, .dmg, .deb, .AppImage), built by cargo-packager in
+# release.yml. Run from this crate directory: `cargo packager --release -f deb`.
+[package.metadata.packager]
+product-name = "etchy"
+identifier = "io.github.cimos.etchy"
+publisher = "Cimos"
+homepage = "https://cimos.github.io/etchy/"
+description = "Visual and geometric diff viewer for PCB Gerber, drill and PDF revisions"
+category = "DeveloperTool"
+license-file = "../../LICENSE-MIT"
+icons = ["../../assets/brand/etchy-app-icon.ico", "../../assets/brand/png/etchy-app-icon-512.png"]
+out-dir = "../../target/packager"
+# The installers carry the `etchy` command-line tool too, on PATH: /usr/bin in
+# the .deb, the install folder in the .msi, and a brew `binary` link on macOS.
+before-packaging-command = "cargo build --release -p etchy-gui -p etchy-cli --features etchy-cli/pdf"
+binaries = [{ path = "etchy-gui", main = true }, { path = "etchy" }]
+
+[package.metadata.packager.deb]
+depends = ["libxkbcommon0", "libgl1", "libegl1"]
+
+[package.metadata.packager.wix]
+component-refs = ["EtchyPath"]
+fragments = ["""<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="EtchyPath" Guid="5d0b1a52-8a4e-5f43-9a43-2c1f0f6e7c11" KeyPath="yes">
+        <Environment Id="EtchyPathEnv" Name="PATH" Value="[INSTALLDIR]" Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>"""]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"

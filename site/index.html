@@ -281,7 +281,7 @@ etchy old/ new/ --html diff.html   <span class="out"># one self-contained report
 - name: PCB diff
   run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
         <p style="color:var(--muted);font-size:13px;margin:12px 0 10px">Or add the Action — five lines, and every pull request that touches Gerbers gets a sticky layer-by-layer diff comment:</p>
-        <pre class="code">- uses: Cimos/etchy@v0.1.0
+        <pre class="code">- uses: Cimos/etchy@v0.1.1
   with:
     old: fab/rev-a
     new: fab/rev-b

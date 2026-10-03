@@ -96,7 +96,7 @@
   <section id="install">
     <span class="eyebrow">Install</span>
     <h2>Install</h2>
-    <p>The <code class="inline">etchy</code> CLI ships as a single self-contained binary per OS, plus a distroless container. Grab the archive for your platform from <a href="https://github.com/Cimos/etchy/releases">Releases</a> — the commands below name the current release, so swap the version if you take a later one.</p>
+    <p>The <code class="inline">etchy</code> command-line tool ships as a single self-contained binary per OS (the <code class="inline">etchy-cli-…</code> archives), plus a distroless container. Grab the archive for your platform from <a href="https://github.com/Cimos/etchy/releases">Releases</a> — the commands below name the current release, so swap the version if you take a later one.</p>
 
     <div class="insttabs">
       <input type="radio" name="inst" id="i-win" class="i-radio" checked>
@@ -112,27 +112,27 @@
         <label for="i-ctr">Container</label>
       </div>
       <div class="i-panel p-win"><pre class="code"><span class="c"># PowerShell — unpack the archive, then add the folder to your PATH</span>
-Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.1.0/etchy-v0.1.0-windows-x86_64.zip -OutFile etchy.zip
+Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.1.1/etchy-cli-v0.1.1-windows-x86_64.zip -OutFile etchy.zip
 Expand-Archive etchy.zip -DestinationPath .
-.\etchy-v0.1.0-windows-x86_64\etchy.exe --version</pre></div>
+.\etchy-cli-v0.1.1-windows-x86_64\etchy.exe --version</pre></div>
       <div class="i-panel p-lin"><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
-curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0/etchy-v0.1.0-linux-x86_64.tar.gz
-tar xzf etchy-v0.1.0-linux-x86_64.tar.gz
-sudo mv etchy-v0.1.0-linux-x86_64/etchy /usr/local/bin/</pre></div>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.1/etchy-cli-v0.1.1-linux-x86_64.tar.gz
+tar xzf etchy-cli-v0.1.1-linux-x86_64.tar.gz
+sudo mv etchy-cli-v0.1.1-linux-x86_64/etchy /usr/local/bin/</pre></div>
       <div class="i-panel p-mac"><pre class="code"><span class="c"># Apple Silicon — use …-macos-x86_64.tar.gz on Intel</span>
-curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.0/etchy-v0.1.0-macos-aarch64.tar.gz
-tar xzf etchy-v0.1.0-macos-aarch64.tar.gz
-sudo mv etchy-v0.1.0-macos-aarch64/etchy /usr/local/bin/</pre></div>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.1/etchy-cli-v0.1.1-macos-aarch64.tar.gz
+tar xzf etchy-cli-v0.1.1-macos-aarch64.tar.gz
+sudo mv etchy-cli-v0.1.1-macos-aarch64/etchy /usr/local/bin/</pre></div>
       <div class="i-panel p-cargo"><pre class="code"><span class="c"># from a clone — etchy is not on crates.io yet</span>
 git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy
 cargo install --path crates/etchy-cli --features pdf</pre></div>
-      <div class="i-panel p-ctr"><pre class="code"><span class="c"># distroless, ~11 MB, no shell or libc inside; build it from the repo</span>
-docker pull ghcr.io/cimos/etchy:v0.1.0
-docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.0 --format summary -- /work/old /work/new</pre></div>
+      <div class="i-panel p-ctr"><pre class="code"><span class="c"># distroless, ~11 MB, no shell or libc inside</span>
+docker pull ghcr.io/cimos/etchy:v0.1.1
+docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.1 --format summary -- /work/old /work/new</pre></div>
     </div>
 
     <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS).</p>
-    <p>The <strong>desktop viewer is a second binary</strong> and is not in the release archives — build it from a clone with <code class="inline">cargo build --release -p etchy-gui</code>, then run <code class="inline">etchy-gui &lt;old&gt; &lt;new&gt;</code>. The same viewer also builds to WebAssembly and runs in a browser; see <code class="inline">deploy/</code> in the repo.</p>
+    <p>The <strong>desktop viewer</strong> has its own installers on the <a href="https://github.com/Cimos/etchy/releases">Releases</a> page: <code class="inline">etchy-viewer-…-windows-x86_64.msi</code>, <code class="inline">…-macos-aarch64.dmg</code> (Apple Silicon), and <code class="inline">…-linux-x86_64.AppImage</code> or <code class="inline">.deb</code>. The <code class="inline">.msi</code>, <code class="inline">.dmg</code> (via Homebrew) and <code class="inline">.deb</code> also put the <code class="inline">etchy</code> command-line tool on your PATH. On macOS, <code class="inline">brew install --cask cimos/etchy/etchy</code> does the same. The installers are not code-signed yet: Windows shows a SmartScreen prompt (More info, then Run anyway) and macOS asks you to allow the app once in System Settings, Privacy &amp; Security. The same viewer also builds to WebAssembly and runs in a browser; see <code class="inline">deploy/</code> in the repo.</p>
   </section>
 
   <section id="cli">
@@ -257,7 +257,7 @@ result: differences found</pre>
   run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
     <p>The gate names its verdict on stderr — <code class="inline">etchy: gate FAIL — copper: changed 552.6209 mm², 1661 regions</code> — and repeats it in the JSON, so why a build passed or failed is on the record. When a gate is configured and the change comes in under it, etchy exits 0 even though it found differences. That is the point of the gate.</p>
     <p><strong>Or add the Action.</strong> Five lines, and every pull request that touches Gerbers gets a layer-by-layer table posted as a sticky comment for that input pair (edited in place on each push, not re-posted):</p>
-    <pre class="code">- uses: Cimos/etchy@v0.1.0
+    <pre class="code">- uses: Cimos/etchy@v0.1.1
   with:
     old: fab/rev-a
     new: fab/rev-b

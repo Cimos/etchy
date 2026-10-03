@@ -30,7 +30,8 @@ green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 
 - **Inputs:** Gerber RS-274X/X2, Excellon, schematic PDF (pixel). **Non-goals:**
   native CAD ingestion (KiCad/Altium/IPC-2581/ODB++), net/connectivity diff,
   BOM/component diff, DRC. Hold this line — don't drift into an ECAD-review tool.
-- **Distribution:** static binaries + distroless container. Not pip, not OS pkg mgrs.
+- **Distribution:** static CLI binaries + distroless container; desktop viewer as
+  .msi / .dmg / .AppImage / .deb, plus a Homebrew tap and winget. Not pip.
 
 ## Layout
 
