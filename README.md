@@ -106,11 +106,13 @@ ask once before the first run.
   silent misses — see [`docs/TRUST.md`](docs/TRUST.md).
 - Ships as small **static binaries** and a **distroless container**.
 
-**Non-goals:** net/connectivity diff, BOM/component diff, DRC, and Altium /
-IPC-2581 / ODB++ ingestion. (Pick-and-place is diffed as *placement geometry* —
-where parts sit — not a BOM/component list.) Native **KiCad `.kicad_pcb`**
-ingestion is an accepted post-1.0 goal ([#122](../../issues/122)); KiCad
-*schematic* diff stays out.
+**Non-goals:** net/connectivity diff, BOM/component diff, DRC, IPC-2581 /
+ODB++ ingestion, and native schematic files. (Pick-and-place is diffed as
+*placement geometry* — where parts sit — not a BOM/component list.)
+
+**Planned:** reading **KiCad `.kicad_pcb`** boards directly (0.2.0), then Altium
+`.PcbDoc`, with a list of changed objects alongside the layer diff
+([#122](../../issues/122), [spec](docs/design/native-cad-ingestion/spec.md)).
 
 ## Documentation
 
