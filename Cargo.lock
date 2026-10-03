@@ -934,6 +934,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "etchy-kicad"
+version = "0.1.1"
+
+[[package]]
 name = "etchy-pdf"
 version = "0.1.1"
 dependencies = [

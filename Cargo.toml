@@ -5,6 +5,7 @@ members = [
     "crates/etchy-cli",
     "crates/etchy-gui",
     "crates/etchy-pdf",
+    "crates/etchy-kicad",
 ]
 # The cargo-fuzz harness (#85) is its own workspace (nightly + sanitizer only).
 exclude = ["fuzz"]
