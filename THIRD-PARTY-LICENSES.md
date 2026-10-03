@@ -30,6 +30,15 @@ licenses` to reproduce.
   own (see `corpus/tools/`).
 - **Schematic PDF fixtures** — `corpus/pdf/{old,new}.pdf`: see
   `corpus/pdf/README.md` for provenance and licence (GPL-2+, test fixtures only).
+- **Native KiCad 7 fixtures and oracle exports** —
+  `corpus/native/kicad/{fixtures,oracles}/`: reduced from the
+  `test_pads_inside_pads` board in Ubuntu's `kicad-demos
+  7.0.11+dfsg-1build4`, then loaded and exported by KiCad 7.0.11. Ubuntu's
+  package copyright assigns `demos/*` GPL-2+. These are test fixtures only; see
+  `corpus/native/kicad/README.md` and `manifest.toml` for hashes and provenance.
+- **Native KiCad board files** — `corpus/native/kicad/mad_rp2040/{old,new}/`:
+  the author's own Mad_RP2040 board at tags v0.0.0 and v0.0.1, MIT licensed
+  (<https://github.com/Cimos/Mad_RP2040>); the sources of the demo packs above.
 
 ## Brand
 

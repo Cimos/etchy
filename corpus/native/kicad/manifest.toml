@@ -1,0 +1,188 @@
+schema_version = 1
+
+[schema]
+note = "fixtures are present files; slots are explicit gaps. sha256 covers the fixture bytes. expected_inventory counts native board records, not exported Gerber commands."
+allowed_licenses = ["GPL-2+", "MIT"]
+
+[source_base]
+path = "/usr/share/kicad/demos/test_pads_inside_pads/test_pads_inside_pads.kicad_pcb"
+sha256 = "92ee3bb1660f7f877119850b749e00f11999faae401e2bbcddfdce1aede0694d"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: distributed as Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+
+[[fixtures]]
+id = "kicad7-track-arc"
+status = "present"
+path = "fixtures/kicad7/track_arc.kicad_pcb"
+sha256 = "0220cddfd9999e1e77ec7ba9c2a60b9e3427dd7a1566a29275f63898a8e05f1a"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "One straight copper track and one copper arc."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/track_arc.kicad_pcb oracles/track_arc"]
+expected_inventory = { segments = 1, arcs = 1, footprints = 0, pads = 0, vias = 0, zones = 0, texts = 0 }
+differences = []
+
+[[fixtures]]
+id = "kicad7-pad-shapes"
+status = "present"
+path = "fixtures/kicad7/pad_shapes.kicad_pcb"
+sha256 = "b523ebf4ba48fdca3bd83b9baf7152a7b2d6aebef3d907175d6da42ab5bf196c"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "Circle, oval, rectangle, rounded-rectangle and trapezoid SMD pads."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/pad_shapes.kicad_pcb oracles/pad_shapes"]
+expected_inventory = { segments = 0, arcs = 0, footprints = 1, pads = 5, vias = 0, zones = 0, texts = 0 }
+differences = []
+
+[[fixtures]]
+id = "kicad7-via-spans"
+status = "present"
+path = "fixtures/kicad7/via_spans.kicad_pcb"
+sha256 = "0969c6a547a75b1c977dd0b6c9fe7209a343fdedb46ccfd055c308bec0c5feca"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "Through, front-to-In1 blind and In1-to-In2 buried via spans."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/via_spans.kicad_pcb oracles/via_spans"]
+expected_inventory = { segments = 0, arcs = 0, footprints = 0, pads = 0, vias = 3, zones = 0, texts = 0 }
+differences = []
+
+[[fixtures]]
+id = "kicad7-filled-zone"
+status = "present"
+path = "fixtures/kicad7/filled_zone.kicad_pcb"
+sha256 = "8f0bcad35cc41e18fa759df1adcc40a330c563573c3cac59004fe2fdc570b089"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "A zone with one saved filled polygon."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/filled_zone.kicad_pcb oracles/filled_zone"]
+expected_inventory = { segments = 0, arcs = 0, footprints = 0, pads = 0, vias = 0, zones = 1, saved_filled_polygons = 1, texts = 0 }
+differences = []
+
+[[fixtures]]
+id = "kicad7-unfilled-zone"
+status = "present"
+path = "fixtures/kicad7/unfilled_zone.kicad_pcb"
+sha256 = "47f9ddef04e52e15f98536e804b7cb7226775d266f4ad9a48673c649ae545b16"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "A zone outline with no saved filled polygon."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/unfilled_zone.kicad_pcb oracles/unfilled_zone"]
+expected_inventory = { segments = 0, arcs = 0, footprints = 0, pads = 0, vias = 0, zones = 1, saved_filled_polygons = 0, texts = 0 }
+differences = []
+
+[[fixtures]]
+id = "kicad7-stroke-text"
+status = "present"
+path = "fixtures/kicad7/stroke_text.kicad_pcb"
+sha256 = "2dd25730b28a19611d239ac7d091fc904899c77bcfb7a44a1365f1c093514579"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "Rotated built-in stroke text on front silkscreen."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/stroke_text.kicad_pcb oracles/stroke_text"]
+expected_inventory = { segments = 0, arcs = 0, footprints = 0, pads = 0, vias = 0, zones = 0, texts = 1 }
+differences = []
+
+[[fixtures]]
+id = "kicad7-renamed-layer"
+status = "present"
+path = "fixtures/kicad7/renamed_layer.kicad_pcb"
+sha256 = "c2455e597f1d4da55ff83d3b0f4194e80a703b810036d5ca98b5236761de2c89"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "Custom display names on front copper, bottom copper and board outline."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/renamed_layer.kicad_pcb oracles/renamed_layer"]
+expected_inventory = { segments = 0, arcs = 0, footprints = 0, pads = 0, vias = 0, zones = 0, texts = 0, graphic_rectangles = 1 }
+differences = []
+
+[[fixtures]]
+id = "kicad7-bottom-footprint"
+status = "present"
+path = "fixtures/kicad7/bottom_footprint.kicad_pcb"
+sha256 = "f22e709d8af93add2e628b73073fcb9e34e8ae82e525906e61c87db56db3aca1"
+source_url = "https://packages.ubuntu.com/noble/kicad-demos"
+source_commit = "not-applicable: Ubuntu package kicad-demos 7.0.11+dfsg-1build4"
+licence = "GPL-2+"
+produced = "Derived by reducing the source_base board; loaded and exported by KiCad 7.0.11."
+header_version = "20221018"
+generator = "pcbnew"
+purpose = "A rotated bottom-side footprint with two SMD pads and mirrored text."
+oracle_commands = ["tools/export_oracle.sh fixtures/kicad7/bottom_footprint.kicad_pcb oracles/bottom_footprint"]
+expected_inventory = { segments = 0, arcs = 0, footprints = 1, pads = 2, vias = 0, zones = 0, texts = 2, footprint_lines = 1 }
+differences = []
+
+[[fixtures]]
+id = "mad-rp2040-old"
+status = "present"
+path = "mad_rp2040/old/Mad_RP2040.kicad_pcb"
+sha256 = "2bd8ad8eee838abf7a9ef3f09fb9d55f671ea0483661c6cf2388860acee906ac"
+source_url = "https://github.com/Cimos/Mad_RP2040/blob/v0.0.0/Mad_RP2040.kicad_pcb"
+source_commit = "650652bc4d2d4900496da44eaacbdd3164d45010"
+licence = "MIT"
+produced = "Saved by KiCad 9.0 (header generator_version 9.0); copied unchanged from the v0.0.0 tag."
+header_version = "20241229"
+generator = "pcbnew"
+purpose = "Real 4-layer board, old side of the bundled demo pair. The demo pack crates/etchy-gui/assets/demo/old is byte-identical, apart from date lines, to all 13 files of the PCBWay pack in the Mad_RP2040 v0.0.0 release (pcb-datapack, KiCad 9.0.7+1), checked 2026-10-03."
+oracle_commands = ["existing: crates/etchy-gui/assets/demo/old (PCBWay profile export from the v0.0.0 release, KiCad 9.0.7+1)"]
+expected_inventory = { segments = 952, arcs = 34, footprints = 117, pads = 470, vias = 218, zones = 7, texts = 3 }
+differences = []
+
+[[fixtures]]
+id = "mad-rp2040-new"
+status = "present"
+path = "mad_rp2040/new/Mad_RP2040.kicad_pcb"
+sha256 = "550cf6ea4adee8fdd046889ade3ee8088de5ead2a76abf206cf26e21790f038c"
+source_url = "https://github.com/Cimos/Mad_RP2040/blob/v0.0.1/Mad_RP2040.kicad_pcb"
+source_commit = "e2c21c68a6bec878b70fa6fbbd1b0374dee4804a"
+licence = "MIT"
+produced = "Saved by KiCad 9.0 (header generator_version 9.0); copied unchanged from the v0.0.1 tag."
+header_version = "20241229"
+generator = "pcbnew"
+purpose = "Real 4-layer board, new side of the bundled demo pair. The demo pack crates/etchy-gui/assets/demo/new is byte-identical, apart from date lines, to all 13 files of the PCBWay pack in the Mad_RP2040 v0.0.1 release (pcb-datapack, KiCad 9.0.7+1), checked 2026-10-03."
+oracle_commands = ["existing: crates/etchy-gui/assets/demo/new (PCBWay profile export from the v0.0.1 release, KiCad 9.0.7+1)"]
+expected_inventory = { segments = 1007, arcs = 34, footprints = 117, pads = 470, vias = 232, zones = 486, texts = 3 }
+differences = []
+
+[[slots]]
+id = "kicad6"
+status = "pending"
+needed = "A licence-compatible board actually saved by KiCad 6, its exact file hash and producer evidence, plus an oracle exported by that pinned producer."
+
+[[slots]]
+id = "kicad8"
+status = "pending"
+needed = "A licence-compatible board actually saved by KiCad 8, its exact file hash and producer evidence, plus an oracle exported by that pinned producer."
+
+[[slots]]
+id = "kicad10"
+status = "pending"
+needed = "A licence-compatible board actually saved by KiCad 10, its exact file hash and producer evidence, plus an oracle exported by that pinned producer."
+
