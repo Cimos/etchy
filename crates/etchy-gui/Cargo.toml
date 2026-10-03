@@ -88,3 +88,24 @@ web-sys = { version = "0.3", features = [
 ] }
 js-sys = "0.3"
 include_dir = "0.7"
+
+# Desktop installers (.msi, .dmg, .deb, .AppImage), built by cargo-packager in
+# release.yml. Run from this crate directory: `cargo packager --release -f deb`.
+[package.metadata.packager]
+product-name = "etchy"
+identifier = "io.github.cimos.etchy"
+publisher = "Cimos"
+homepage = "https://cimos.github.io/etchy/"
+description = "Visual and geometric diff viewer for PCB Gerber, drill and PDF revisions"
+category = "DeveloperTool"
+license-file = "../../LICENSE-MIT"
+icons = ["../../assets/brand/png/etchy-app-icon-512.png"]
+out-dir = "../../target/packager"
+before-packaging-command = "cargo build --release -p etchy-gui"
+binaries = [{ path = "etchy-gui", main = true }]
+
+[package.metadata.packager.deb]
+depends = ["libxkbcommon0", "libgl1", "libegl1"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"

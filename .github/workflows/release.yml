@@ -1,100 +1,166 @@
 name: Release
 
-# Hand-rolled release: on a version tag, build the `etchy` CLI per-OS on native
-# runners (musl for a static Linux binary), then attach the archives + checksums
-# to the GitHub Release. Deliberately lean — only the first-party actions ci.yml
-# already uses, plus the built-in `gh` CLI for the upload (no extra third-party
-# action to audit/pin). The GUI is not shipped here; only the headless CLI.
+# On a version tag, build the `etchy` command-line tool and the `etchy-gui`
+# desktop viewer, then attach everything plus SHA256SUMS to the GitHub Release.
+#
+#   etchy-cli-<tag>-<os>.{tar.gz,zip}     command-line tool + README-CLI.txt
+#   etchy-viewer-<tag>-<os>.{msi,dmg,deb,AppImage}   desktop viewer installers
+#
+# macOS runs as ONE job (both CLI targets + the arm64 viewer) to keep macOS
+# runner time down. Installers are built by cargo-packager, installed from
+# crates.io at a pinned version with --locked; no third-party actions.
 on:
   push:
     tags: ["v*"]
+  # Manual run: builds every asset (named "dev") as workflow artifacts so the
+  # installers can be tried before tagging. Publishes nothing.
+  workflow_dispatch:
 
 permissions:
   contents: read # least privilege by default; the release job below opts up to write
 
 env:
   CARGO_TERM_COLOR: always
+  PACKAGER_VERSION: 0.11.8
 
 jobs:
-  build:
-    name: build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x86_64, ext: tar.gz }
-          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-aarch64, ext: tar.gz }
-          - { os: macos-latest, target: x86_64-apple-darwin, name: macos-x86_64, ext: tar.gz }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64, ext: zip }
+  linux:
+    name: build linux
+    # 22.04 so the viewer links against an older glibc and runs on more distros.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Install Rust (stable) + target
+      - name: Install Rust (stable) + musl target
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-musl
 
-      - name: musl tools (static Linux build)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libxkbcommon-dev libgl1-mesa-dev
 
-      - name: Build the etchy CLI
-        # --features pdf so release binaries carry the schematic-PDF diff (CLI-6),
-        # as the README/REQUIREMENTS promise. hayro is pure-Rust and builds static
-        # on musl; verified locally on host, musl-static, and wasm32.
-        run: cargo build --release -p etchy-cli --features pdf --target ${{ matrix.target }}
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version "$PACKAGER_VERSION" --locked
 
-      - name: Package (unix)
-        if: matrix.ext == 'tar.gz'
-        shell: bash
+      - name: Build the CLI (static musl)
+        run: cargo build --release -p etchy-cli --features pdf --target x86_64-unknown-linux-musl
+
+      - name: Build the viewer installers
+        working-directory: crates/etchy-gui
+        run: cargo packager --release -f deb,appimage
+
+      - name: Package
         env:
-          # Route the tag (externally-influenced) through env, never interpolated
-          # straight into the shell. matrix.* are our own trusted literals.
-          REF_NAME: ${{ github.ref_name }}
-          NAME: ${{ matrix.name }}
-          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
         run: |
           set -euo pipefail
-          dir="etchy-${REF_NAME}-${NAME}"
+          mkdir dist
+          dir="etchy-cli-${TAG}-linux-x86_64"
           mkdir "$dir"
-          cp "target/${TARGET}/release/etchy" "$dir/"
-          # No `|| true` here: an archive that quietly ships without its licences
-          # is exactly the kind of silent miss this project refuses elsewhere.
-          cp README.md LICENSE-MIT LICENSE-APACHE "$dir/"
-          tar czf "$dir.tar.gz" "$dir"
-          echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
-
-      - name: Package (windows)
-        if: matrix.ext == 'zip'
-        shell: bash
-        env:
-          REF_NAME: ${{ github.ref_name }}
-          NAME: ${{ matrix.name }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          dir="etchy-${REF_NAME}-${NAME}"
-          mkdir "$dir"
-          cp "target/${TARGET}/release/etchy.exe" "$dir/"
-          # Carry the licences here too — etchy is dual-licensed and the unix
-          # archives include both, so the Windows archive must not be the odd
-          # one out. Fail loud rather than shipping an archive without them.
-          cp README.md LICENSE-MIT LICENSE-APACHE "$dir/"
-          7z a "$dir.zip" "$dir"
-          echo "ASSET=$dir.zip" >> "$GITHUB_ENV"
+          cp target/x86_64-unknown-linux-musl/release/etchy "$dir/"
+          cp packaging/README-CLI.txt README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+          tar czf "dist/$dir.tar.gz" "$dir"
+          cp target/packager/*.deb "dist/etchy-viewer-${TAG}-linux-x86_64.deb"
+          cp target/packager/*.AppImage "dist/etchy-viewer-${TAG}-linux-x86_64.AppImage"
+          ls -l dist
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ matrix.name }}
-          path: ${{ env.ASSET }}
+          name: linux
+          path: dist/*
+
+  windows:
+    name: build windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Install cargo-packager
+        shell: bash
+        run: cargo install cargo-packager --version "$PACKAGER_VERSION" --locked
+
+      - name: Build the CLI
+        run: cargo build --release -p etchy-cli --features pdf
+
+      - name: Build the viewer installer (.msi)
+        working-directory: crates/etchy-gui
+        run: cargo packager --release -f wix
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          dir="etchy-cli-${TAG}-windows-x86_64"
+          mkdir "$dir"
+          cp target/release/etchy.exe "$dir/"
+          cp packaging/README-CLI.txt README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+          7z a "dist/$dir.zip" "$dir"
+          cp target/packager/*.msi "dist/etchy-viewer-${TAG}-windows-x86_64.msi"
+          ls -l dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows
+          path: dist/*
+
+  macos:
+    name: build macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Rust (stable) + both targets
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version "$PACKAGER_VERSION" --locked
+
+      - name: Build the CLI (arm64 + x86_64)
+        run: |
+          cargo build --release -p etchy-cli --features pdf --target aarch64-apple-darwin
+          cargo build --release -p etchy-cli --features pdf --target x86_64-apple-darwin
+
+      - name: Build the viewer (.dmg, arm64)
+        working-directory: crates/etchy-gui
+        run: cargo packager --release -f dmg
+
+      - name: Package
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          for pair in aarch64-apple-darwin:macos-aarch64 x86_64-apple-darwin:macos-x86_64; do
+            target="${pair%%:*}"; name="${pair##*:}"
+            dir="etchy-cli-${TAG}-${name}"
+            mkdir "$dir"
+            cp "target/${target}/release/etchy" "$dir/"
+            cp packaging/README-CLI.txt README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+            tar czf "dist/$dir.tar.gz" "$dir"
+          done
+          cp target/packager/*.dmg "dist/etchy-viewer-${TAG}-macos-aarch64.dmg"
+          ls -l dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos
+          path: dist/*
 
   release:
     name: publish release
-    needs: build
+    needs: [linux, windows, macos]
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     # Only this job creates the Release and uploads assets, so scope the write
-    # token here — the build matrix above stays read-only (least privilege, #254).
+    # token here — the build jobs above stay read-only (least privilege, #254).
     permissions:
       contents: write
     steps:

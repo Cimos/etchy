@@ -46,7 +46,7 @@ add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
 
 ```yaml
-      - uses: Cimos/etchy@v0.1.0
+      - uses: Cimos/etchy@v0.1.1
         with:
           old: fab/rev-a
           new: fab/rev-b
@@ -70,19 +70,25 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 - **Container** (headless CLI, distroless, ~11 MB):
 
   ```sh
-  docker pull ghcr.io/cimos/etchy:v0.1.0
-  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.0 --format summary /work/old /work/new
+  docker pull ghcr.io/cimos/etchy:v0.1.1
+  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.1 --format summary /work/old /work/new
   ```
 
   Or build it yourself with `docker build -t etchy .`.
 
-- **Prebuilt binaries** — archives for Linux, macOS and Windows, plus a
-  `SHA256SUMS` file, are on the [Releases](../../releases) page.
+- **Prebuilt binaries** — `etchy-cli-…` archives for Linux, macOS and Windows,
+  plus a `SHA256SUMS` file, are on the [Releases](../../releases) page.
 
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
 changed-first layer list, overlay / before / after / split / swipe modes, pan /
 zoom / fit, a settings panel, an Open-A / Open-B loader (folder, `.zip`, or
 drag-and-drop), and a Help menu. A **web viewer** build also exists (see `deploy/`).
+
+**Install the viewer** from the [Releases](../../releases) page: `etchy-viewer-…`
+as a Windows `.msi`, a macOS `.dmg` (Apple Silicon), or a Linux `.AppImage` /
+`.deb`. On macOS, `brew install --cask cimos/etchy/etchy` also works. The
+installers are not code-signed yet, so Windows SmartScreen and macOS Gatekeeper
+ask once before the first run.
 
 ## What it does
 

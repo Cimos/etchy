@@ -9,6 +9,27 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-03
+
+### Added
+- **Desktop viewer installers:** each release now ships `etchy-viewer-…` as a
+  Windows `.msi`, a macOS `.dmg` (Apple Silicon) and a Linux `.AppImage` and
+  `.deb`, built by cargo-packager in the release workflow. A Homebrew cask is
+  available from the `cimos/etchy` tap.
+- `README-CLI.txt` in every command-line archive, explaining that it is a
+  terminal tool and how to run it.
+
+### Changed
+- Command-line archives are renamed `etchy-cli-<version>-<os>` so they are not
+  mistaken for the viewer.
+- The Windows viewer no longer opens a console window behind it.
+- The release workflow can be run by hand to build every asset without
+  publishing.
+
+### Fixed
+- The viewer resolves relative folder arguments correctly when launched from
+  an AppImage.
+
 ## [0.1.0] — 2026-10-02
 
 ### Added
@@ -285,6 +306,7 @@ production fab packs, with the release pipeline proven across four platforms.
   toolchain; the verified real dependencies (clap, i_overlay, eframe,
   pdfium-render, askama, …) are added per-module starting in Milestone 1.
 
-[Unreleased]: https://github.com/Cimos/etchy/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Cimos/etchy/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Cimos/etchy/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Cimos/etchy/compare/v0.1.0-rc1...v0.1.0
 [0.1.0-rc1]: https://github.com/Cimos/etchy/releases/tag/v0.1.0-rc1

@@ -885,7 +885,7 @@ checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "etchy-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "etchy-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gerber-types",
  "gerber_parser",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "etchy-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "etchy-pdf"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "etchy-core",
  "hayro",

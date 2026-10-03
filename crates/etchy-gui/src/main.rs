@@ -6,6 +6,9 @@
 //! the pure `etchy-core` engine via `compare_detailed`; this crate only does I/O
 //! and rendering. M1 scope: flash-only geometry (the engine fails loud otherwise).
 
+// Release builds on Windows open no console window behind the viewer.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod exportio;
 #[cfg(feature = "gpu-transform")]
 mod gpu;
@@ -52,14 +55,26 @@ mod native {
         }
     }
 
+    /// An AppImage launcher changes into the image before starting us; its runtime
+    /// keeps the user's folder in `OWD`, so relative paths resolve against that.
+    fn resolve_arg(owd: Option<&std::path::Path>, arg: &str) -> PathBuf {
+        let p = PathBuf::from(arg);
+        match owd {
+            Some(dir) if p.is_relative() => dir.join(p),
+            _ => p,
+        }
+    }
+
     pub fn run() -> ExitCode {
         configure_display_for_wsl();
         let args: Vec<String> = std::env::args().skip(1).collect();
+        let owd = std::env::var_os("OWD").map(PathBuf::from);
+        let arg_path = |a: &str| resolve_arg(owd.as_deref(), a);
         // 0 args → start on the welcome screen; 2 args → load both up front (keeps
         // the `etchy-gui <old> <new>` contract and fails loud on a bad path).
         let seed = match args.len() {
             0 => None,
-            2 => match load_seed(&PathBuf::from(&args[0]), &PathBuf::from(&args[1])) {
+            2 => match load_seed(&arg_path(&args[0]), &arg_path(&args[1])) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     eprintln!("etchy-gui: error: {e:#}");
