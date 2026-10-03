@@ -253,3 +253,224 @@ fn optional_public_board_smoke() {
         started.elapsed()
     );
 }
+
+fn native_fixture(relative: &str) -> ParsedBoard {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../corpus/native/kicad")
+        .join(relative);
+    parse(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn manifest_inventory(relative: &str) -> std::collections::BTreeMap<String, usize> {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/native/kicad/manifest.toml"),
+    )
+    .unwrap();
+    let marker = format!("path = \"{relative}\"");
+    let tail = manifest.split(&marker).nth(1).unwrap();
+    let line = tail
+        .lines()
+        .find(|line| line.starts_with("expected_inventory = "))
+        .unwrap();
+    line.split('{')
+        .nth(1)
+        .unwrap()
+        .trim_end_matches('}')
+        .split(',')
+        .map(|entry| {
+            let (name, value) = entry.trim().split_once(" = ").unwrap();
+            (name.to_owned(), value.parse().unwrap())
+        })
+        .collect()
+}
+
+fn check_fixture(relative: &str, major: u8, layer_count: usize, net_count: usize) {
+    let parsed = native_fixture(relative);
+    let tables = decode_tables(&parsed).unwrap();
+    assert_eq!(tables.profile.producer_major, major);
+    assert_eq!(tables.layers.len(), layer_count);
+    assert_eq!(tables.nets.len(), net_count);
+    let report = inventory(&parsed, Strictness::Strict).unwrap();
+    for (kind, expected) in manifest_inventory(relative) {
+        assert_eq!(
+            report.kind_counts.get(&kind).copied().unwrap_or(0),
+            expected,
+            "{relative}: {kind}"
+        );
+    }
+    assert!(report.consumption.unconsumed_paths(&parsed.root).is_empty());
+    assert!(report.records.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+macro_rules! fixture_test {
+    ($name:ident, $path:literal, $major:literal, $layers:literal, $nets:literal) => {
+        #[test]
+        fn $name() {
+            check_fixture($path, $major, $layers, $nets);
+        }
+    };
+}
+
+fixture_test!(
+    fixture_track_arc,
+    "fixtures/kicad7/track_arc.kicad_pcb",
+    7,
+    5,
+    2
+);
+fixture_test!(
+    fixture_pad_shapes,
+    "fixtures/kicad7/pad_shapes.kicad_pcb",
+    7,
+    7,
+    1
+);
+fixture_test!(
+    fixture_via_spans,
+    "fixtures/kicad7/via_spans.kicad_pcb",
+    7,
+    5,
+    2
+);
+fixture_test!(
+    fixture_filled_zone,
+    "fixtures/kicad7/filled_zone.kicad_pcb",
+    7,
+    3,
+    2
+);
+fixture_test!(
+    fixture_unfilled_zone,
+    "fixtures/kicad7/unfilled_zone.kicad_pcb",
+    7,
+    3,
+    2
+);
+fixture_test!(
+    fixture_stroke_text,
+    "fixtures/kicad7/stroke_text.kicad_pcb",
+    7,
+    4,
+    1
+);
+fixture_test!(
+    fixture_renamed_layer,
+    "fixtures/kicad7/renamed_layer.kicad_pcb",
+    7,
+    3,
+    1
+);
+fixture_test!(
+    fixture_bottom_footprint,
+    "fixtures/kicad7/bottom_footprint.kicad_pcb",
+    7,
+    6,
+    1
+);
+fixture_test!(
+    fixture_mad_old,
+    "mad_rp2040/old/Mad_RP2040.kicad_pcb",
+    9,
+    31,
+    106
+);
+fixture_test!(
+    fixture_mad_new,
+    "mad_rp2040/new/Mad_RP2040.kicad_pcb",
+    9,
+    31,
+    106
+);
+
+#[test]
+fn renamed_layers_keep_internal_kinds() {
+    let tables = decode_tables(&native_fixture("fixtures/kicad7/renamed_layer.kicad_pcb")).unwrap();
+    assert_eq!(tables.layers[0].kind, LayerKind::TopCopper);
+    assert_eq!(tables.layers[0].user_name.as_deref(), Some("Top Signal"));
+    assert_eq!(tables.layers[2].kind, LayerKind::Outline);
+}
+
+fn decodable(body: &str) -> String {
+    format!("(kicad_pcb (version 20221018) (general (thickness 1.6)) (layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal)) (setup (pad_to_mask_clearance 0)) (net 0 \"\") {body})")
+}
+
+#[test]
+fn unknown_top_level_is_counted_warning() {
+    let parsed = parse(decodable("(mystery 1)").as_bytes()).unwrap();
+    let report = inventory(&parsed, Strictness::Strict).unwrap();
+    assert_eq!(report.unknown_counts["kicad_pcb/mystery [mystery]"], 1);
+    assert_eq!(report.warnings.len(), 1);
+}
+
+#[test]
+fn unknown_material_child_is_warning_or_strict_error() {
+    let parsed = parse(decodable("(segment (start 0 0) (mystery 1))").as_bytes()).unwrap();
+    assert_eq!(
+        inventory(&parsed, Strictness::Report)
+            .unwrap()
+            .warnings
+            .len(),
+        1
+    );
+    assert!(matches!(
+        inventory(&parsed, Strictness::Strict),
+        Err(Error::UnknownMaterialRecord { .. })
+    ));
+}
+
+#[test]
+fn duplicate_required_field_is_typed() {
+    let input = decodable("(general (thickness 2))");
+    let parsed = parse(input.as_bytes()).unwrap();
+    assert!(matches!(
+        decode_tables(&parsed),
+        Err(Error::DuplicateField { .. })
+    ));
+}
+
+#[test]
+fn future_version_is_rejected() {
+    let parsed = parse(b"(kicad_pcb (version 20991231))").unwrap();
+    assert!(
+        matches!(version_profile(&parsed), Err(Error::UnsupportedBoardVersion { date, .. }) if date == "20991231")
+    );
+}
+
+#[test]
+fn accepted_aliases_decode() {
+    let input = "(kicad_pcb (version 20221018) (general (thickness 1.6)) (layers (0 \"F.Cu\" signal) (31 \"B.Cu\" signal) (37 \"F.Silkscreen\" user)) (setup (pad_to_mask_clearance 0)) (net 0 \"\") (gr_line (width 0.2) (tstamp abc)))";
+    let parsed = parse(input.as_bytes()).unwrap();
+    let tables = decode_tables(&parsed).unwrap();
+    assert_eq!(tables.layers[2].kind, LayerKind::TopSilk);
+    assert_eq!(
+        inventory(&parsed, Strictness::Strict).unwrap().kind_counts["gr_line"],
+        1
+    );
+}
+
+#[test]
+fn inventory_aggregation_is_stable_and_sorted() {
+    let parsed =
+        parse(decodable("(segment (start 0 0)) (segment (start 1 1))").as_bytes()).unwrap();
+    let first = inventory(&parsed, Strictness::Strict).unwrap();
+    let second = inventory(&parsed, Strictness::Strict).unwrap();
+    assert_eq!(first.records, second.records);
+    assert_eq!(first.kind_counts["segments"], 2);
+    assert!(first.records.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[test]
+fn footprint_properties_are_kept_for_the_text_decoder() {
+    let parsed = native_fixture("mad_rp2040/old/Mad_RP2040.kicad_pcb");
+    let report = inventory(&parsed, Strictness::Strict).unwrap();
+    let property = report
+        .records
+        .iter()
+        .find(|record| record.path.ends_with("footprint/property"))
+        .expect("footprint property record");
+    assert!(matches!(
+        property.disposition,
+        Disposition::KnownForLater { .. }
+    ));
+}
