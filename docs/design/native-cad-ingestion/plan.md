@@ -1,325 +1,378 @@
 # Native board ingestion implementation and release plan
 
-This plan intentionally separates plumbing, producer bridges, geometry, and
-release claims. Each pull request is small enough to review and has its own
-trust tests. No phase changes existing Gerber behavior without regression
-coverage.
+Full replacement plan. Each pull request is independently reviewable, preserves
+existing Gerber/PDF behavior, and adds its own trust tests. No runtime producer
+tool is introduced.
 
-## Proposed versions
+## Release proposal
 
-| Release | Scope |
+| Release | Content |
 |---|---|
-| 0.2.0 | Input dispatch, ingestion manifest, and stable native KiCad `.kicad_pcb` support through a tested external `kicad-cli`; native desktop/CLI/Action, fail-loud in wasm. |
-| 0.2.1 | KiCad corpus/version expansion and profile-file support if needed; no new format promise. |
-| 0.3.0 | Experimental Altium `.PcbDoc` support behind `native-altium-experimental`; CLI and native GUI first. |
-| 0.4.0 | Stable Altium support only if parity, adversarial, licence, dependency, and distribution gates pass; otherwise 0.4.0 does not remove the experimental label. wasm Altium may ship here only after separate browser gates pass. |
+| 0.2.0 | Stable direct KiCad 6–10 `.kicad_pcb` parsing, native geometry projection, object change list, CLI/JSON v2/Markdown/HTML/native viewer/wasm viewer, pinned-oracle evidence. Recommended single release. |
+| 0.2.1 | Corpus expansion and corrections only; no new format promise. If the owner stages UI work, 0.2.0 ships geometry plus JSON object data and 0.2.1 completes human/viewer object surfaces. |
+| 0.3.0 | Experimental Altium `.PcbDoc` behind `native-altium-experimental`, only after the pure-Rust reader spike passes. |
+| Later minor | Stable Altium only after parity, licence, format-span, resource and adversarial gates. The version is not promised in advance. |
 
-Suggested feature flags:
+Feature flags:
 
-- `native-kicad`: CLI/native-GUI process bridge and profile support. It adds no
-  linked KiCad code. Enable it in normal native release builds after 0.2.0.
-- `native-altium-experimental`: exact-pinned parser plus adapter/polygonizer.
-  Off by default in release archives until the stable gate.
-- `native-altium`: stable name introduced only when the experimental gate is
-  met; it may alias the same implementation for one deprecation cycle.
-- Neither flag changes `etchy-core`'s default Gerber/Excellon behavior. wasm
-  must not include process-only KiCad code.
+- `native-kicad`: parser, typed model and projector; enabled in normal CLI,
+  desktop and wasm release builds once stable.
+- `native-altium-experimental`: off by default; exact-pinned pure-Rust reader and
+  adapter. It must not affect default builds.
+- No `kicad-cli`, Python, Altium or `altium-monkey` integration feature.
 
-## Phase 0: decisions and fixtures
+## Phase 0: policy and evidence
 
-### PR 1 — policy and profile decision
+### PR 1 — accept requirements and schema direction
 
-Crates/files: documentation only.
+Files: documentation and JSON schema drafts only.
 
-1. Owner resolves the open questions in `spec.md`, especially the default
-   profile, KiCad minimum version, wasm expectations, and Altium OutJob policy.
-2. Update `CLAUDE.md`, `docs/REQUIREMENTS.md`, `docs/TRUST.md`, and
-   `docs/ROADMAP.md` with the exact narrow scope in `NCAD-SCOPE-4`.
-3. Add a versioned native-ingestion design document and supported-version table.
+1. Resolve `spec.md` open questions.
+2. Update product scope, trust language, roadmap and non-goals.
+3. Record supported KiCad majors as a target pending fixture gates, not an
+   implementation claim.
+4. Approve JSON v2 and stable warning/error codes.
 
-Tests: documentation link/check tests only. Review gate: no implementation
-starts with “same as Gerber” still undefined.
+Tests: documentation links, schema examples, existing schema v1 unchanged.
 
-### PR 2 — corpus provenance and oracle recipe
+### PR 2 — corpus provenance and oracle recipes
 
-Crates/files: `corpus/`, test tooling outside runtime crates.
+Files: `corpus/native/kicad/`, test tooling, no runtime crates.
 
-1. Add manifests recording source URL/licence, producer version, export command
-   or OutJob, profile hash, and expected layers.
-2. Add two small synthetic KiCad revisions and, after provenance review, the
-   native `Cimos/Mad_RP2040` revisions that correspond to public demo output.
-3. Define scripts/instructions for generating oracle Gerber, drill, and
-   placement packs. Generated outputs are checked in where licensing permits so
-   normal CI does not need every old producer.
-4. Establish a private-to-public sanitization process for Altium fixtures; do
-   not copy `altium-monkey`'s private corpus.
+1. Add tiny synthetic KiCad 6/7/8/9/10 boards, each with exact producer/header
+   version and one behavior per fixture.
+2. Add old/new MIT Mad_RP2040 board files only after matching commits to current
+   demo packs; record that existing exports may use plot settings native mode
+   intentionally ignores.
+3. Add manifests with source URL, commit, licence, expected record inventory,
+   producer version, oracle command, export settings and classified differences.
+4. Pin one KiCad baseline in ordinary relevant CI and the full matrix in
+   scheduled/manual CI. Keep generated oracle packs where licensing permits.
 
-Tests: manifest schema, hashes, expected file inventory, and existing fab-pack
-golden tests. No runtime code.
+Tests: manifest schema/hashes, licence/provenance checks, inventory checks, and
+reproduction documentation. Existing demo assets are not modified in this PR.
 
-## Phase 1: shared ingestion boundary
+## Phase 1: bounded syntax and typed board model
 
-### PR 3 — input family and manifest types
+### PR 3 — `etchy-kicad` S-expression tree
 
-Crates: `etchy-core`, `etchy-cli`, `etchy-gui`.
+Crates: new `crates/etchy-kicad`; workspace plumbing only.
 
-1. Add pure `InputFamily`, `IngestionManifest`, profile ID/hash, producer
-   metadata, and typed ingestion-error data in `etchy-core`.
-2. Add suffix-plus-content detection in shared pure code.
-3. Wire dispatch only far enough to return explicit “recognized but this build
-   lacks support” errors. Preserve PDF and fab-pack routing exactly.
+1. Implement byte lexer, strings/escapes, atoms, lists and source spans.
+2. Preserve all nodes and provide child-consumption accounting.
+3. Add native/wasm resource-limit profiles and typed parse errors.
+4. Parse root/header/version only; no geometry.
 
-Tests:
+Tests: fixture syntax, whitespace/comments/escaping, invalid UTF-8, malformed
+lists, depth/node/string/byte limits, numeric traps, integer overflow, fuzz-lite,
+deterministic diagnostics, wasm compile. Run `cargo deny` despite no intended new
+runtime dependency.
 
-- table tests for casing, whitespace, KiCad root, CFB magic, false extensions,
-  mixed pairs, native-only flags, PDFs, zips, directories, and hostile short
-  inputs;
-- CLI integration tests for exit 2 and exact corrective messages;
-- native/wasm GUI loader tests for availability messages.
+### PR 4 — version profiles and record inventory
 
-### PR 4 — resolved-board adapter API
+Crate: `etchy-kicad`.
 
-Crate: `etchy-core`; optional thin crates may be scaffolded but contain no
-format parser yet.
+1. Add explicit KiCad 6–10 header-date profiles and accepted token aliases.
+2. Decode layer/setup/net tables and inventory every top-level/nested record.
+3. Add harmless-metadata allow-list; reject unknown material-bearing data.
+4. Emit disposition/accounting without projection.
 
-1. Add a pure builder that validates adapter layer uniqueness, record counts,
-   fixed-point bounds, and completeness before producing `Board`.
-2. Keep I/O/process/profile discovery in surfaces or adapter crates.
-3. Attach ingestion metadata to detailed reports without changing existing
-   geometry calculations.
+Tests: one fixture per accepted header date, cross-version token tables, unknown
+top-level and nested fields, duplicate fields, future version, renamed layers,
+record counts, fuzzed headers. Review gate: every fixture node is consumed once
+or appears in accounting.
 
-Tests: known polygons map to every existing `LayerKind`; duplicate/ambiguous
-layers and incomplete manifests fail; report serialization remains backward
-compatible according to the owner's schema decision; `diff(A,A)` and symmetry
-continue to pass.
+### PR 5 — shared native model
 
-## Phase 2: KiCad 0.2.0
+Crates: `etchy-core`, `etchy-kicad`.
 
-### PR 5 — `kicad-cli` discovery and capability probe
+1. Add `NativeBoard`, native layer identity, net labels, source IDs, typed object
+   enums, diagnostics and projection provenance.
+2. Keep existing resolved `Board` and diff APIs intact.
+3. Add report types for object changes and native diagnostics behind no CLI yet.
+4. Define checked coordinate/angle conversion.
 
-Crates: new `etchy-kicad` plus `etchy-cli`; no GUI yet.
+Tests: serialization/schema v2, 1 nm boundaries, angle normalization, source ID
+round-trip, warnings/accounting, v1 regression snapshots, native/wasm builds.
 
-1. Resolve explicit flag, environment variable, then `PATH`.
-2. Run `version` and capture help for Gerber, drill, and position commands.
-3. Parse capabilities into a typed matrix; reject untested versions and missing
-   zone checks.
-4. Add bounded child-process output and timeout handling.
+## Phase 2: KiCad objects and geometry
 
-Tests:
+### PR 6 — layer stack, transforms and simple graphics
 
-- fake executables/scripts for 7.0.11, supported 8/9 variants, malformed
-  versions, missing flags, non-zero exits, signals, timeout, excessive output,
-  and paths with spaces;
-- assert 7.0.11 zone behavior fails as specified rather than silently exporting;
-- no real KiCad required in ordinary unit tests.
+Crates: `etchy-kicad`, `etchy-core` geometry helpers.
 
-### PR 6 — secure temporary export bridge
+1. Map copper stack, technical/documentation layers and user names.
+2. Implement footprint front/back transforms as tested affine operations.
+3. Project board/footprint line, rectangle, circle and polygon strokes/fills.
+4. Assemble simple `Edge.Cuts`; reject bad topology.
 
-Crate: `etchy-kicad`, with minimal CLI wiring.
+Tests: every layer mapping and alias, renamed layers, flip/rotation/translation
+compositions, exact-area shapes, open/branching/self-ambiguous outlines, cut-outs,
+property tests that inverse transforms restore points, oracle per-layer deltas.
 
-1. Create separate private old/new temporary directories.
-2. Build command arguments without a shell.
-3. Export Gerbers with a locked profile, then drill and position files.
-4. Inventory actual output, reject missing/unexpected path escapes, and feed the
-   complete set to a shared fab-pack bytes loader.
-5. Delete by default and support explicit diagnostic retention.
+### PR 7 — tracks, arcs and curves
 
-Tests:
+Crates: `etchy-kicad`, `etchy-core` reusable stroke/curve helpers.
 
-- fake producer writes representative files; verify argument tokens, directory
-  isolation, cleanup, retention, non-UTF-8 diagnostics, output path validation,
-  and stage-labelled errors;
-- test profile mismatch before diff;
-- reuse current Gerber/Excellon/placement golden tests.
+1. Add track segments/arcs with width.
+2. Add board and footprint arcs and cubic Beziers.
+3. Lock deterministic flattening error and point caps.
+4. Retain UUID/timestamp, net label and normalized centreline for object diff.
 
-### PR 7 — real KiCad parity matrix
+Tests: clockwise/counter-clockwise/full/degenerate arcs, widths, Bezier extrema,
+quantization, cap failures, exact known bounds/areas, KiCad Gerber comparison,
+`diff(A,A)` and old/new symmetry.
 
-Crates: `etchy-kicad`, `etchy-cli`; corpus tests.
+### PR 8 — pads, drills and placement
 
-1. Run supported KiCad release containers/installations over synthetic boards
-   and Mad_RP2040.
-2. Compare bridge-generated `Board` values against checked-in reference packs
-   per layer.
-3. Cover zones, text/font/variables, footprint flips, custom pads, arcs,
-   outlines, drill split, position output, and layer stacks.
-4. Publish the tested version/profile table.
+Crates: `etchy-kicad`, `etchy-core`.
 
-Tests: native-vs-export zero-diff assertions, known error goldens, property
-tests, fuzzed board headers/profile documents, and export timeout/resource caps.
-This PR is the KiCad correctness gate.
+1. Add basic, rounded, chamfered and trapezoid pads.
+2. Add custom primitives and anchor/hull modes.
+3. Apply pad plus footprint transforms and wildcard layer sets.
+4. Add round/offset/oval drills, plating identities and placement objects/layer.
 
-### PR 8 — GUI and Action
+Tests: every shape; rotated/flipped/custom pads; repeated numbers; front/back
+layers; PTH/NPTH; slots and offsets; exact annular areas; duplicate ownership;
+excluded-position flags; oracle Gerber/drill/position comparisons; point caps.
 
-Crates/files: `etchy-gui`, `etchy-cli`, `action.yml`, CI workflows, packaging.
+### PR 9 — vias and unused copper layers
 
-1. Add native file filters/drop handling, background conversion, cancellation,
-   and producer/profile details.
-2. Add wasm's immediate explanatory rejection for `.kicad_pcb`.
-3. Add opt-in Action setup pinned to supported KiCad artifacts/container digest.
-4. Exercise release archives without KiCad and document the external dependency.
+Crates: `etchy-kicad`, `etchy-core` model additions if approved.
 
-Tests: native GUI loader state tests, cancellation and cleanup tests, wasm build
-and message test, Action fixture workflow on a pinned runner image, Windows,
-macOS, and Linux path/discovery tests.
+1. Add through, blind/buried and microvia spans.
+2. Add drill-span representation that cannot pair with a through drill by error.
+3. Implement `remove_unused_layers`/`keep_end_layers` only for cases proven by
+   saved data and oracle fixtures; reject indeterminate cases.
 
-### PR 9 — KiCad documentation and 0.2.0 release
+Tests: 2/4/16-layer stacks, all via types/spans, changed stack errors, used and
+unused intermediate layers, end retention, drill identity, KiCad copper/drill
+oracle comparisons. This PR cannot merge on undocumented guessed behavior.
 
-Files: README, CLI reference, website, Action docs, trust/limitations,
-third-party notices, changelog, release workflow.
+### PR 10 — saved zones and keepouts
 
-Document install commands for each OS, supported KiCad versions, exact profile,
-zone policy, wasm limitation, CI setup, privacy/temporary files, and how to
-reproduce a comparison from exported packs. Release only after all KiCad gates
-below pass.
+Crates: `etchy-kicad`, CLI flag plumbing limited to test harness.
 
-## Phase 3: Altium experimental 0.3.0
+1. Decode saved filled polygons and holes per layer.
+2. Validate declared layer, topology and cheap consistency checks.
+3. Implement missing-fill hard error and explicit partial opt-in.
+4. Account for keepouts as non-material object-only data.
 
-### PR 10 — dependency and format spike
+Tests: solid/hatched/multilayer fills, holes/islands, unfilled, deliberately stale,
+malformed, outside-bounds, missing-layer and keepout cases. Compare saved native
+geometry with normal export and `--check-zones` oracle output; classify every
+mismatch. Assert partial status/warnings on opt-in.
 
-Crate: new `etchy-altium`; feature `native-altium-experimental`.
+### PR 11 — mask and paste rules
 
-1. Pin the selected `altium-format` release by exact version after checking its
-   full dependency licence tree with `cargo deny`.
-2. Audit its CFB bounds and unknown-record behavior; wrap it so parser warnings
-   cannot become dropped manufacturing records.
-3. Compile native targets and `wasm32-unknown-unknown`; measure representative
-   board memory/time.
-4. Parse inventory only: emit `IngestionManifest`, not geometry or a diff.
+Crates: `etchy-kicad`.
 
-Tests: CFB bombs/truncation/cycles, stream/record counts, unknown records,
-dependency licence CI, native target matrix, wasm compile and browser parse cap.
-Exit criterion: owner explicitly accepts the pinned dependency/API risk.
+1. Implement board/footprint/pad margin precedence.
+2. Implement paste absolute plus ratio sizing and collapse policy.
+3. Implement mask minimum-web merge after fixture proof.
+4. Project direct mask/paste graphics; apply front/back transform.
 
-### PR 11 — layer stack, outline, and simple primitives
+Tests: precedence matrix, positive/negative/zero margins, ratio combinations,
+topology collapse, minimum-web values immediately below/at/above threshold,
+flipped footprints and direct graphics. KiCad Gerber symmetric differences must
+be zero unless a checked-in native-policy classification explains them.
 
-Crate: `etchy-altium`, feeding `etchy-core`.
+### PR 12 — CC0 stroke text and object-only text
 
-1. Resolve legacy/new layer IDs and physical copper order.
-2. Polygonize board outline/cutouts, tracks, simple arcs, fills, and regions.
-3. Convert units to checked 1 nm integers and reuse etchy boolean utilities.
-4. Reject every primitive variant not yet implemented.
+Crates/files: `etchy-kicad`, a minimal font-data module, third-party notices.
 
-Tests: synthetic exact-area fixtures, old/new layer maps, arc tessellation error
-bounds, outline topology, overflow, open outline, transform invariants, and
-Altium-Gerber parity for this limited subset.
+1. Vendor the exact CC0 newstroke data with upstream URL/hash/licence evidence, generated from the CC0 font sources rather than KiCad's GPL-headed `newstroke_font.cpp` (see NCAD-TEXT-1).
+2. Render stroke text/text boxes with transforms and limits.
+3. Resolve only intrinsic variables available in the board.
+4. Mark TrueType and external-variable text object-only with structured warning.
 
-### PR 12 — pads, vias, component transforms, drills, placement
+Tests: licence/NOTICE check, glyph outline snapshots, Unicode coverage/failure,
+alignment/mirror/rotation/multiline/text-box cases, hidden text, reference/value,
+project variables, TrueType names, output point limits, KiCad silk/copper/fab
+oracle comparisons.
 
-Crate: `etchy-altium`.
+## Phase 3: object diff
 
-1. Add supported pad/custom-pad/via stack shapes and component transforms.
-2. Separate PTH/NPTH and emit placement markers through existing semantics.
-3. Apply ownership once and validate counts.
+### PR 13 — stable-ID and footprint/pad matching
 
-Tests: rotations, bottom mirroring, through/SMD/multilayer pads, slots, blind
-and buried vias if supported, custom pad holes, duplicate-ownership traps,
-known areas, and reference-export parity. Unsupported modes retain golden hard
-errors.
+Crates: `etchy-core` or a new small `etchy-native-diff` if compile boundaries
+justify it; `etchy-kicad` only supplies objects.
 
-### PR 13 — saved pours and planes
+1. Pair footprints by reference plus stable-ID corroboration.
+2. Detect moved/rotated/flipped/combined changes.
+3. Pair pads within footprints, including repeated pad numbers.
+4. Produce deterministic structured changes and totals.
 
-Crate: `etchy-altium`.
+Tests: reference rename, regenerated IDs, duplicate/missing references, modulo
+angles, flip plus rotation, pad edits/repeats, symmetry, deterministic order,
+large hash-map benchmark and candidate caps.
 
-1. Link polygon definitions to saved tracks/arcs/regions and plane geometry.
-2. Respect shelving, cutouts, net inheritance only where needed for correct
-   material, and negative-plane semantics.
-3. Detect absent/inconsistent/stale fill conservatively; do not repour.
+### PR 14 — free geometry matching and spatial index
 
-Tests: filled/unfilled/stale/shelved pours, thermal/solid connections where
-represented in saved geometry, split/negative planes, islands, cutouts,
-double-count prevention, and per-layer Altium-Gerber parity.
+Crates: same object-diff boundary; use existing permissive spatial dependency if
+appropriate rather than adding another.
 
-### PR 14 — mask, paste, and silk text
+1. Pair tracks/arcs/vias/zones/keepouts by stable ID.
+2. Bucket unmatched objects by kind/layer span/net label and use an R-tree for
+   nearby normalized-geometry candidates.
+3. Accept only unique best matches; ambiguous cases become remove/add plus warning.
+4. Add stored net-name labels without connectivity analysis.
 
-Crate: `etchy-altium`.
+Tests: moved/reshaped/re-netted objects, split/merged tracks, copied IDs,
+ambiguous parallel tracks, zone outline/fill changes, large dense boards,
+`O(n log n)` benchmark guard, candidate-limit errors, match symmetry.
 
-1. Implement only audited mask/paste expansion precedence.
-2. Add supported stroke/text rendering and special-string substitution.
-3. Reject unavailable fonts and every unproved plotting mode.
+## Phase 4: outputs and applications
 
-Tests: rule precedence, tenting, paste shrink/expansion, flipped silk, stroke
-glyph goldens, TrueType supported/unsupported cases, variables/special strings,
-and pixel/geometry-assisted comparison against Altium Gerber output.
+### PR 15 — CLI dispatch, exit/gate behavior and JSON v2
 
-### PR 15 — experimental CLI and native GUI surface
+Crates: `etchy-cli`, `etchy-kicad`, `etchy-core` reporting.
 
-Crates: `etchy-cli`, `etchy-gui`, `etchy-altium`.
+1. Detect two native inputs and reject mixed families/ambiguous containers.
+2. Add object/zone/warning/gate flags from the spec.
+3. Serialize complete JSON v2; retain v1 snapshots for old inputs.
+4. Make any geometry or object change exit 1; errors remain 2.
 
-1. Enable `.PcbDoc` dispatch only with the experimental feature.
-2. Display the experimental label and full manifest in every output.
-3. Keep wasm disabled unless the Phase-10 browser gates and current corpus pass.
+Tests: direct files, git blobs, directory/zip selection, spoofed suffix/root,
+mixed inputs, every flag conflict, warning upgrade, partial projection, object-
+only diff, gate thresholds, exact exit codes, JSON Schema validation.
 
-Tests: CLI exit contract, GUI load/cancel, report metadata, feature-off errors,
-static release builds, and, if enabled, browser caps.
+### PR 16 — summary, Markdown and HTML
 
-### PR 16 — adversarial audit and 0.3.0 release
+Crates: `etchy-cli` reporting/templates.
 
-Crates: all affected; docs and CI.
+1. Add bounded human rows and unbounded totals.
+2. Add object tables, filters/details, warnings, accounting and policy statement.
+3. Add click-to-frame metadata in HTML without changing geometry colors.
 
-Run a review focused on CFB/resource attacks, unknown record handling, integer
-overflow, transforms, pours, planes, text, and layer identity. Fix findings in
-separate small PRs. Publish 0.3.0 only after the audit has no unresolved silent
-miss; keep the feature experimental even if usable.
+Tests: snapshots for every object status/kind, truncation, escaping hostile names,
+empty changes, warning-only/partial runs, large list size cap, self-contained HTML,
+cross-format total equality.
 
-## Phase 4: Altium stable gate and 0.4.0
+### PR 17 — desktop viewer Objects panel
 
-Altium may lose the experimental label only when all of these are true:
+Crates: `etchy-gui`.
 
-1. A legally redistributable corpus covers the agreed Altium producer/version
-   range and every requirement in `NCAD-TEST-4`.
-2. Every accepted fixture has independent Gerber/NC/position oracle output and
-   zero unexplained per-layer geometry difference.
-3. Unknown manufacturing records and unsupported plotting rules always fail.
-4. `cargo deny`, supply-chain review, native static builds, Action tests, fuzzing,
-   resource caps, and adversarial review are green.
-5. Parser version/API stability is acceptable to the owner; an exact pin and
-   update policy are documented.
-6. wasm is advertised only if real-browser performance, memory caps, and the
-   same parity corpus pass. Otherwise the web viewer continues to fail loud.
+1. Load native files on a cancellable background task with stage progress.
+2. Add Objects panel, grouping/search/filter/detail and warning navigation.
+3. Selection highlights bounds and layer without moving camera; explicit frame
+   action moves it.
+4. Preserve all locked viewer interactions and colors.
 
-The stabilization PR renames/enables the stable feature, removes experimental
-labels, publishes the support matrix, and updates README, website, CLI/GUI help,
-Action examples, `TRUST.md`, third-party notices, changelog, and release notes.
+Tests: loader states/cancel, filtering, selection/camera invariant, frame action,
+warning navigation, focus/visibility interaction, large virtualized lists,
+existing GUI regression tests.
 
-## CI structure
+### PR 18 — wasm parser and viewer
 
-| Job | Runs on ordinary PRs | Scheduled/manual |
+Crates: `etchy-kicad`, `etchy-gui` wasm.
+
+1. Enable direct browser load and tune measured browser limits.
+2. Yield between stages and support cancellation.
+3. Show exact resource-limit and partial/warning messages.
+4. Measure binary-size and peak-memory changes on Mad_RP2040 and a dense board.
+
+Tests: wasm build, real-browser smoke, synthetic limit boundaries, cancellation,
+no filesystem/process/font lookup, native/wasm deterministic report equivalence,
+memory/time budget checks on supported browsers.
+
+## Phase 5: KiCad release gate
+
+### PR 19 — parity matrix and adversarial audit fixes
+
+Crates: all affected; corpus and CI.
+
+1. Run the complete KiCad 6–10 fixture matrix using pinned producer oracles.
+2. Generate a per-fixture native-vs-export difference ledger. No unexplained
+   polygon, drill, outline or placement delta passes.
+3. Audit unknown tokens, accounting, transforms, fill state, unused-layer pads/
+   vias, font behavior, object ambiguity, overflow and browser amplification.
+4. Fix findings in small follow-up PRs, never by broadening warning allow-lists.
+
+Tests: full matrix plus extended fuzz/property/resource jobs. Exit criterion:
+zero unexplained oracle differences and zero unresolved silent-miss findings.
+
+### PR 20 — documentation and 0.2.0
+
+Files: README, CLI help/reference, requirements, trust, developer guide, website,
+Action docs, schema, notices, changelog and release workflow.
+
+Publish supported header dates and producer versions, native-vs-fab distinction,
+zone/text limitations, warning/error catalog, wasm limits, object non-goal line,
+oracle reproduction and Mad_RP2040 provenance. Release only after static native
+targets, wasm, `cargo deny`, corpus, Action and report-schema checks pass.
+
+## Phase 6: Altium experimental
+
+### PR 21 — pure-Rust reader decision spike
+
+Crate: new `etchy-altium`, feature `native-altium-experimental`.
+
+1. Pin the candidate `altium-format` version and audit its API, dependency tree,
+   licence metadata, unsafe code, CFB bounds and unknown stream/record behavior.
+2. Parse inventory only into the shared accounting model.
+3. Compile native and wasm; measure representative boards.
+4. Compare inventories with separately run `altium_monkey` and Altium where
+   licensed fixtures permit. Do not copy their implementation or bundle them.
+
+Tests: corrupt/cyclic/truncated CFB, stream/record bombs, unknown records,
+licence CI, native target matrix, wasm parse caps. Go/no-go requires that every
+record can be surfaced; otherwise choose or build another pure-Rust reader.
+
+### PR 22 onward — incremental Altium adapters
+
+Land separate PRs for layer stack/outline/simple primitives; pads/vias/component
+transforms/drills/placement; saved pours/planes; mask/paste; text; object IDs;
+CLI/GUI experimental surface. Each supports only oracle-proved cases and errors
+on the rest. Reuse shared object diff/output/viewer code without weakening its
+identity rules.
+
+Release 0.3.0 experimental only after a redistributable corpus, explicit format-
+era matrix, Altium-produced Gerber/drill/position comparisons, resource tests,
+and adversarial review. Stable status waits for zero unexplained differences and
+a supportable pure-Rust dependency/API. wasm is advertised only if browser
+tests pass; feature-gated absence must fail clearly.
+
+## CI layout
+
+| Job | Relevant pull requests | Scheduled/manual |
 |---|---|---|
-| Existing workspace fmt/clippy/test/deny | Yes | Yes |
-| Native adapter unit/property/golden tests | Yes | Yes |
-| wasm compile and browser smoke | Yes once relevant feature is enabled | Yes |
-| Checked-in native-vs-reference-pack comparison | Yes | Yes |
-| Real supported `kicad-cli` matrix | One pinned baseline on relevant PRs | Full supported matrix nightly |
-| Altium Designer oracle regeneration | No; proprietary/manual controlled runner | Before Altium release and parser updates |
-| Fuzz and dense-board/resource tests | Fuzz-lite/capped set | Extended nightly |
+| Existing fmt/clippy/test/deny | every PR | full matrix |
+| Parser/model unit + fuzz-lite | native code | extended fuzz |
+| Known-answer projection/object properties | native code | dense corpus |
+| Checked-in oracle-pack comparison | native code | full corpus |
+| Real pinned KiCad baseline | KiCad behavior changes | KiCad 6–10 matrix |
+| wasm build + browser smoke | native parser/GUI changes | memory/perf matrix |
+| JSON schemas/report snapshots | report changes | compatibility audit |
+| Altium/`altium_monkey` oracle | never required at runtime; controlled relevant CI only | before experimental/stable releases |
 
-## Risks and unknowns
+## Release gates and risks
 
-| Risk | Response |
+| Risk | Required response |
 |---|---|
-| Board file does not identify the fab's actual output options | Name/hash the profile; never claim unknown OutJob/history parity; decide defaults before code. |
-| KiCad external dependency breaks self-contained distribution | Keep fab-pack path first-class, document/install/pin CLI, and make absence actionable. Do not bundle GPL code. |
-| KiCad CLI behavior changes by major/minor | Capability probe, tested allow-list, producer matrix, profile parity, fail on unknown majors. |
-| KiCad wasm cannot spawn CLI | Explicit unsupported message; direct plotter is separate future work if owner makes browser support mandatory. |
-| Altium format is proprietary and reverse-engineered | Experimental feature, exact dependency pin, record accounting, independent producer oracle, narrow supported subset. |
-| `altium-format` is pre-1.0 and undergoing a rewrite | Spike before adoption, wrapper boundary, pinned version, owner go/no-go, no stable claim based on parsing alone. |
-| Saved Altium pours may be absent or stale | Do not use polygon outlines as copper; detect/reject; defer repour. |
-| Text/font output differs from producer | Supported-font subset, no silent fallback, parity corpus, reject unresolved fonts/variables. |
-| Geometry amplification or hostile CFB/S-expression input | Bound bytes, streams, records, points, glyphs, process output/time, and final polygons before allocation where possible. |
-| Public Altium corpus is too small | Stable release waits; seek donated redistributable fixtures and retain proprietary oracle regeneration on controlled runners. |
-| AGPL contamination from `altium-monkey` | No linking, vendoring, translation, or distribution; use only independent black-box validation after legal review. |
+| Parsed syntax mistaken for supported geometry | Support table is token/behavior/fixture based; unknown material data errors. |
+| Saved zone fill absent or stale | No outline substitution; hard error by default; visible partial opt-in; oracle freshness comparison. |
+| Native result mistaken for fab output | Every report states projection policy and unapplied export settings; corpus classifies expected differences. |
+| TrueType/project variable unavailable | Object-only plus visible warning; no fallback font or quiet literal expansion. |
+| Via/pad unused-layer semantics unclear | Ship only oracle-proved cases; fail indeterminate boards. |
+| Object matching mislabels remove/add as move | Stable IDs/references first; unique indexed fallback only; ambiguity remains remove/add with warning. |
+| Large board or hostile file exhausts memory | Pre-amplification ceilings, point/candidate caps, fuzzing, separate measured wasm budgets. |
+| Version 10 or later adds a token | Exact header/token profiles; newer data remains unsupported until reviewed. |
+| Licence contamination | CC0 font provenance, permissive dependencies, `cargo deny`; AGPL oracle stays separate and test-only. |
+| Altium reader is incomplete or unstable | Experimental exact pin, complete record accounting, independent exports, no stable deadline. |
 
-## Documentation checklist for each release
+## Definition of done for KiCad 0.2.0
 
-1. README input matrix and install/runtime prerequisites.
-2. CLI reference for detection, profiles, flags, exit codes, and examples.
-3. Native GUI and browser capability matrix.
-4. GitHub Action setup with pinned producer/parser versions.
-5. Trust/limitations page covering zone/pour state, fonts, profiles, and
-   unsupported producer versions.
-6. Supported-version and export-profile tables with hashes.
-7. Corpus provenance and oracle regeneration guide.
-8. Third-party licence/notice update and `cargo deny` evidence.
-9. Website examples based on a public board, with both native and exported-pack
-   reproduction commands.
-10. Changelog migration notes for profile/schema/feature-flag changes.
+1. All numbered stable requirements selected by the owner are implemented.
+2. Every supported record/token has a disposition and every unknown-material
+   fixture fails with a source-located typed error.
+3. KiCad 6–10 corpus and Mad_RP2040 revisions pass known-answer and oracle tests;
+   every non-zero oracle delta is documented and user-visible where relevant.
+4. Geometry and object reports agree across summary, JSON, Markdown, HTML,
+   desktop and wasm.
+5. Same-board guard, fixed-point determinism, exit codes and existing inputs have
+   regression coverage.
+6. Native and wasm resource limits are published and tested.
+7. Adversarial review has no unresolved silent-miss finding.
+8. Licence/NOTICE review and `cargo deny` pass.
+
