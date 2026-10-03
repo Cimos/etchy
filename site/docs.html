@@ -3,11 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>etchy — docs</title>
-<meta name="description" content="etchy documentation — install, CLI usage, how the diff works, JSON output, CI, the viewer, and trust/limitations.">
+<title>etchy documentation — install, CLI, CI, viewer and trust</title>
+<meta name="description" content="Install etchy v0.1.1, run PCB and schematic diffs, understand CLI and JSON output, configure CI gates, and review viewer and trust details.">
+<meta property="og:url" content="https://cimos.github.io/etchy/docs.html">
+<meta property="og:title" content="etchy documentation — install, CLI, CI, viewer and trust">
+<meta property="og:description" content="Install etchy v0.1.1 and learn its CLI, JSON reports, CI gates, viewer, and trust model.">
+<meta property="og:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="etchy PCB visual and geometric diff">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/brand/etchy-favicon.svg" type="image/svg+xml">
 <link rel="icon" href="assets/brand/etchy-favicon-32.png" sizes="32x32" type="image/png">
-<link rel="canonical" href="https://cimos.github.io/etchy/docs.html">
 <link rel="preload" href="assets/fonts/jetbrains-mono-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="assets/fonts/fonts.css">
 <style>
@@ -21,6 +28,9 @@
   body{background:var(--board);color:var(--ink);font-family:"JetBrains Mono",ui-monospace,monospace;line-height:1.65;-webkit-font-smoothing:antialiased}
   .copper{background:linear-gradient(135deg,var(--copper-1),var(--copper-2) 50%,var(--copper-3));-webkit-background-clip:text;background-clip:text;color:transparent}
   .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  .skip-link{position:fixed;left:16px;top:12px;z-index:1000;transform:translateY(-160%);background:var(--copper-1);color:#1a1206;padding:8px 12px;border-radius:6px;font-weight:700}
+  .skip-link:focus{transform:translateY(0)}
+  :focus-visible{outline:3px solid var(--copper-1);outline-offset:3px}
   h1,h2,h3{font-family:"Zilla Slab",Georgia,serif;font-weight:700;letter-spacing:-.01em}
   a{color:var(--copper-1);text-decoration:none}
   a:hover{text-decoration:underline}
@@ -55,19 +65,19 @@
   footer{padding:34px 0 60px;border-top:1px solid var(--line);color:var(--muted);font-size:13px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;align-items:center}
   footer a{color:var(--muted)}
   @media(max-width:560px){ .navlinks a.collapse{display:none} .lead h1{font-size:32px} }
-  /* install method tabs (CSS-only) */
+  /* install method tabs */
   .insttabs{margin:14px 0 8px}
-  .i-radio{position:absolute;width:0;height:0;opacity:0}
   .i-tabs{display:flex;gap:4px;flex-wrap:wrap}
-  .i-tabs label{font-size:12.5px;color:var(--muted);border:1px solid var(--line);border-bottom:0;border-radius:7px 7px 0 0;padding:6px 14px;cursor:pointer}
-  .i-tabs label:hover{color:var(--ink)}
+  .i-tabs button{font:12.5px "JetBrains Mono",monospace;color:var(--muted);background:none;border:1px solid var(--line);border-bottom:0;border-radius:7px 7px 0 0;padding:6px 14px;cursor:pointer}
+  .i-tabs button:hover{color:var(--ink)}
   .i-panel{display:none}
+  .i-panel.active{display:block}
   .i-panel pre.code{border-radius:0 8px 8px 8px;margin:0}
-  #i-win:checked~.i-tabs label[for=i-win],#i-lin:checked~.i-tabs label[for=i-lin],#i-mac:checked~.i-tabs label[for=i-mac],#i-cargo:checked~.i-tabs label[for=i-cargo],#i-ctr:checked~.i-tabs label[for=i-ctr]{background:rgba(232,163,61,.16);color:var(--copper-1)}
-  #i-win:checked~.p-win,#i-lin:checked~.p-lin,#i-mac:checked~.p-mac,#i-cargo:checked~.p-cargo,#i-ctr:checked~.p-ctr{display:block}
+  .i-tabs button[aria-selected="true"]{background:rgba(232,163,61,.16);color:var(--copper-1)}
 </style>
 </head>
 <body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
 <div class="wrap">
   <header class="topbar">
     <a class="brand" href="index.html" aria-label="etchy — home">
@@ -85,7 +95,7 @@
     <p>How to run etchy, read its output, and trust the result. etchy diffs two revisions of a board's fab output and reports — and measures — what changed.</p>
   </div>
 
-  <main>
+  <main id="main-content">
   <section id="overview">
     <span class="eyebrow">Overview</span>
     <h2>What etchy is</h2>
@@ -99,40 +109,35 @@
     <p>The <code class="inline">etchy</code> command-line tool ships as a single self-contained binary per OS (the <code class="inline">etchy-cli-…</code> archives), plus a distroless container. Grab the archive for your platform from <a href="https://github.com/Cimos/etchy/releases">Releases</a> — the commands below name the current release, so swap the version if you take a later one.</p>
 
     <div class="insttabs">
-      <input type="radio" name="inst" id="i-win" class="i-radio" checked>
-      <input type="radio" name="inst" id="i-lin" class="i-radio">
-      <input type="radio" name="inst" id="i-mac" class="i-radio">
-      <input type="radio" name="inst" id="i-cargo" class="i-radio">
-      <input type="radio" name="inst" id="i-ctr" class="i-radio">
-      <div class="i-tabs">
-        <label for="i-win">Windows</label>
-        <label for="i-lin">Linux</label>
-        <label for="i-mac">macOS</label>
-        <label for="i-cargo">Cargo</label>
-        <label for="i-ctr">Container</label>
+      <div class="i-tabs" role="tablist" aria-label="Install method">
+        <button type="button" id="i-win" role="tab" aria-selected="true" aria-controls="p-win">Windows</button>
+        <button type="button" id="i-lin" role="tab" aria-selected="false" aria-controls="p-lin" tabindex="-1">Linux</button>
+        <button type="button" id="i-mac" role="tab" aria-selected="false" aria-controls="p-mac" tabindex="-1">macOS</button>
+        <button type="button" id="i-cargo" role="tab" aria-selected="false" aria-controls="p-cargo" tabindex="-1">Cargo</button>
+        <button type="button" id="i-ctr" role="tab" aria-selected="false" aria-controls="p-ctr" tabindex="-1">Container</button>
       </div>
-      <div class="i-panel p-win"><pre class="code"><span class="c"># PowerShell — unpack the archive, then add the folder to your PATH</span>
+      <div class="i-panel p-win active" id="p-win" role="tabpanel" aria-labelledby="i-win"><pre class="code"><span class="c"># PowerShell — unpack the archive, then add the folder to your PATH</span>
 Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.1.1/etchy-cli-v0.1.1-windows-x86_64.zip -OutFile etchy.zip
 Expand-Archive etchy.zip -DestinationPath .
 .\etchy-cli-v0.1.1-windows-x86_64\etchy.exe --version</pre></div>
-      <div class="i-panel p-lin"><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
+      <div class="i-panel p-lin" id="p-lin" role="tabpanel" aria-labelledby="i-lin" hidden><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
 curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.1/etchy-cli-v0.1.1-linux-x86_64.tar.gz
 tar xzf etchy-cli-v0.1.1-linux-x86_64.tar.gz
 sudo mv etchy-cli-v0.1.1-linux-x86_64/etchy /usr/local/bin/</pre></div>
-      <div class="i-panel p-mac"><pre class="code"><span class="c"># Apple Silicon — use …-macos-x86_64.tar.gz on Intel</span>
+      <div class="i-panel p-mac" id="p-mac" role="tabpanel" aria-labelledby="i-mac" hidden><pre class="code"><span class="c"># Apple Silicon — use …-macos-x86_64.tar.gz on Intel</span>
 curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.1/etchy-cli-v0.1.1-macos-aarch64.tar.gz
 tar xzf etchy-cli-v0.1.1-macos-aarch64.tar.gz
 sudo mv etchy-cli-v0.1.1-macos-aarch64/etchy /usr/local/bin/</pre></div>
-      <div class="i-panel p-cargo"><pre class="code"><span class="c"># from a clone — etchy is not on crates.io yet</span>
+      <div class="i-panel p-cargo" id="p-cargo" role="tabpanel" aria-labelledby="i-cargo" hidden><pre class="code"><span class="c"># from a clone — etchy is not on crates.io yet</span>
 git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy
 cargo install --path crates/etchy-cli --features pdf</pre></div>
-      <div class="i-panel p-ctr"><pre class="code"><span class="c"># distroless, ~11 MB, no shell or libc inside</span>
+      <div class="i-panel p-ctr" id="p-ctr" role="tabpanel" aria-labelledby="i-ctr" hidden><pre class="code"><span class="c"># distroless, no shell or libc inside</span>
 docker pull ghcr.io/cimos/etchy:v0.1.1
 docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.1 --format summary -- /work/old /work/new</pre></div>
     </div>
 
     <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS).</p>
-    <p>The <strong>desktop viewer</strong> has its own installers on the <a href="https://github.com/Cimos/etchy/releases">Releases</a> page: <code class="inline">etchy-viewer-…-windows-x86_64.msi</code>, <code class="inline">…-macos-aarch64.dmg</code> (Apple Silicon), and <code class="inline">…-linux-x86_64.AppImage</code> or <code class="inline">.deb</code>. The <code class="inline">.msi</code>, <code class="inline">.dmg</code> (via Homebrew) and <code class="inline">.deb</code> also put the <code class="inline">etchy</code> command-line tool on your PATH. On macOS, <code class="inline">brew install --cask cimos/etchy/etchy</code> does the same. The installers are not code-signed yet: Windows shows a SmartScreen prompt (More info, then Run anyway) and macOS asks you to allow the app once in System Settings, Privacy &amp; Security. The same viewer also builds to WebAssembly and runs in a browser; see <code class="inline">deploy/</code> in the repo.</p>
+    <p>The <strong>desktop viewer</strong> has its own installers on the <a href="https://github.com/Cimos/etchy/releases">Releases</a> page: <code class="inline">etchy-viewer-v0.1.1-windows-x86_64.msi</code>, <code class="inline">etchy-viewer-v0.1.1-macos-aarch64.dmg</code> (Apple Silicon), <code class="inline">etchy-viewer-v0.1.1-linux-x86_64.AppImage</code>, and <code class="inline">etchy-viewer-v0.1.1-linux-x86_64.deb</code>. The MSI and DEB add the <code class="inline">etchy</code> CLI to PATH; Homebrew links it on macOS with <code class="inline">brew install --cask cimos/etchy/etchy</code>. The AppImage and a DMG opened directly do not put the CLI on PATH. The installers are not code-signed yet: Windows shows a SmartScreen prompt (More info, then Run anyway) and macOS asks you to allow the app once in System Settings, Privacy &amp; Security. A browser build exists, but no hosted viewer is offered yet.</p>
   </section>
 
   <section id="cli">
@@ -148,11 +153,17 @@ top-copper       changed           <span class="add">80.16495</span>    <span cl
 inner-copper1    changed            <span class="add">6.47136</span>     <span class="rem">67.29263</span>        46        82
 inner-copper2    changed           <span class="add">11.24153</span>     <span class="rem">95.33530</span>        57        86
 bottom-copper    changed           <span class="add">72.85102</span>     <span class="rem">91.27871</span>       642       494
-…
+top-mask         changed            <span class="add">2.93706</span>     <span class="rem">28.30328</span>         6        12
+bottom-mask      changed            <span class="add">5.45812</span>     <span class="rem">30.82435</span>        18        24
+bottom-silk      changed            <span class="add">1.19345</span>      <span class="rem">0.80759</span>        10         9
+bottom-paste     changed            <span class="add">4.25040</span>      <span class="rem">4.25040</span>        16        16
+drill-npth       changed           <span class="add">26.05755</span>      <span class="rem">0.63200</span>         8         2
+drill            changed            <span class="add">2.67094</span>      <span class="rem">1.99073</span>        31        17
 top-silk         unchanged          0.00000      0.00000         0         0
+top-paste        unchanged          0.00000      0.00000         0         0
 outline          unchanged          0.00000      0.00000         0         0
 
-10 of 13 layer(s) changed; total <span class="add">+264.02884</span> mm² / <span class="rem">-397.96791</span> mm² (979+/851- regions)
+10 of 13 layer(s) changed; total <span class="add">+213.29638</span> mm² / <span class="rem">-448.70036</span> mm² (967+/863- regions)
 result: differences found</pre>
 
     <h3 style="font-size:17px;margin:22px 0 4px">Every flag</h3>
@@ -167,7 +178,7 @@ result: differences found</pre>
       <tr><td><code>--html &lt;FILE&gt;</code></td><td>Write a single self-contained HTML report: totals, warnings, and every changed layer's overlay inlined. No external assets, so it travels as one file.</td></tr>
       <tr><td><code>--fail-on-area &lt;MM2&gt;</code></td><td>CI gate: exit 1 only when the changed area on the gated layers exceeds this many mm². With neither threshold set, any change on the gated layers fails.</td></tr>
       <tr><td><code>--fail-on-regions &lt;N&gt;</code></td><td>CI gate on the changed region count instead. Set both and either one being exceeded fails.</td></tr>
-      <tr><td><code>--gate-layers &lt;SPEC&gt;</code></td><td>Which layers the gate looks at: <code>all</code> (default), or a comma list of <code>copper</code>, <code>mask</code>, <code>silk</code>, <code>paste</code>, <code>drill</code>, <code>outline</code>, <code>documentation</code>, <code>other</code>. An unknown name is a loud error, never a silently disarmed gate.</td></tr>
+      <tr><td><code>--gate-layers &lt;SPEC&gt;</code></td><td>Which layers the gate looks at: <code>all</code> (default), or a comma list of <code>copper</code>, <code>mask</code>, <code>silk</code>, <code>paste</code>, <code>drill</code>, <code>outline</code>, <code>documentation</code>, <code>placement</code>, <code>other</code>. An unknown name is a loud error, never a silently disarmed gate.</td></tr>
       <tr><td><code>--dpi &lt;DPI&gt;</code></td><td>PDF inputs only: rasterization resolution, default 150. Higher is crisper but costs memory and time (per-page pixel area is capped).</td></tr>
       <tr><td><code>--out &lt;DIR&gt;</code></td><td>PDF inputs only: write one overlay PNG per diffed page (<code>page-&lt;n&gt;.png</code>) into this directory.</td></tr>
       <tr><td><code>--min-region-px &lt;N&gt;</code></td><td>PDF inputs only: keep changed regions under N connected pixels out of the overlay as likely anti-aliasing noise. Default 1, which hides nothing. Anything hidden is still counted and still reported — the floor can never produce a silent “no differences”.</td></tr>
@@ -218,29 +229,46 @@ result: differences found</pre>
     <span class="eyebrow">JSON output</span>
     <h2>Machine-readable report</h2>
     <p><code class="inline">--format json</code> emits a versioned report to stdout — totals, a per-layer array, any warnings, and the CI gate's verdict. <code class="inline">schema_version</code> is the integration contract: it only changes when the shape does.</p>
+    <p>The shortened excerpt below is from v0.1.1 running on the bundled Mad_RP2040 revisions. It omits the remaining 12 layer objects; the CLI emits those entries in full.</p>
     <pre class="code">{
   <span class="k">"schema_version"</span>: 1,
-  <span class="k">"tool_version"</span>: "0.1.0",
+  <span class="k">"tool_version"</span>: "0.1.1",
   <span class="k">"any_changes"</span>: true,
   <span class="k">"totals"</span>: {
-    <span class="k">"added_area_mm2"</span>: 19.60, <span class="k">"removed_area_mm2"</span>: 19.60,
-    <span class="k">"added_regions"</span>: 100, <span class="k">"removed_regions"</span>: 100,
-    <span class="k">"layers_changed"</span>: 2, <span class="k">"layers_total"</span>: 22
+    <span class="k">"added_area_mm2"</span>: 213.29638332272705,
+    <span class="k">"removed_area_mm2"</span>: 448.70035870814803,
+    <span class="k">"added_regions"</span>: 967,
+    <span class="k">"removed_regions"</span>: 863,
+    <span class="k">"layers_changed"</span>: 10,
+    <span class="k">"layers_total"</span>: 13
   },
   <span class="k">"layers"</span>: [
     {
-      <span class="k">"kind"</span>: "top-copper", <span class="k">"inner_index"</span>: null,
-      <span class="k">"label_old"</span>: "F_Cu.gbr", <span class="k">"label_new"</span>: "F_Cu.gbr",
+      <span class="k">"kind"</span>: "top-copper",
+      <span class="k">"inner_index"</span>: null,
+      <span class="k">"label_old"</span>: "Mad_RP2040.gtl",
+      <span class="k">"label_new"</span>: "Mad_RP2040.gtl",
       <span class="k">"status"</span>: "changed",
-      <span class="k">"added_area_mm2"</span>: 19.60, <span class="k">"removed_area_mm2"</span>: 0.0,
-      <span class="k">"added_area_nm2"</span>: "19603417231600", <span class="k">"removed_area_nm2"</span>: "0",
-      <span class="k">"added_regions"</span>: 100, <span class="k">"removed_regions"</span>: 0
+      <span class="k">"added_area_mm2"</span>: 80.164947763418,
+      <span class="k">"removed_area_mm2"</span>: 127.985358716367,
+      <span class="k">"added_area_nm2"</span>: "80164947763418",
+      <span class="k">"removed_area_nm2"</span>: "127985358716367",
+      <span class="k">"added_regions"</span>: 133,
+      <span class="k">"removed_regions"</span>: 121
     }
   ],
-  <span class="k">"warnings"</span>: [],
+  <span class="k">"warnings"</span>: [
+    "old Mad_RP2040.gbs: negative-polarity image (%TF.FilePolarity,Negative) — added/removed are reported as material, not as drawn objects",
+    "old Mad_RP2040.gts: negative-polarity image (%TF.FilePolarity,Negative) — added/removed are reported as material, not as drawn objects",
+    "new Mad_RP2040.gbs: negative-polarity image (%TF.FilePolarity,Negative) — added/removed are reported as material, not as drawn objects",
+    "new Mad_RP2040.gts: negative-polarity image (%TF.FilePolarity,Negative) — added/removed are reported as material, not as drawn objects"
+  ],
   <span class="k">"gate"</span>: {
-    <span class="k">"configured"</span>: false, <span class="k">"passed"</span>: false, <span class="k">"scope"</span>: "all layers",
-    <span class="k">"changed_area_mm2"</span>: 39.20, <span class="k">"changed_regions"</span>: 200
+    <span class="k">"configured"</span>: false,
+    <span class="k">"passed"</span>: false,
+    <span class="k">"scope"</span>: "all layers",
+    <span class="k">"changed_area_mm2"</span>: 661.996742030875,
+    <span class="k">"changed_regions"</span>: 1830
   }
 }</pre>
     <p>Areas are given both as mm² (float) and exact nm² (integer string, for lossless thresholds). <code class="inline">status</code> is <code class="inline">changed</code> or <code class="inline">unchanged</code>. <code class="inline">gate</code> reports what the CI thresholds looked at and how it ruled, so a pipeline can log the verdict without re-deriving it. A PDF diff reports per-page rows instead of layers, plus how the two revisions' pages were paired.</p>
@@ -256,13 +284,13 @@ result: differences found</pre>
     <pre class="code">- name: PCB diff
   run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
     <p>The gate names its verdict on stderr — <code class="inline">etchy: gate FAIL — copper: changed 552.6209 mm², 1661 regions</code> — and repeats it in the JSON, so why a build passed or failed is on the record. When a gate is configured and the change comes in under it, etchy exits 0 even though it found differences. That is the point of the gate.</p>
-    <p><strong>Or add the Action.</strong> Five lines, and every pull request that touches Gerbers gets a layer-by-layer table posted as a sticky comment for that input pair (edited in place on each push, not re-posted):</p>
+    <p><strong>Or add the Action.</strong> The five-line Action block below needs the trigger and permissions from the <a href="https://github.com/Cimos/etchy/blob/main/docs/ci-recipes/etchy-pr-diff.yml">full pull-request recipe</a>. It posts a layer-by-layer table as a sticky comment for that input pair (edited in place on each push, not re-posted):</p>
     <pre class="code">- uses: Cimos/etchy@v0.1.1
   with:
     old: fab/rev-a
     new: fab/rev-b
     comment: true</pre>
-    <p>The job needs <code class="inline">pull-requests: write</code>; etchy supplies its own token. Set <code class="inline">fail-on-diff: false</code> to report without failing the step, and read <code class="inline">outputs.changed</code> to branch on the result. Nothing leaves the runner — no service, no upload — so it works the same on a self-hosted or air-gapped runner. The Action compiles etchy on the runner, so budget a build the first time; the full recipe is in <code class="inline">docs/ci-recipes/etchy-pr-diff.yml</code>.</p>
+    <p>The job needs <code class="inline">pull-requests: write</code>; etchy supplies its own token. Set <code class="inline">fail-on-diff: false</code> to report without failing the step, and read <code class="inline">outputs.changed</code> to branch on the result. The diff itself uses no hosted service. Posting a PR comment uses the GitHub API, so <code class="inline">comment: true</code> needs network access and does not work on a fully air-gapped runner. The Action compiles etchy on the runner, so budget a build the first time.</p>
     <p>Feeding a CI step summary or another tool by hand instead? <code class="inline">--format md</code> writes the same table as GitHub Markdown, and <code class="inline">--format json</code> gives the numbers.</p>
   </section>
 
@@ -304,16 +332,41 @@ result: differences found</pre>
       <li><strong>Inputs:</strong> Gerber RS-274X/X2, Excellon drill, pick-and-place centroid files (moved, rotated, added and removed parts diff as placement geometry — not as a BOM), and schematic PDFs page by page.</li>
       <li><strong>Nothing is hidden silently.</strong> A real change too small to draw to scale becomes a fixed-size marker dot rather than disappearing, and anything the noise filter suppresses is counted and shown on screen.</li>
       <li><strong>Non-goals:</strong> net/connectivity diff, BOM/component diff, DRC, and Altium / IPC-2581 / ODB++ ingestion. etchy diffs fab output — it isn't an ECAD review tool.</li>
-      <li><strong>One exception, later:</strong> reading KiCad <code class="inline">.kicad_pcb</code> files directly is accepted for after 1.0, so KiCad users can skip the Gerber export. KiCad <em>schematic</em> diff stays out — that's connectivity, a different tool.</li>
+      <li><strong>Next parser milestone:</strong> native KiCad <code class="inline">.kicad_pcb</code> input is planned for 0.2.0, so KiCad users can skip the Gerber export. KiCad <em>schematic</em> diff stays out — that's connectivity, a different tool.</li>
     </ul>
   </section>
   </main>
 
   <footer>
     <svg width="22" height="22" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="cf" gradientUnits="userSpaceOnUse" x1="20" y1="18" x2="100" y2="102"><stop offset="0" stop-color="#f6c873"/><stop offset=".5" stop-color="#e8a33d"/><stop offset="1" stop-color="#b9762a"/></linearGradient></defs><g fill="url(#cf)"><rect x="24" y="26" width="16" height="17" rx="1.5"/><rect x="24" y="48" width="16" height="21" rx="1.5"/><rect x="24" y="74" width="16" height="20" rx="1.5"/><rect x="24" y="26" width="26" height="16" rx="1.5"/><rect x="55" y="26" width="19" height="16" rx="1.5"/><rect x="24" y="52" width="40" height="14" rx="1.5"/><rect x="24" y="78" width="26" height="16" rx="1.5"/><rect x="55" y="78" width="19" height="16" rx="1.5"/></g><circle cx="92" cy="86" r="9" fill="none" stroke="url(#cf)" stroke-width="1.8"/><circle cx="92" cy="86" r="3.6" fill="url(#cf)"/></svg>
-    <div>MIT / Apache-2.0 · open source · © <a href="https://github.com/Cimos" target="_blank" rel="noopener">Cimos</a></div>
-    <div><a href="index.html">Home</a> · <a href="https://github.com/Cimos/etchy" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/Cimos/Gerber-Diff-Tool" target="_blank" rel="noopener">gerber-diff</a></div>
+    <div><a href="https://github.com/Cimos/etchy/blob/main/LICENSE-MIT">MIT</a> / <a href="https://github.com/Cimos/etchy/blob/main/LICENSE-APACHE">Apache-2.0</a> · open source · © <a href="https://github.com/Cimos" target="_blank" rel="noopener">Cimos</a></div>
+    <div><a href="index.html">Home</a> · <a href="https://github.com/Cimos/etchy/issues">Issues</a> · <a href="https://github.com/Cimos/etchy/releases">Releases</a> · <a href="https://github.com/Cimos/etchy/blob/main/docs/TRUST.md">Trust</a></div>
   </footer>
 </div>
+<script>
+(function () {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.i-tabs [role="tab"]'));
+  function selectTab(tab) {
+    tabs.forEach(function (item) {
+      var selected = item === tab;
+      var panel = document.getElementById(item.getAttribute('aria-controls'));
+      item.setAttribute('aria-selected', selected ? 'true' : 'false');
+      item.tabIndex = selected ? 0 : -1;
+      panel.hidden = !selected;
+      panel.classList.toggle('active', selected);
+    });
+  }
+  tabs.forEach(function (tab, index) {
+    tab.addEventListener('click', function () { selectTab(tab); });
+    tab.addEventListener('keydown', function (event) {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      event.preventDefault();
+      var next = (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+      selectTab(tabs[next]);
+      tabs[next].focus();
+    });
+  });
+}());
+</script>
 </body>
 </html>

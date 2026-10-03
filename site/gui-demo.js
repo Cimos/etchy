@@ -1,6 +1,5 @@
 /* etchy GUI viewer demo — drives the hero "GUI" tab.
- * Renders simple example geometry per layer and per view mode (overlay / before /
- * after / split). Pure vanilla; no dependencies. Degrades gracefully: if anything
+ * Renders simple example geometry per layer and per view mode. Pure vanilla; no dependencies. Degrades gracefully: if anything
  * is missing the page just shows an empty canvas.
  */
 (function () {
@@ -49,12 +48,20 @@
     var p = ['<svg viewBox="0 0 520 200" xmlns="http://www.w3.org/2000/svg"><rect width="520" height="200" fill="#0e1413"/>'];
     if (cur.mode === "overlay") {
       p.push(grp(L.base, NEUTRAL, 5), grp(L.added, GREEN, 6), grp(L.removed, RED, 6));
-    } else if (cur.mode === "before") {
-      // revA = unchanged geometry + the parts that were later removed
+    } else if (cur.mode === "old") {
       p.push(grp(L.base, NEUTRAL, 5), grp(L.removed, NEUTRAL, 5));
-    } else if (cur.mode === "after") {
-      // revB = unchanged geometry + the parts that were added
+    } else if (cur.mode === "new") {
       p.push(grp(L.base, NEUTRAL, 5), grp(L.added, NEUTRAL, 5));
+    } else if (cur.mode === "split") {
+      p.push('<g transform="translate(0 45) scale(.48)">', grp(L.base, NEUTRAL, 5), grp(L.removed, NEUTRAL, 5), '</g>');
+      p.push('<line x1="260" y1="12" x2="260" y2="188" stroke="#23302d"/>');
+      p.push('<g transform="translate(270 45) scale(.48)">', grp(L.base, NEUTRAL, 5), grp(L.added, NEUTRAL, 5), '</g>');
+      p.push('<text x="12" y="25" fill="#8b9491" font-size="12">Old</text><text x="282" y="25" fill="#8b9491" font-size="12">New</text>');
+    } else if (cur.mode === "swipe") {
+      p.push('<defs><clipPath id="old-half"><rect width="260" height="200"/></clipPath><clipPath id="new-half"><rect x="260" width="260" height="200"/></clipPath></defs>');
+      p.push('<g clip-path="url(#old-half)">', grp(L.base, NEUTRAL, 5), grp(L.removed, NEUTRAL, 5), '</g>');
+      p.push('<g clip-path="url(#new-half)">', grp(L.base, NEUTRAL, 5), grp(L.added, NEUTRAL, 5), '</g>');
+      p.push('<line x1="260" y1="0" x2="260" y2="200" stroke="#f6c873" stroke-width="3"/><circle cx="260" cy="100" r="8" fill="#f6c873"/>');
     }
     p.push("</svg>");
     canvas.innerHTML = p.join("");
@@ -62,8 +69,12 @@
 
   function activate(wrap, el) {
     var items = wrap.children;
-    for (var i = 0; i < items.length; i++) items[i].classList.remove("active");
+    for (var i = 0; i < items.length; i++) {
+      items[i].classList.remove("active");
+      items[i].setAttribute("aria-pressed", "false");
+    }
     el.classList.add("active");
+    el.setAttribute("aria-pressed", "true");
   }
 
   layersWrap.addEventListener("click", function (e) {
@@ -79,6 +90,28 @@
     cur.mode = b.getAttribute("data-mode");
     activate(modesWrap, b);
     render();
+  });
+
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(".hp-tab"));
+  function selectTab(tab) {
+    tabs.forEach(function (item) {
+      var selected = item === tab;
+      var panel = document.getElementById(item.getAttribute("aria-controls"));
+      item.setAttribute("aria-selected", selected ? "true" : "false");
+      item.tabIndex = selected ? 0 : -1;
+      panel.hidden = !selected;
+      panel.classList.toggle("active", selected);
+    });
+  }
+  tabs.forEach(function (tab, index) {
+    tab.addEventListener("click", function () { selectTab(tab); });
+    tab.addEventListener("keydown", function (event) {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      var next = (index + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length;
+      selectTab(tabs[next]);
+      tabs[next].focus();
+    });
   });
 
   render();
