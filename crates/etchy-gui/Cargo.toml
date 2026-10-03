@@ -104,7 +104,7 @@ homepage = "https://cimos.github.io/etchy/"
 description = "Visual and geometric diff viewer for PCB Gerber, drill and PDF revisions"
 category = "DeveloperTool"
 license-file = "../../LICENSE-MIT"
-icons = ["../../assets/brand/png/etchy-app-icon-512.png"]
+icons = ["../../assets/brand/etchy-app-icon.ico", "../../assets/brand/png/etchy-app-icon-512.png"]
 out-dir = "../../target/packager"
 # The installers carry the `etchy` command-line tool too, on PATH: /usr/bin in
 # the .deb, the install folder in the .msi, and a brew `binary` link on macOS.
