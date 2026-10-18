@@ -70,7 +70,7 @@ jobs:
           test -n "$(ls -A corpus/synthetic/revB 2>/dev/null)"
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       # The PDF path is behind an off-by-default feature, so `--workspace` alone
       # never compiles the etchy-pdf engine tests or the PDF CLI contract tests
@@ -79,14 +79,14 @@ jobs:
       - name: Test (pdf feature)
         run: |
           set -euo pipefail
-          cargo test --workspace --features pdf
-          cargo test -p etchy-cli --features pdf
+          cargo test --locked --workspace --features pdf
+          cargo test --locked -p etchy-cli --features pdf
 
       - name: rustfmt
         run: cargo fmt --all --check
 
       - name: clippy (warnings are errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   # Windows (2x) and macOS (10x) minutes are expensive, so the cross-platform
   # build+test only runs on pushes to main — not on every PR iteration. PRs get
@@ -127,7 +127,7 @@ jobs:
       # regenerate the corpus here — that step relied on python3, which the
       # GitHub-hosted Windows runner doesn't provide, and on a bash-only guard.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   wasm:
     name: web build (wasm)
