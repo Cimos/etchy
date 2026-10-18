@@ -571,8 +571,10 @@ pub(crate) mod fixtures {
         /// Ink pixels on the sheet (luma at or below the digest's threshold).
         pub fn ink_px(&self) -> u64 {
             self.rgba
-                .chunks_exact(4)
-                .filter(|p| luma(p) <= INK_MAX_LUMA)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| luma(&p[..]) <= INK_MAX_LUMA)
                 .count() as u64
         }
     }

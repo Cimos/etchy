@@ -205,6 +205,61 @@ jobs:
           test -f crates/etchy-gui/dist/etchy-gui_bg.wasm
           test -f crates/etchy-gui/dist/etchy-gui.js
 
+  # Every other job builds on floating `stable`, so without this nothing proves
+  # the declared `rust-version`s still hold (#350). The toolchain is read from the
+  # manifest itself so the check can't drift from what we promise. `cargo +<ver>`
+  # is explicit because rust-toolchain.toml would otherwise force `stable`.
+  msrv:
+    name: MSRV check (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core + cli + kicad
+            manifests: Cargo.toml
+            args: -p etchy-core -p etchy-cli -p etchy-kicad
+          - group: gui + pdf
+            manifests: crates/etchy-gui/Cargo.toml crates/etchy-pdf/Cargo.toml
+            args: -p etchy-gui -p etchy-pdf -p etchy-cli --features etchy-gui/pdf,etchy-pdf/pdf,etchy-cli/pdf
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Read declared rust-version
+        id: msrv
+        run: |
+          set -euo pipefail
+          ver=
+          for m in ${{ matrix.manifests }}; do
+            v=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$m")
+            test -n "$v" || { echo "no rust-version in $m" >&2; exit 1; }
+            if [ -n "$ver" ] && [ "$v" != "$ver" ]; then
+              echo "rust-version mismatch in this group: $m=$v vs $ver" >&2; exit 1
+            fi
+            ver=$v
+          done
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "MSRV for ${{ matrix.group }}: $ver"
+
+      - name: Install Rust (MSRV)
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo + target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-msrv-${{ steps.msrv.outputs.version }}-
+
+      - name: cargo check at MSRV
+        run: cargo +${{ steps.msrv.outputs.version }} check --locked ${{ matrix.args }}
+
   deny:
     name: cargo-deny (licenses, advisories, bans)
     runs-on: ubuntu-latest

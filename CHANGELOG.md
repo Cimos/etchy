@@ -9,6 +9,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Changed
+- Minimum supported Rust raised to the versions the locked dependencies actually
+  need: 1.88 for `etchy-core` / `etchy-cli` / `etchy-kicad` (was 1.75) and
+  1.92 for `etchy-gui` / `etchy-pdf` (was 1.85). The old values no longer
+  built. A new CI job checks both, so they can't go stale again (#350).
+
 ## [0.1.1] — 2026-10-03
 
 ### Added
