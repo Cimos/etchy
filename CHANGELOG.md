@@ -9,6 +9,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- **G74 arc with coincident endpoints now fails loud:** a single-quadrant (`G74`)
+  arc whose end point equals its start point was accepted and tessellated as a
+  full 360° ring of copper, although the mode only allows sweeps of ≤ 90°. It is
+  now rejected as `Unsupported` (stroked and region arcs alike); a `G75` full
+  circle is unaffected (#321).
+
 ## [0.1.1] — 2026-10-03
 
 ### Added

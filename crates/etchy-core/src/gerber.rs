@@ -651,6 +651,12 @@ impl<'a> Machine<'a> {
             Some(QuadrantMode::Multi) => Ok((fx + i, fy + j)),
             // Single-quadrant (G74): I/J are magnitudes; pick the valid <=90° corner
             // or fail loud on an inconsistent arc rather than render a wrong centre.
+            // A coincident start/end is a 0° or 360° sweep — neither fits the ≤90°
+            // mode, and `arc_points` would turn it into a full ring (#321).
+            Some(QuadrantMode::Single) if to == self.cur => Err(unsupported(
+                "G74 single-quadrant arc with coincident start and end points \
+                 (ambiguous zero-length vs full circle; use G75 for a full circle)",
+            )),
             Some(QuadrantMode::Single) => geom::single_quadrant_center(
                 fx,
                 fy,
@@ -1671,6 +1677,63 @@ mod tests {
         assert!(
             (a74 - a75).abs() > 0.1,
             "G74 area {a74} and G75 area {a75} must differ (mode was ignored?)"
+        );
+    }
+
+    #[test]
+    fn g74_coincident_arc_fails_loud() {
+        // #321: a G74 arc whose end equals its start is a 0° or 360° sweep — neither
+        // fits the ≤90° mode. Pre-fix it was accepted (sweep 0 ≤ max) and then
+        // `arc_points` turned 0 into 2π, silently adding a full ring of copper.
+        let r = 1_000_000;
+        let stroked = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG74*\n\
+             X{r}Y0D02*\nG03*\nX{r}Y0I{r}J0D01*\nM02*\n"
+        );
+        match resolve_layer(stroked.as_bytes()) {
+            Err(EngineError::Unsupported { feature }) => assert!(
+                feature.contains("coincident start and end"),
+                "message must name the coincident endpoints: {feature}"
+            ),
+            other => panic!("coincident G74 stroked arc must fail loud, got {other:?}"),
+        }
+        // The same inside a region (G36/G37) takes the region path and must too.
+        let region = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG74*\nG36*\n\
+             X{r}Y0D02*\nG02*\nX{r}Y0I{r}J0D01*\nG37*\nM02*\n"
+        );
+        assert!(
+            matches!(
+                resolve_layer(region.as_bytes()),
+                Err(EngineError::Unsupported { feature }) if feature.contains("coincident")
+            ),
+            "coincident G74 region arc must fail loud"
+        );
+    }
+
+    #[test]
+    fn g75_coincident_arc_is_full_circle() {
+        // #321 guard: under G75 a coincident start/end is a legitimate 360° arc.
+        let r = 1_000_000;
+        let region = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG75*\nG36*\n\
+             X{r}Y0D02*\nG03*\nX{r}Y0I-{r}J0D01*\nG37*\nM02*\n"
+        );
+        let a = area_mm2(&region);
+        let disk = std::f64::consts::PI;
+        assert!(
+            (a - disk).abs() < 0.02,
+            "G75 full-circle region {a} vs {disk}"
+        );
+        let stroked = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG75*\n\
+             X{r}Y0D02*\nG03*\nX{r}Y0I-{r}J0D01*\nM02*\n"
+        );
+        // 0.1 mm wide ring of mean radius 1 mm: 2π·1·0.1 ≈ 0.628 mm².
+        let ring = area_mm2(&stroked);
+        assert!(
+            (ring - 0.2 * disk).abs() < 0.02,
+            "G75 full-circle ring {ring}"
         );
     }
 
