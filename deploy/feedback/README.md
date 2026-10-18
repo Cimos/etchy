@@ -13,7 +13,9 @@ records the client IP and User-Agent in the files it writes locally.
   removed and the demo URL genericised. The feedback text is intact.
 - Triage everything with **`python3 deploy/collect-feedback.py`**. To prepare a
   single stream for sharing, **`python3 deploy/collect-feedback.py --merged`**
-  de-duplicates and time-sorts all local logs, emits JSONL to stdout, and omits
+  de-duplicates (dropping only copies of the same submission, matched by its
+  server `id` or, for older records, by full content), time-sorts all local
+  logs, emits JSONL to stdout, and omits
   only the collector's temporary `_src` field. It does **not** scrub the IP,
   User-Agent, tester name, or URL; remove those identifying fields from its
   output before sharing it.

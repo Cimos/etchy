@@ -5,7 +5,10 @@ Usage:  python etchy-server.py [PORT] [ROOT]
 Serves ROOT (default: this script's dir) on 127.0.0.1:PORT (default 8080).
 Set ETCHY_BIND=0.0.0.0 to serve the LAN.
 Feedback records are appended as one JSON object per line, stamped with the
-server time, client IP and User-Agent. The feedback file, the screenshots/
+server time, client IP, User-Agent and a unique server-made "id". POST bodies
+need a Content-Length (411 without, 400 if invalid) of at most MAX_BODY bytes,
+with at most MAX_SHOTS screenshots of MAX_SHOT_BYTES each once decoded; over a
+limit is 413 and nothing is written. The feedback file, the screenshots/
 directory beside it and this script are never served over GET or HEAD: every
 request path is resolved to a real file first (percent-decoding, "." and "//"
 included) and compared against those locations, and directory listings are
@@ -18,11 +21,13 @@ Feedback file location (in priority order):
   2. ROOT/feedback.jsonl  — default (next to the served bundle).
 """
 import base64
+import binascii
 import datetime
 import json
 import os
 import sys
 import threading
+import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
@@ -37,6 +42,40 @@ SCRIPT = os.path.abspath(__file__)
 # holds a copy of this script; the feedback file may have been renamed).
 BLOCKED_NAMES = {"feedback.jsonl", "etchy-server.py", os.path.basename(FEEDBACK)}
 _lock = threading.Lock()
+
+# POST /feedback limits (#250). The server may face the LAN, so one request must
+# not be able to exhaust memory or disk. Over-limit requests get 413.
+MAX_BODY = 16 * 1024 * 1024  # whole request body, bytes
+MAX_SHOT_BYTES = 8 * 1024 * 1024  # one decoded screenshot, bytes
+MAX_SHOTS = 8  # screenshots per submission
+
+
+class ShotTooLarge(Exception):
+    pass
+
+
+def decode_shot(durl):
+    """Decode a data:image/... URL to (ext, bytes).
+
+    Returns None if it is not valid base64. Raises ShotTooLarge if the decoded
+    image would exceed MAX_SHOT_BYTES (checked before decoding).
+    """
+    header, sep, b64 = durl.partition(",")
+    if not sep or ";base64" not in header:
+        return None
+    b64 = "".join(b64.split())  # tolerate wrapped base64
+    if len(b64) // 4 * 3 > MAX_SHOT_BYTES + 3:
+        raise ShotTooLarge()
+    try:
+        img = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not img:
+        return None
+    if len(img) > MAX_SHOT_BYTES:
+        raise ShotTooLarge()
+    ext = "jpg" if "image/jpeg" in header else "webp" if "image/webp" in header else "png"
+    return ext, img
 
 
 def _real(path):
@@ -103,12 +142,30 @@ class Handler(SimpleHTTPRequestHandler):
             return
         super().do_HEAD()
 
+    def _reject(self, code, msg):
+        # The body was not read, so the connection can't be reused.
+        self.close_connection = True
+        self.send_error(code, msg)
+
     def do_POST(self):
         if self.path.split("?", 1)[0] != "/feedback":
             self.send_error(404)
             return
+        length = self.headers.get("Content-Length")
+        if length is None:
+            self._reject(411, "Content-Length required")
+            return
         try:
-            n = int(self.headers.get("Content-Length", 0))
+            n = int(length)
+        except ValueError:
+            n = -1
+        if n < 0:
+            self._reject(400, "bad Content-Length")
+            return
+        if n > MAX_BODY:
+            self._reject(413, f"body over {MAX_BODY} bytes")
+            return
+        try:
             raw = self.rfile.read(n) if n > 0 else b"{}"
             data = json.loads(raw.decode("utf-8") or "{}")
             if not isinstance(data, dict):
@@ -116,43 +173,61 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             self.send_error(400, "bad json")
             return
-        # Pasted screenshots arrive as data: URLs. Decode each to a file under a
-        # sibling screenshots/ dir and replace the bulky base64 in the logged record
-        # with the relative path(s), so the jsonl stays readable. Accepts a list
-        # (`screenshots`) or a single legacy string (`screenshot`).
-        def _save_shot(durl, idx):
-            header, b64 = durl.split(",", 1)
-            ext = "jpg" if "image/jpeg" in header else "webp" if "image/webp" in header else "png"
-            sdir = SHOTS_DIR
-            os.makedirs(sdir, exist_ok=True)
-            stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S_%f")
-            fname = f"{stamp}-{idx}-{self.client_address[0].replace(':', '_')}.{ext}"
-            with open(os.path.join(sdir, fname), "wb") as imgf:
-                imgf.write(base64.b64decode(b64))
-            return os.path.join("screenshots", fname)
-
+        # Pasted screenshots arrive as data: URLs. Every one is decoded and checked
+        # before any file is written, so a rejected request leaves nothing on disk.
+        # Accepts a list (`screenshots`) or a single legacy string (`screenshot`).
         shots = data.get("screenshots")
+        legacy = data.get("screenshot")
         if isinstance(shots, list):
-            paths = []
-            for i, s in enumerate(shots):
-                durl = s.get("data") if isinstance(s, dict) else s
-                if isinstance(durl, str) and durl.startswith("data:image/"):
-                    try:
-                        paths.append(_save_shot(durl, i))
-                    except Exception:
-                        paths.append("(screenshot decode failed)")
-            data["screenshots"] = paths
-        elif isinstance(data.get("screenshot"), str) and data["screenshot"].startswith("data:image/"):
+            urls = [s.get("data") if isinstance(s, dict) else s for s in shots]
+            urls = [u for u in urls if isinstance(u, str) and u.startswith("data:image/")]
+        elif isinstance(legacy, str) and legacy.startswith("data:image/"):
+            urls = [legacy]
+        else:
+            urls = []
+        if len(urls) > MAX_SHOTS:
+            self._reject(413, f"more than {MAX_SHOTS} screenshots")
+            return
+        decoded = []
+        for durl in urls:
             try:
-                data["screenshot"] = _save_shot(data["screenshot"], 0)
+                d = decode_shot(durl)
+            except ShotTooLarge:
+                self._reject(413, f"screenshot over {MAX_SHOT_BYTES} bytes")
+                return
+            decoded.append(d)
+        # Decoded images go to files under a sibling screenshots/ dir; the logged
+        # record carries the relative path(s) instead of the bulky base64, so the
+        # jsonl stays readable. An undecodable image is noted, never written.
+        paths = []
+        for i, d in enumerate(decoded):
+            if d is None:
+                paths.append("(screenshot decode failed)")
+                continue
+            ext, img = d
+            os.makedirs(SHOTS_DIR, exist_ok=True)
+            stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+            fname = f"{stamp}-{i}-{self.client_address[0].replace(':', '_')}.{ext}"
+            try:
+                with open(os.path.join(SHOTS_DIR, fname), "wb") as imgf:
+                    imgf.write(img)
             except Exception:
-                data["screenshot"] = "(screenshot decode failed)"
+                paths.append("(screenshot write failed)")
+                continue
+            paths.append(os.path.join("screenshots", fname))
+        if isinstance(shots, list):
+            data["screenshots"] = paths
+        elif paths:
+            data["screenshot"] = paths[0]
         rec = {
             "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "ip": self.client_address[0],
             "ua": self.headers.get("User-Agent", ""),
         }
         rec.update(data)
+        # Server-made id: lets collect-feedback.py tell two genuine submissions
+        # with identical content apart (#251). Set last so a client can't pick it.
+        rec["id"] = uuid.uuid4().hex
         try:
             with _lock, open(FEEDBACK, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")

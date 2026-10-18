@@ -19,6 +19,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FEEDBACK_DIR = os.path.join(HERE, "feedback")
 
 
+def dedupe_key(r):
+    """Key that only collapses copies of the same submission (#251).
+
+    Records from the server carry a unique "id". Older records have none, so
+    they are keyed on their whole content: two genuine submissions that differ
+    in any field (category, screenshots, ...) are both kept, and only an exact
+    copy (e.g. the same line in two files) is dropped.
+    """
+    if r.get("id"):
+        return ("id", str(r["id"]))
+    return ("rec", json.dumps(r, sort_keys=True, ensure_ascii=False))
+
+
 def load():
     recs, seen = [], set()
     for path in sorted(glob.glob(os.path.join(FEEDBACK_DIR, "*.jsonl"))):
@@ -32,7 +45,9 @@ def load():
                     r = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                key = (r.get("ts"), r.get("ip"), r.get("text") or r.get("message"))
+                if not isinstance(r, dict):
+                    continue
+                key = dedupe_key(r)
                 if key in seen:
                     continue
                 seen.add(key)

@@ -1,5 +1,6 @@
-"""Offline tests for etchy-server.py (#334): no socket, no network.
+"""Tests for etchy-server.py (#334, #250).
 
+BlockTests are offline; PostLimitTests start the server on 127.0.0.1 only.
 Run from the repo root:  python3 -m unittest deploy/demo/test_etchy_server.py
 """
 import importlib.util
@@ -115,6 +116,120 @@ class BlockTests(unittest.TestCase):
         self.assertTrue(h._blocked())
         h.path = "/index.html"
         self.assertFalse(h._blocked())
+
+
+class PostLimitTests(unittest.TestCase):
+    """POST /feedback against a live server on 127.0.0.1 (#250, #251)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        from http.server import ThreadingHTTPServer
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = os.path.realpath(cls.tmp.name)
+        cls.feedback = os.path.join(cls.root, "fb", "feedback.jsonl")
+        cls.shots = os.path.join(cls.root, "fb", "screenshots")
+        cls.srv = _load_server(cls.root, cls.feedback)
+        cls.srv.MAX_BODY = 64 * 1024
+        cls.srv.MAX_SHOT_BYTES = 1024
+        cls.srv.MAX_SHOTS = 2
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), cls.srv.Handler)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        import shutil
+        if os.path.exists(self.feedback):
+            os.remove(self.feedback)
+        shutil.rmtree(self.shots, ignore_errors=True)
+
+    def post(self, body, headers=None):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            c.putrequest("POST", "/feedback")
+            for k, v in (headers or {}).items():
+                c.putheader(k, v)
+            c.endheaders()
+            if body:
+                c.send(body)
+            return c.getresponse().status
+        finally:
+            c.close()
+
+    def post_json(self, obj):
+        import json
+        body = json.dumps(obj).encode()
+        return self.post(body, {"Content-Length": str(len(body))})
+
+    def records(self):
+        import json
+        if not os.path.exists(self.feedback):
+            return []
+        with open(self.feedback, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def shot_files(self):
+        return os.listdir(self.shots) if os.path.isdir(self.shots) else []
+
+    @staticmethod
+    def png(n):
+        import base64
+        return "data:image/png;base64," + base64.b64encode(b"\x89PNG" + b"x" * (n - 4)).decode()
+
+    def test_missing_content_length_is_411(self):
+        self.assertEqual(self.post(None), 411)
+        self.assertEqual(self.records(), [])
+
+    def test_bad_content_length_is_400(self):
+        for v in ("-1", "abc", "1.5"):
+            with self.subTest(v=v):
+                self.assertEqual(self.post(None, {"Content-Length": v}), 400)
+        self.assertEqual(self.records(), [])
+
+    def test_body_over_limit_is_413_without_reading(self):
+        # Claims more than MAX_BODY but sends nothing: must answer at once.
+        self.assertEqual(self.post(None, {"Content-Length": str(10 ** 12)}), 413)
+        self.assertEqual(self.records(), [])
+
+    def test_screenshot_over_limit_is_413_and_writes_nothing(self):
+        status = self.post_json({"text": "hi", "screenshots": [self.png(100), self.png(2000)]})
+        self.assertEqual(status, 413)
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.shot_files(), [])
+
+    def test_legacy_screenshot_over_limit_is_413(self):
+        self.assertEqual(self.post_json({"text": "hi", "screenshot": self.png(2000)}), 413)
+        self.assertEqual(self.records(), [])
+
+    def test_too_many_screenshots_is_413(self):
+        status = self.post_json({"text": "hi", "screenshots": [self.png(10)] * 3})
+        self.assertEqual(status, 413)
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.shot_files(), [])
+
+    def test_invalid_base64_is_noted_not_written(self):
+        status = self.post_json({"text": "hi", "screenshots": [
+            "data:image/png;base64,@@not base64@@", {"data": self.png(10)}]})
+        self.assertEqual(status, 200)
+        (rec,) = self.records()
+        self.assertEqual(rec["screenshots"][0], "(screenshot decode failed)")
+        self.assertTrue(rec["screenshots"][1].startswith("screenshots"))
+        self.assertEqual(len(self.shot_files()), 1)
+
+    def test_valid_submission_is_recorded_with_unique_id(self):
+        self.assertEqual(self.post_json({"text": "ok", "screenshot": self.png(10)}), 200)
+        self.assertEqual(self.post_json({"text": "ok", "id": "mine"}), 200)
+        a, b = self.records()
+        self.assertTrue(a["screenshot"].startswith("screenshots"))
+        self.assertNotEqual(b["id"], "mine")
+        self.assertNotEqual(a["id"], b["id"])
 
 
 if __name__ == "__main__":
