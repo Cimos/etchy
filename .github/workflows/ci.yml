@@ -50,7 +50,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       # TRUST gate: populate the golden corpus (revA/revB are gitignored,
       # regenerated on demand) so the deep cross-validation test
@@ -119,7 +119,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       # The golden-corpus cross-validation runs for real in the ubuntu `test` job
       # (which generates the corpus with python3). This cross-OS leg only needs to
@@ -186,7 +186,7 @@ jobs:
       # include_dir! — the gate that keeps the public demo board buildable.
       - name: Build web viewer (embeds the committed demo board)
         working-directory: crates/etchy-gui
-        run: trunk build --release --filehash false
+        run: trunk build --release --filehash false --locked
 
       # Size-optimize the bundle the way deploy does, and prove it validates. This
       # is the real #99 gate: a regression that reintroduces the bulk-memory issue

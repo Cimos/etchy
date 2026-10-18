@@ -26,7 +26,7 @@ are **not** committed.
 
 ```sh
 # 1. Build the web bundle with STABLE filenames (so index.html refs never change):
-trunk build --release --filehash false   # in crates/etchy-gui  -> dist/
+trunk build --release --filehash false --locked   # in crates/etchy-gui  -> dist/
 
 # 2. Copy artifacts + this folder's files next to each other in the serve dir:
 #    dist/etchy-gui.js, dist/etchy-gui_bg.wasm, deploy/demo/index.html, deploy/demo/etchy-server.py
