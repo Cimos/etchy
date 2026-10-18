@@ -16,7 +16,9 @@
 //! columns declaring different units — scaling a board by 39.37 must never happen
 //! quietly. A file that declares no unit at all is assumed millimetres (the
 //! overwhelming default). A file we can't parse into any placements fails loud
-//! rather than silently contributing nothing.
+//! rather than silently contributing nothing, and so does any data row (after the
+//! header, or after the first readable row) whose position/rotation can't be read
+//! — a skipped row is a component missing from the diff.
 
 use crate::error::{EngineError, Result};
 use crate::geo::{Contour, PolygonSet};
@@ -136,11 +138,7 @@ pub fn resolve_placement(bytes: &[u8]) -> Result<PolygonSet> {
 /// rows can legally contain commas inside quoted descriptions, and banner text
 /// above the header is arbitrary. Fall back to the first content line.
 fn parse_placements(text: &str) -> Result<Vec<Placement>> {
-    let header = text.lines().find(|l| {
-        let low = l.to_ascii_lowercase();
-        let has_ref = low.contains("designator") || low.contains("ref");
-        has_ref && X_COL_KEYS.iter().any(|k| low.contains(k))
-    });
+    let header = text.lines().find(|l| is_header_line(l));
     let unit = declared_unit(text, header)?.unwrap_or(Unit::Mm);
     let probe = header.or_else(|| {
         text.lines()
@@ -169,9 +167,9 @@ fn declared_unit(text: &str, header: Option<&str>) -> Result<Option<Unit>> {
     let mut from_header = None;
     if let Some(header) = header {
         let cols: Vec<String> = if header.contains(',') {
-            header
-                .split(',')
-                .map(|c| c.trim().trim_matches('"').to_ascii_lowercase())
+            split_csv(header)
+                .into_iter()
+                .map(|c| c.to_ascii_lowercase())
                 .collect()
         } else {
             header
@@ -232,12 +230,22 @@ fn bracket_suffix(col: &str) -> Option<&str> {
 /// the right so multi-token middle columns don't shift the numerics. A trailing
 /// **quoted** description (Altium; may be multi-word, may contain commas) is
 /// stripped first — leaving it in play silently dropped every row whose
-/// description had spaces, a partial parse the trust bar forbids.
+/// description had spaces, a partial parse the trust bar forbids. Lines before the
+/// data starts are banner/legend text; any unreadable line after it fails loud.
 fn parse_whitespace(text: &str) -> Result<Vec<Placement>> {
     let mut out = Vec::new();
-    for line in text.lines() {
-        let mut line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    let mut bad = BadRows::default();
+    for (idx, raw) in text.lines().enumerate() {
+        let mut line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // KiCad's header is a `# Ref … PosX …` comment: it still marks data start.
+        if is_header_line(line) {
+            bad.anchored = true;
+            continue;
+        }
+        if line.starts_with('#') {
             continue;
         }
         // Strip a trailing `"…"` run (the Altium Description column).
@@ -247,28 +255,84 @@ fn parse_whitespace(text: &str) -> Result<Vec<Placement>> {
             }
         }
         let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 4 {
-            continue;
-        }
         // If the last field is non-numeric it's the Side column; the three numbers
         // before it are PosX PosY Rot. Otherwise the last three are PosX PosY Rot.
-        let last_is_num = f[f.len() - 1].parse::<f64>().is_ok();
+        let last_is_num = f.last().is_some_and(|s| s.parse::<f64>().is_ok());
         let base = if last_is_num { f.len() } else { f.len() - 1 };
-        if base < 4 {
-            continue;
-        }
-        let (x, y, rot) = (f[base - 3], f[base - 2], f[base - 1]);
-        match (x.parse::<f64>(), y.parse::<f64>(), rot.parse::<f64>()) {
-            (Ok(x_mm), Ok(y_mm), Ok(rot_deg)) => out.push(Placement {
-                reference: f[0].to_string(),
-                x_mm,
-                y_mm,
-                rot_deg,
-            }),
-            _ => continue, // a header/legend row — skip, don't fail the file
+        let parsed = if base >= 4 {
+            let (x, y, rot) = (f[base - 3], f[base - 2], f[base - 1]);
+            match (x.parse::<f64>(), y.parse::<f64>(), rot.parse::<f64>()) {
+                (Ok(x_mm), Ok(y_mm), Ok(rot_deg)) => Some(Placement {
+                    reference: f[0].to_string(),
+                    x_mm,
+                    y_mm,
+                    rot_deg,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match parsed {
+            Some(p) => {
+                bad.anchored = true;
+                out.push(p);
+            }
+            // Before the data starts this is banner/legend text; after it, a row
+            // we couldn't read — counted, and the file fails below.
+            None => bad.note(idx + 1, line),
         }
     }
+    bad.check()?;
     Ok(out)
+}
+
+/// True for the header line naming the reference + X-position columns.
+fn is_header_line(line: &str) -> bool {
+    let low = line.to_ascii_lowercase();
+    let has_ref = low.contains("designator") || low.contains("ref");
+    has_ref && X_COL_KEYS.iter().any(|k| low.contains(k))
+}
+
+/// Rows that failed to parse once the data section had started (after the
+/// header, or after the first good row). Any such row fails the whole file: a
+/// silently skipped row is a component missing from the diff (#320).
+#[derive(Default)]
+struct BadRows {
+    anchored: bool,
+    count: usize,
+    examples: Vec<String>,
+}
+
+impl BadRows {
+    const MAX_EXAMPLES: usize = 3;
+
+    fn note(&mut self, line_no: usize, line: &str) {
+        if !self.anchored {
+            return;
+        }
+        self.count += 1;
+        if self.examples.len() < Self::MAX_EXAMPLES {
+            self.examples.push(format!("line {line_no}: `{line}`"));
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.count == 0 {
+            return Ok(());
+        }
+        let more = if self.count > self.examples.len() {
+            ", …"
+        } else {
+            ""
+        };
+        Err(EngineError::Parse(format!(
+            "{} pick-and-place row(s) could not be parsed into a position/rotation \
+             (unrecognised column layout?): {}{more}",
+            self.count,
+            self.examples.join("; ")
+        )))
+    }
 }
 
 /// Comma-separated centroid CSV. Locate the reference / X / Y / rotation columns
@@ -276,14 +340,15 @@ fn parse_whitespace(text: &str) -> Result<Vec<Placement>> {
 fn parse_csv(text: &str) -> Result<Vec<Placement>> {
     let mut lines = text
         .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'));
-    let header = lines
+        .enumerate()
+        .map(|(i, l)| (i + 1, l.trim()))
+        .filter(|(_, l)| !l.is_empty() && !l.starts_with('#'));
+    let (_, header) = lines
         .next()
         .ok_or_else(|| EngineError::Parse("empty pick-and-place CSV".into()))?;
-    let cols: Vec<String> = header
-        .split(',')
-        .map(|c| c.trim().trim_matches('"').to_ascii_lowercase())
+    let cols: Vec<String> = split_csv(header)
+        .into_iter()
+        .map(|c| c.to_ascii_lowercase())
         .collect();
     let find = |preds: &[&str]| -> Option<usize> {
         cols.iter()
@@ -298,26 +363,58 @@ fn parse_csv(text: &str) -> Result<Vec<Placement>> {
     let rot_i = find(&["rotation", "rot"]);
 
     let mut out = Vec::new();
-    for line in lines {
-        let f: Vec<&str> = line
-            .split(',')
-            .map(|s| s.trim().trim_matches('"'))
-            .collect();
-        let get = |i: usize| f.get(i).copied().unwrap_or("");
+    // Every row after the header is data.
+    let mut bad = BadRows {
+        anchored: true,
+        ..BadRows::default()
+    };
+    for (line_no, line) in lines {
+        let f = split_csv(line);
+        if f.iter().all(|s| s.is_empty()) {
+            continue; // a `,,,,` spacer row carries nothing
+        }
+        let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
         let (x, y) = (strip_unit(get(x_i)), strip_unit(get(y_i)));
-        match (x.parse::<f64>(), y.parse::<f64>()) {
-            (Ok(x_mm), Ok(y_mm)) => out.push(Placement {
+        // A missing/blank rotation cell means 0°; a present but unreadable one
+        // is a bad row, never a silent 0°.
+        let rot = match rot_i.map(|i| strip_unit(get(i))) {
+            None | Some("") => Ok(0.0),
+            Some(r) => r.parse::<f64>(),
+        };
+        match (x.parse::<f64>(), y.parse::<f64>(), rot) {
+            (Ok(x_mm), Ok(y_mm), Ok(rot_deg)) => out.push(Placement {
                 reference: get(ref_i).to_string(),
                 x_mm,
                 y_mm,
-                rot_deg: rot_i
-                    .and_then(|i| strip_unit(get(i)).parse::<f64>().ok())
-                    .unwrap_or(0.0),
+                rot_deg,
             }),
-            _ => continue,
+            _ => bad.note(line_no, line),
         }
     }
+    bad.check()?;
     Ok(out)
+}
+
+/// Split one CSV line into trimmed fields, honouring `"…"` quoting (a comma
+/// inside quotes doesn't split; `""` inside quotes is a literal quote).
+fn split_csv(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => fields.push(std::mem::take(&mut cur).trim().to_string()),
+            _ => cur.push(c),
+        }
+    }
+    fields.push(cur.trim().to_string());
+    fields
 }
 
 /// Trim a trailing unit like `mm` (some exporters write `10.0mm`).
@@ -497,5 +594,113 @@ SW1          FPF1320        BottomLayer FPF1320     29.9516      38.9507      27
     fn undeclared_unit_is_assumed_mm() {
         let text = "Designator,Comment,Layer,Center-X,Center-Y,Rotation\nR1,1K,top,25.4,50.8,90\n";
         assert_eq!(nm(text), vec![(25_400_000, 50_800_000)]);
+    }
+
+    fn assert_bad_rows(text: &str, count: usize, needle: &str) {
+        let err = parse_placements(text).unwrap_err();
+        assert!(
+            matches!(err, EngineError::Parse(ref m)
+                if m.starts_with(&format!("{count} pick-and-place row(s)")) && m.contains(needle)),
+            "{err}"
+        );
+        assert!(resolve_placement(text.as_bytes()).is_err());
+    }
+
+    // #320: an UNQUOTED multi-word description shifts the right-anchored numerics,
+    // so the row used to vanish silently from the diff.
+    #[test]
+    fn whitespace_unquoted_multiword_description_fails_loud() {
+        let text = ALTIUM_POS.to_string()
+            + "R2           1K             TopLayer    0402-RES    21.0         44.0         0        RES 1K\r\n";
+        assert_bad_rows(&text, 1, "line 10: `R2");
+    }
+
+    #[test]
+    fn whitespace_bad_row_before_first_good_row_after_header_fails_loud() {
+        let text = ALTIUM_POS.replace(
+            "R1           1K             TopLayer    0402-RES    20.6248",
+            "R1           1K             TopLayer    0402-RES    abc",
+        );
+        assert_bad_rows(&text, 1, "line 7: `R1");
+    }
+
+    #[test]
+    fn kicad_bad_row_after_first_good_row_fails_loud() {
+        let text = KICAD_POS.replace(
+            "R1        1k     R_0402    15.0000",
+            "R1        1k     R_0402    fifteen",
+        );
+        assert_bad_rows(&text, 1, "line 5: `R1");
+    }
+
+    #[test]
+    fn kicad_bad_first_row_after_comment_header_fails_loud() {
+        let text = KICAD_POS.replace(
+            "C1        100nF  C_0402    10.0000",
+            "C1        100nF  C_0402    bad",
+        );
+        assert_bad_rows(&text, 1, "line 4: `C1");
+    }
+
+    #[test]
+    fn csv_quoted_comma_before_coordinates_parses() {
+        let text = "Designator,Comment,Layer,Center-X(mm),Center-Y(mm),Rotation\n\
+                    SW1,\"LOAD SWITCH, 1.5A \"\"X\"\"\",top,29.9516,38.9507,270\n";
+        let p = parse_placements(text).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!((p[0].x_mm - 29.9516).abs() < 1e-9);
+        assert!((p[0].rot_deg - 270.0).abs() < 1e-9);
+        assert_eq!(
+            split_csv("a, \"b, c\" ,\"d\"\"e\","),
+            vec!["a", "b, c", "d\"e", ""]
+        );
+    }
+
+    #[test]
+    fn csv_new_column_layout_fails_loud_with_count() {
+        // Rows with an extra column inserted before X: every value shifts.
+        let text = "Designator,Comment,Layer,Center-X(mm),Center-Y(mm),Rotation\n\
+                    C1,100nF,top,10.0,20.0,90\n\
+                    R1,1k,extra,top,15.0,20.0,0\n\
+                    R2,1k,extra,top,16.0,20.0,0\n\
+                    R3,1k,extra,top,17.0,20.0,0\n\
+                    R4,1k,extra,top,18.0,20.0,0\n";
+        assert_bad_rows(text, 4, "…");
+    }
+
+    #[test]
+    fn csv_unreadable_rotation_fails_loud_but_blank_is_zero() {
+        let bad = CSV_POS.replace("15.0,20.0,0", "15.0,20.0,ninety");
+        assert_bad_rows(&bad, 1, "line 3: `R1");
+        let blank = CSV_POS.replace("15.0,20.0,0", "15.0,20.0,");
+        let p = parse_placements(&blank).unwrap();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[1].rot_deg, 0.0);
+    }
+
+    #[test]
+    fn banner_and_spacer_rows_are_not_bad_rows() {
+        // Banner text above the header and trailing `## End` / `,,,` spacers parse.
+        assert_eq!(parse_placements(ALTIUM_POS).unwrap().len(), 3);
+        assert_eq!(parse_placements(KICAD_POS).unwrap().len(), 2);
+        let spaced = CSV_POS.to_string() + ",,,,,\n";
+        assert_eq!(parse_placements(&spaced).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn kicad_native_oracle_placements_parse() {
+        let root = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/native/kicad/oracles"
+        );
+        let mut seen = 0;
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path().join("position/placements.csv");
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                parse_placements(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "no placement oracles found under {root}");
     }
 }
