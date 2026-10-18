@@ -299,22 +299,30 @@ fn parse_header_line(
         return Ok(());
     }
     if let Some((num, dia)) = is_tool_def(line) {
-        let d: f64 = dia
-            .parse()
-            .map_err(|_| EngineError::Parse(format!("bad tool diameter in '{line}'")))?;
-        // A digit run long enough to overflow f64 parses as `inf`; it would reach
-        // the geometry builders and saturate the nm cast (#308). Units aren't
-        // known yet here, so the range check happens at select time.
-        if !d.is_finite() {
-            return Err(EngineError::Parse(format!(
-                "tool diameter in '{line}' is not a finite number"
-            )));
-        }
-        tools.insert(num, d);
+        let d = parse_tool_dia(line, dia)?;
+        // First definition wins: a later (body) redefinition takes effect only
+        // from its own line onward, applied in order by `Body::step` (#310).
+        tools.entry(num).or_insert(d);
         return Ok(());
     }
     // FMAT,2 / VER,1 / M-codes etc. — ignored.
     Ok(())
+}
+
+/// Parse a tool-definition diameter (in file units). A digit run long enough to
+/// overflow f64 parses as `inf`; it would reach the geometry builders and
+/// saturate the nm cast (#308). Units may not be known yet, so the range check
+/// happens at select time.
+fn parse_tool_dia(line: &str, dia: &str) -> Result<f64> {
+    let d: f64 = dia
+        .parse()
+        .map_err(|_| EngineError::Parse(format!("bad tool diameter in '{line}'")))?;
+    if !d.is_finite() {
+        return Err(EngineError::Parse(format!(
+            "tool diameter in '{line}' is not a finite number"
+        )));
+    }
+    Ok(d)
 }
 
 /// `,LZ` / `,TZ` suffix on an `INCH`/`METRIC` line.
@@ -412,6 +420,12 @@ impl Body {
                 return Ok(());
             }
             "M30" | "M00" | "M95" | "G05" | "G90" | "T0" => return Ok(()),
+            // Incremental coordinates would silently move every later hole (#309).
+            "G91" => {
+                return Err(EngineError::Unsupported {
+                    feature: "Excellon incremental coordinates (G91)".into(),
+                })
+            }
             _ => {}
         }
         // Rout arcs aren't rendered faithfully yet — fail loud rather than drop.
@@ -419,6 +433,16 @@ impl Body {
             return Err(EngineError::Unsupported {
                 feature: "Excellon arc routing (G02/G03)".into(),
             });
+        }
+        // Body tool change with an inline diameter (`T2C0.040`, or Altium's
+        // `T2F00S00C0.040`): (re)define the tool for subsequent hits only, then
+        // select it (#310). Checked before the bare select, which would otherwise
+        // take a feed-led definition as a plain select.
+        if let Some((t, dia)) = is_tool_def(line) {
+            let d = parse_tool_dia(line, dia)?;
+            self.tools.insert(t, d);
+            self.select_tool(t)?;
+            return Ok(());
         }
         // Bare tool select.
         if let Some(t) = tool_select(line) {
@@ -524,6 +548,19 @@ impl Body {
         } else {
             (line, false)
         };
+        // Any other G-word on a coordinate line (G91/G93 zero-set, G32/G33 canned
+        // circles, …) changes what the coordinates mean; treating it as a plain hit
+        // would be a silent miss (#309).
+        if let Some(gpos) = coord.find('G') {
+            let word: String = coord[gpos..]
+                .chars()
+                .take(1)
+                .chain(coord[gpos + 1..].chars().take_while(|c| c.is_ascii_digit()))
+                .collect();
+            return Err(EngineError::Unsupported {
+                feature: format!("Excellon {word} on a coordinate line ('{line}')"),
+            });
+        }
         let (nx, ny) = self.read_xy(coord, self.x, self.y)?;
         if self.routing {
             // Tool down: any move cuts a slot segment from here to there.
@@ -973,6 +1010,68 @@ mod tests {
         ];
         for inp in inputs {
             let _ = resolve_excellon(inp); // Ok or Err — must not panic.
+        }
+    }
+
+    fn area(src: &str) -> f64 {
+        resolve_excellon(src.as_bytes()).unwrap().area_mm2()
+    }
+
+    fn one_hole(d: f64) -> f64 {
+        area(&format!("M48\nMETRIC,TZ\nT1C{d}\n%\nT1\nX1.0Y1.0\nM30\n"))
+    }
+
+    #[test]
+    fn body_tool_def_selects_and_redefines_forward_only() {
+        // #310: header T1=0.2, T2=0.3; body `T2C0.4` must select T2 at 0.4 for the
+        // third hole, and must not retroactively resize the earlier T2 hole.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\nT2C0.300\n%\n\
+                   T1\nX1.0Y1.0\nT2\nX5.0Y1.0\nT2C0.400\nX10.0Y1.0\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 3);
+        let want = one_hole(0.2) + one_hole(0.3) + one_hole(0.4);
+        assert!(
+            (ps.area_mm2() - want).abs() < 1e-6,
+            "got {} want {want}",
+            ps.area_mm2()
+        );
+    }
+
+    #[test]
+    fn body_tool_def_switches_from_previous_tool() {
+        // The exact #310 scenario: `T2C0.040` after T1 must not keep T1 active.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\nT2C0.300\n%\nT1\nT2C0.400\nX1.0Y1.0\nM30\n";
+        assert!((area(src) - one_hole(0.4)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn body_feed_led_tool_def_is_a_definition() {
+        // Altium-style feed-before-diameter in the body still (re)defines.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\n%\nT1F00S00C0.400\nX1.0Y1.0\nM30\n";
+        assert!((area(src) - one_hole(0.4)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn incremental_g91_fails_loud() {
+        // #309: G91 used to be ignored and later coordinates decoded as absolute.
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nG91\nX10.0Y10.0\nX5.0Y0\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_g_word_on_coordinate_line_fails_loud() {
+        for line in ["G93X0Y0", "G91X1.0Y1.0", "G33X0.5Y0.0"] {
+            let src = format!("M48\nMETRIC,TZ\nT1C0.500\n%\nT1\n{line}\nM30\n");
+            assert!(
+                matches!(
+                    resolve_excellon(src.as_bytes()),
+                    Err(EngineError::Unsupported { .. })
+                ),
+                "{line} must fail loud"
+            );
         }
     }
 }

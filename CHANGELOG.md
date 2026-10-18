@@ -9,6 +9,15 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- Excellon: a body tool change that carries a diameter (`T2C0.040`) now
+  selects that tool. Before, the previous tool stayed active. A body
+  redefinition now applies only to the hits that follow it, not to earlier
+  ones (#310).
+- Excellon: body `G91` (incremental coordinates) now fails loud instead of
+  being ignored. So does any other unrecognised G-code on a coordinate line,
+  such as `G93` or `G32`/`G33`, which used to be drawn as plain hits (#309).
+
 ## [0.1.1] — 2026-10-03
 
 ### Added
