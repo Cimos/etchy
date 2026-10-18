@@ -9,6 +9,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- **A Gerber region left open no longer bypasses the per-layer point ceiling**
+  (#315). Points buffered in a region under construction were only counted at
+  `G37`, so a small file with one never-closed region and thousands of arc
+  commands could build a multi-GB vertex buffer before the limit fired. They now
+  count as they are buffered and the layer fails loud with `ObjectLimit` mid-region.
+
 ## [0.1.1] — 2026-10-03
 
 ### Added
