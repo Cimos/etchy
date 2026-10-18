@@ -1172,7 +1172,7 @@ mod tests {
         for k in 0..4 {
             zigzag_loop(&mut g, k * 2_000_000, per);
         }
-        g.push_str("G37*\nM02*\n");
+        g.push_str("M02*\n"); // never closed: only buffered points can trip the cap
         expect_point_limit(&g);
     }
 
