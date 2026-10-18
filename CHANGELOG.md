@@ -17,6 +17,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - Excellon: body `G91` (incremental coordinates) now fails loud instead of
   being ignored. So does any other unrecognised G-code on a coordinate line,
   such as `G93` or `G32`/`G33`, which used to be drawn as plain hits (#309).
+- Excellon: a leading-zero (`LZ`) drill file with decimal-less coordinates
+  and no declared digit format now fails loud. Before, it was decoded with a
+  guessed 2.4 / 3.3 split, so a 4.2 file put every hole at one-tenth the
+  distance. `TZ` files keep the conventional default, which their decoding
+  depends on only through the decimal count (#319).
 
 ## [0.1.1] — 2026-10-03
 
