@@ -2,8 +2,9 @@
 """Merge + triage all demo feedback in deploy/feedback/*.jsonl.
 
 Reads every *.jsonl in deploy/feedback/ (one submission per line), de-dupes,
-and prints a summary (counts by sentiment / category / severity) followed by the
-records sorted by time. Stdlib only.
+drops any client IP / User-Agent older logs recorded, and prints a summary
+(counts by sentiment / category / severity) followed by the records sorted by
+time. Stdlib only.
 
 Usage:
   python3 deploy/collect-feedback.py            # summary + records to stdout
@@ -32,6 +33,19 @@ def dedupe_key(r):
     return ("rec", json.dumps(r, sort_keys=True, ensure_ascii=False))
 
 
+def strip_pii(r):
+    """Drop the client IP and User-Agent that older server builds recorded (#287).
+
+    Removes top-level "ip"/"ua" and "ctx.ua". Applied after de-duplication, so
+    records are still keyed on their content as written. Returns R.
+    """
+    r.pop("ip", None)
+    r.pop("ua", None)
+    if isinstance(r.get("ctx"), dict):
+        r["ctx"].pop("ua", None)
+    return r
+
+
 def load():
     recs, seen = [], set()
     for path in sorted(glob.glob(os.path.join(FEEDBACK_DIR, "*.jsonl"))):
@@ -51,6 +65,7 @@ def load():
                 if key in seen:
                     continue
                 seen.add(key)
+                strip_pii(r)
                 r["_src"] = src
                 recs.append(r)
     recs.sort(key=lambda r: r.get("ts", ""))

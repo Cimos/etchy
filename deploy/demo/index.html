@@ -230,8 +230,9 @@
       // now so the attached image matches what they're currently looking at (#27).
       var sent=shots.map(function(s){return {data:s.data,name:s.name};});
       if(!sent.length){var live=captureCanvas();if(live)sent.push({data:live,name:'canvas.png'});}
+      var c=ctx();delete c.ua; // the server doesn't record the User-Agent (#287)
       var payload={sentiment:sentiment,category:category,severity:(sentiment==='issue'?severity:null),
-        text:text,name:el('etfb-name').value.trim(),ctx:ctx(),
+        text:text,name:el('etfb-name').value.trim(),ctx:c,
         screenshots:sent};
       var b=el('etfb-send');b.disabled=true;b.textContent='Sending…';
       fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
