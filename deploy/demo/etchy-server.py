@@ -5,7 +5,8 @@ Usage:  python etchy-server.py [PORT] [ROOT]
 Serves ROOT (default: this script's dir) on 127.0.0.1:PORT (default 8080).
 Set ETCHY_BIND=0.0.0.0 to serve the LAN.
 Feedback records are appended as one JSON object per line, stamped with the
-server time, client IP, User-Agent and a unique server-made "id". POST bodies
+server time and a unique server-made "id". The client IP and User-Agent are
+not recorded (#287), and any "ip"/"ua" a client sends is dropped. POST bodies
 need a Content-Length (411 without, 400 if invalid) of at most MAX_BODY bytes,
 with at most MAX_SHOTS screenshots of MAX_SHOT_BYTES each once decoded; over a
 limit is 413 and nothing is written. The feedback file, the screenshots/
@@ -76,6 +77,19 @@ def decode_shot(durl):
         raise ShotTooLarge()
     ext = "jpg" if "image/jpeg" in header else "webp" if "image/webp" in header else "png"
     return ext, img
+
+
+def strip_pii(rec):
+    """Drop the client IP and User-Agent from a feedback record, in place (#287).
+
+    Neither is used for triage. Removes top-level "ip"/"ua" and "ctx.ua" (sent
+    by older widget builds). Returns REC.
+    """
+    rec.pop("ip", None)
+    rec.pop("ua", None)
+    if isinstance(rec.get("ctx"), dict):
+        rec["ctx"].pop("ua", None)
+    return rec
 
 
 def _real(path):
@@ -208,7 +222,7 @@ class Handler(SimpleHTTPRequestHandler):
             ext, img = d
             os.makedirs(SHOTS_DIR, exist_ok=True)
             stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S_%f")
-            fname = f"{stamp}-{i}-{self.client_address[0].replace(':', '_')}.{ext}"
+            fname = f"{stamp}-{i}-{uuid.uuid4().hex[:8]}.{ext}"
             try:
                 with open(os.path.join(SHOTS_DIR, fname), "wb") as imgf:
                     imgf.write(img)
@@ -220,12 +234,8 @@ class Handler(SimpleHTTPRequestHandler):
             data["screenshot"] = paths.pop()
         if isinstance(shots, list):
             data["screenshots"] = paths
-        rec = {
-            "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-            "ip": self.client_address[0],
-            "ua": self.headers.get("User-Agent", ""),
-        }
-        rec.update(data)
+        rec = {"ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds")}
+        rec.update(strip_pii(data))
         # Server-made id: lets collect-feedback.py tell two genuine submissions
         # with identical content apart (#251). Set last so a client can't pick it.
         rec["id"] = uuid.uuid4().hex
