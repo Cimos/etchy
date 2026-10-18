@@ -1553,6 +1553,11 @@ struct ViewApp {
     /// frame, which is what makes the GPU path O(1) in triangle count.
     #[cfg(feature = "gpu-transform")]
     gpu_hash: Option<u64>,
+    /// Whether the uploaded GPU base mesh has any triangles, so an empty upload
+    /// (e.g. Overlay at 0% base opacity) doesn't suppress the "no geometry in this
+    /// view" hint (#324).
+    #[cfg(feature = "gpu-transform")]
+    gpu_has_tris: bool,
     /// Transient status line from the last export (#60), shown by the Export
     /// control. Not persisted.
     export_msg: Option<String>,
@@ -1664,6 +1669,8 @@ impl ViewApp {
             use_gpu: true,
             #[cfg(feature = "gpu-transform")]
             gpu_hash: None,
+            #[cfg(feature = "gpu-transform")]
+            gpu_has_tris: false,
             export_msg: None,
             // The Layers panel is open by default, matching the old always-visible
             // left panel; the rail can collapse it.
@@ -2603,6 +2610,7 @@ impl ViewApp {
         #[cfg(feature = "gpu-transform")]
         {
             self.gpu_hash = None;
+            self.gpu_has_tris = false;
         }
     }
 
@@ -4949,6 +4957,7 @@ impl ViewApp {
                     g.upload(&tris);
                 }
                 self.gpu_hash = Some(hash);
+                self.gpu_has_tris = !tris.is_empty();
             }
         }
         let min_area_nm2 =
@@ -5063,9 +5072,14 @@ impl ViewApp {
                 self.focus,
             );
             self.last_hidden = hidden;
+            #[cfg(feature = "gpu-transform")]
+            let gpu_drew = gpu_active && self.gpu_has_tris;
+            #[cfg(not(feature = "gpu-transform"))]
+            let gpu_drew = false;
             // Count the GPU-drawn base as present so the "no geometry" hint doesn't
-            // fire when only the diff mesh is empty.
-            n = shapes.len() + usize::from(gpu_active);
+            // fire when only the diff mesh is empty — but only if the upload had
+            // triangles, so an empty base mesh can't mask a blank canvas (#324).
+            n = shapes.len() + usize::from(gpu_drew);
             painter.extend(shapes);
         }
 
