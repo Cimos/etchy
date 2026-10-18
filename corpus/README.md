@@ -23,13 +23,23 @@ The harness lives in `crates/etchy-core/tests/` and runs under `cargo test`:
   Phase 0; when the real engine lands (M1) the tests retarget the library API.
 - `golden_corpus.rs` — exact ground-truth validation: a self-contained synthetic
   pair (always runs in CI, no Python) **plus** validation against the on-disk
-  `synthetic/` corpus + `ground_truth.json` when present (skips gracefully if not).
+  `synthetic/` corpus + `ground_truth.json` when present (skips with a notice if
+  not, unless `ETCHY_REQUIRE_CORPUS=1` is set — then a missing corpus fails).
 - `properties.rs` — `proptest` invariants and fuzz-lite "never panics on
   arbitrary input" (real `cargo-fuzz` targets land in M1 against the library
   parsers — you fuzz the parser, which moves into the lib then).
 
-CI regenerates `synthetic/` (best-effort) so the deep test runs on Linux; the
-self-contained synthetic tests guarantee coverage everywhere. A live **gerbonara
+CI's ubuntu job regenerates `synthetic/` as a hard step (a generator failure
+fails the job) and runs the tests with `ETCHY_REQUIRE_CORPUS=1`, so the deep
+test runs on Linux and cannot silently skip; the Windows/macOS legs don't
+generate it (no `python3` on the Windows runner) and rely on the self-contained
+synthetic tests, which guarantee coverage everywhere. To run the deep test
+locally:
+
+```bash
+python3 corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
+ETCHY_REQUIRE_CORPUS=1 cargo test -p etchy-core --test golden_corpus
+``` A live **gerbonara
 parity** check is folded into the M1 parser bring-up.
 
 ## `synthetic/` — ready now
