@@ -671,6 +671,46 @@ mod tests {
     }
 
     #[test]
+    fn split_drill_files_pair_like_with_like_across_renames() {
+        // #237: a split drill pack whose filenames embed the revision, listed in
+        // opposite order across revisions, with identical extents — so neither
+        // the exact-name pass nor the overlap gate can tell the files apart. Only
+        // the plating in the kind keeps a PTH file off the NPTH file.
+        let mm = 1_000_000;
+        let sq = [0, 0, 50 * mm, 50 * mm];
+        // Kind as the loaders assign it to an Excellon file (content sniff →
+        // Drill, plating from the stem), so Altium `.TXT` is covered too.
+        let drill = |name: &str| {
+            let (stem, _) = name.rsplit_once('.').unwrap();
+            labeled(LayerKind::Drill(crate::naming::drill_kind(stem)), name, sq)
+        };
+        for (old, new) in [
+            (
+                ["revA-PTH.drl", "revA-NPTH.drl"],
+                ["revB-NPTH.drl", "revB-PTH.drl"],
+            ),
+            (
+                ["revA-Plated.TXT", "revA-NonPlated.TXT"],
+                ["revB-NonPlated.TXT", "revB-Plated.TXT"],
+            ),
+        ] {
+            let a = Board {
+                layers: old.iter().map(|n| drill(n)).collect(),
+            };
+            let b = Board {
+                layers: new.iter().map(|n| drill(n)).collect(),
+            };
+            let pairs = pair_layers(&a, &b);
+            assert_eq!(
+                both_labels(&pairs),
+                vec![(old[0], new[1]), (old[1], new[0])],
+                "plated pairs with plated, non-plated with non-plated"
+            );
+            assert_eq!(pairs.len(), 2, "no one-sided leftovers");
+        }
+    }
+
+    #[test]
     fn positional_pairing_matches_best_overlap_across_order() {
         // #318: two renamed same-kind layers listed in opposite order across the
         // revisions. Pairing strictly by encounter position (notes↔keepout',
