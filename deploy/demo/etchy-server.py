@@ -175,16 +175,17 @@ class Handler(SimpleHTTPRequestHandler):
             return
         # Pasted screenshots arrive as data: URLs. Every one is decoded and checked
         # before any file is written, so a rejected request leaves nothing on disk.
-        # Accepts a list (`screenshots`) or a single legacy string (`screenshot`).
+        # Accepts a list (`screenshots`) and/or a single legacy string
+        # (`screenshot`); both are capped together and neither is logged as base64.
         shots = data.get("screenshots")
         legacy = data.get("screenshot")
+        urls = []
         if isinstance(shots, list):
             urls = [s.get("data") if isinstance(s, dict) else s for s in shots]
             urls = [u for u in urls if isinstance(u, str) and u.startswith("data:image/")]
-        elif isinstance(legacy, str) and legacy.startswith("data:image/"):
-            urls = [legacy]
-        else:
-            urls = []
+        has_legacy = isinstance(legacy, str) and legacy.startswith("data:image/")
+        if has_legacy:
+            urls.append(legacy)
         if len(urls) > MAX_SHOTS:
             self._reject(413, f"more than {MAX_SHOTS} screenshots")
             return
@@ -215,10 +216,10 @@ class Handler(SimpleHTTPRequestHandler):
                 paths.append("(screenshot write failed)")
                 continue
             paths.append(os.path.join("screenshots", fname))
+        if has_legacy:
+            data["screenshot"] = paths.pop()
         if isinstance(shots, list):
             data["screenshots"] = paths
-        elif paths:
-            data["screenshot"] = paths[0]
         rec = {
             "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "ip": self.client_address[0],

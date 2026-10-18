@@ -208,6 +208,17 @@ class PostLimitTests(unittest.TestCase):
         self.assertEqual(self.post_json({"text": "hi", "screenshot": self.png(2000)}), 413)
         self.assertEqual(self.records(), [])
 
+    def test_legacy_screenshot_beside_list_is_checked(self):
+        big = {"text": "hi", "screenshots": [], "screenshot": self.png(2000)}
+        self.assertEqual(self.post_json(big), 413)
+        self.assertEqual(self.records(), [])
+        ok = {"text": "hi", "screenshots": [self.png(10)], "screenshot": self.png(10)}
+        self.assertEqual(self.post_json(ok), 200)
+        (rec,) = self.records()
+        self.assertTrue(rec["screenshot"].startswith("screenshots"))
+        self.assertEqual(len(rec["screenshots"]), 1)
+        self.assertEqual(len(self.shot_files()), 2)
+
     def test_too_many_screenshots_is_413(self):
         status = self.post_json({"text": "hi", "screenshots": [self.png(10)] * 3})
         self.assertEqual(status, 413)
