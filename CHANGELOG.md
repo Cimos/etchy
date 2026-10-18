@@ -9,6 +9,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- `--gate-layers` group words now match exactly against an explicit table
+  instead of by substring (#304): `pth` gates plated drill only (it used to
+  gate `drill-npth` too), new `npth` gates non-plated drill only, and
+  fragments such as `e` or `top` are a loud exit 2 instead of silently
+  selecting several layer kinds.
+
 ## [0.1.1] — 2026-10-03
 
 ### Added
