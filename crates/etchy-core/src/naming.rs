@@ -256,24 +256,31 @@ pub fn drill_kind(stem: &str) -> DrillKind {
 }
 
 /// Split a filename stem into uppercase word tokens: at any non-alphanumeric
-/// character, and at a lower→upper case hump (`NonPlated` → `NON`, `PLATED`;
-/// `BoardNPTH` → `BOARD`, `NPTH`). All-caps runs stay one token.
+/// character, at a lower→upper case hump (`NonPlated` → `NON`, `PLATED`), at
+/// the end of an acronym that runs into a capitalised word (`PTHDrill` → `PTH`,
+/// `DRILL`), and at a letter↔digit boundary (`NPTH2` → `NPTH`, `2`). An
+/// all-caps run with no such boundary stays one token.
 fn name_tokens(stem: &str) -> Vec<String> {
+    let chars: Vec<char> = stem.chars().collect();
     let mut tokens = Vec::new();
     let mut cur = String::new();
-    let mut prev_lower = false;
-    for c in stem.chars() {
+    for (i, &c) in chars.iter().enumerate() {
         if !c.is_ascii_alphanumeric() {
             if !cur.is_empty() {
                 tokens.push(std::mem::take(&mut cur));
             }
-            prev_lower = false;
             continue;
         }
-        if c.is_ascii_uppercase() && prev_lower && !cur.is_empty() {
-            tokens.push(std::mem::take(&mut cur));
+        if let Some(&p) = i.checked_sub(1).and_then(|j| chars.get(j)) {
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_ascii_lowercase());
+            let boundary = (p.is_ascii_lowercase() && c.is_ascii_uppercase())
+                || (p.is_ascii_uppercase() && c.is_ascii_uppercase() && next_lower)
+                || (p.is_ascii_alphabetic() && c.is_ascii_digit())
+                || (p.is_ascii_digit() && c.is_ascii_alphabetic());
+            if boundary && !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
         }
-        prev_lower = c.is_ascii_lowercase();
         cur.push(c.to_ascii_uppercase());
     }
     if !cur.is_empty() {
@@ -441,6 +448,11 @@ mod tests {
             ("board.drills", Unspecified),
             // Camel-case and other negations.
             ("BoardNPTH", NonPlated),
+            ("PTHDrill", Plated),
+            ("NPTHDrill", NonPlated),
+            ("board-PTH2", Plated),
+            ("board_NPTH2", NonPlated),
+            ("RP2040", Unspecified),
             ("board-Unplated", NonPlated),
             ("board_not_plated", NonPlated),
             ("board-non-plated", NonPlated),
