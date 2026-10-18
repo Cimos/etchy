@@ -219,13 +219,30 @@ fn resolve_excellon_inner(bytes: &[u8]) -> Result<PolygonSet> {
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
+    let body_start = if lines.contains(&"M48") {
+        lines
+            .iter()
+            .position(|l| *l == "%" || *l == "M95")
+            .map(|i| i + 1)
+            .ok_or_else(|| {
+                EngineError::Parse("M48 header never terminated (missing % or M95)".into())
+            })?
+    } else {
+        0
+    };
+
     // ---- Pass 1: header facts, from all lines ----
+    // Tool diameters are seeded only from the M48 header. Body definitions
+    // (and every definition in a headerless file) are applied in file order by
+    // `Body::step`, so a definition never reaches back to hits or selects that
+    // precede it (#310).
     let mut units: Option<Units> = None;
     let mut zeros: Option<Zeros> = None;
     let mut fmt_digits: Option<(usize, usize)> = None;
     let mut tools: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
-    for line in &lines {
-        parse_header_line(line, &mut units, &mut zeros, &mut fmt_digits, &mut tools)?;
+    for (i, line) in lines.iter().enumerate() {
+        let tools = (i < body_start).then_some(&mut tools);
+        parse_header_line(line, &mut units, &mut zeros, &mut fmt_digits, tools)?;
     }
 
     let units = units.ok_or_else(|| {
@@ -246,17 +263,6 @@ fn resolve_excellon_inner(bytes: &[u8]) -> Result<PolygonSet> {
     let unit_nm = units.to_nm();
 
     // ---- Pass 2: body ----
-    let body_start = if lines.contains(&"M48") {
-        lines
-            .iter()
-            .position(|l| *l == "%" || *l == "M95")
-            .map(|i| i + 1)
-            .ok_or_else(|| {
-                EngineError::Parse("M48 header never terminated (missing % or M95)".into())
-            })?
-    } else {
-        0
-    };
     let mut m = Body::new(fmt, unit_nm, tools);
     for line in &lines[body_start..] {
         m.step(line)?;
@@ -272,7 +278,7 @@ fn parse_header_line(
     units: &mut Option<Units>,
     zeros: &mut Option<Zeros>,
     fmt_digits: &mut Option<(usize, usize)>,
-    tools: &mut std::collections::HashMap<u32, f64>,
+    tools: Option<&mut std::collections::HashMap<u32, f64>>,
 ) -> Result<()> {
     if line.is_empty() || line.starts_with(';') {
         // KiCad-style `;FILE_FORMAT=3:3` comment can still carry the digit split.
@@ -299,10 +305,9 @@ fn parse_header_line(
         return Ok(());
     }
     if let Some((num, dia)) = is_tool_def(line) {
-        let d = parse_tool_dia(line, dia)?;
-        // First definition wins: a later (body) redefinition takes effect only
-        // from its own line onward, applied in order by `Body::step` (#310).
-        tools.entry(num).or_insert(d);
+        if let Some(tools) = tools {
+            tools.insert(num, parse_tool_dia(line, dia)?);
+        }
         return Ok(());
     }
     // FMAT,2 / VER,1 / M-codes etc. — ignored.
@@ -530,6 +535,8 @@ impl Body {
         // G85 canned slot: "X..Y..G85X..Y.." — from the first coord to the second.
         if let Some(gpos) = line.find("G85") {
             let (from, to) = line.split_at(gpos);
+            reject_g_words(from, line)?;
+            reject_g_words(&to[3..], line)?;
             let (x1, y1) = self.read_xy(from, self.x, self.y)?;
             let (x2, y2) = self.read_xy(&to[3..], x1, y1)?;
             self.emit_slot(x1, y1, x2, y2)?;
@@ -548,19 +555,7 @@ impl Body {
         } else {
             (line, false)
         };
-        // Any other G-word on a coordinate line (G91/G93 zero-set, G32/G33 canned
-        // circles, …) changes what the coordinates mean; treating it as a plain hit
-        // would be a silent miss (#309).
-        if let Some(gpos) = coord.find('G') {
-            let word: String = coord[gpos..]
-                .chars()
-                .take(1)
-                .chain(coord[gpos + 1..].chars().take_while(|c| c.is_ascii_digit()))
-                .collect();
-            return Err(EngineError::Unsupported {
-                feature: format!("Excellon {word} on a coordinate line ('{line}')"),
-            });
-        }
+        reject_g_words(coord, line)?;
         let (nx, ny) = self.read_xy(coord, self.x, self.y)?;
         if self.routing {
             // Tool down: any move cuts a slot segment from here to there.
@@ -646,6 +641,23 @@ impl Body {
         }
         crate::boolean::union(&self.contours, &[])
     }
+}
+
+/// Fail loud on any G-word left in a coordinate fragment once the handled one
+/// (`G00`/`G01` prefix, `G85`) is stripped. G91/G93 zero-set, G32/G33 canned
+/// circles, … change what the coordinates mean; `extract_axis` would otherwise
+/// stop at the `G` and draw a plain hit, a silent miss (#309).
+fn reject_g_words(frag: &str, line: &str) -> Result<()> {
+    let Some(gpos) = frag.find('G') else {
+        return Ok(());
+    };
+    let digits: String = frag[gpos + 1..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    Err(EngineError::Unsupported {
+        feature: format!("Excellon G{digits} on a coordinate line ('{line}')"),
+    })
 }
 
 /// Extract the numeric field following `axis` (`X`/`Y`) up to the next axis
@@ -1045,6 +1057,22 @@ mod tests {
     }
 
     #[test]
+    fn body_tool_def_does_not_reach_back_to_earlier_select() {
+        // Review on #400: a later body-only `T2C…` must not make an earlier bare
+        // `T2` valid — the select precedes any definition, so fail loud.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\n%\nT2\nX1.0Y1.0\nT2C0.400\nX2.0Y1.0\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Parse(_))
+        ));
+        // Headerless: definitions apply in file order too.
+        let src = "METRIC,TZ\nT1\nX1.0Y1.0\nT1C0.400\nM30\n";
+        assert!(resolve_excellon(src.as_bytes()).is_err());
+        let src = "METRIC,TZ\nT1C0.400\nT1\nX1.0Y1.0\nM30\n";
+        assert!((area(src) - one_hole(0.4)).abs() < 1e-9);
+    }
+
+    #[test]
     fn body_feed_led_tool_def_is_a_definition() {
         // Altium-style feed-before-diameter in the body still (re)defines.
         let src = "M48\nMETRIC,TZ\nT1C0.200\n%\nT1F00S00C0.400\nX1.0Y1.0\nM30\n";
@@ -1063,7 +1091,13 @@ mod tests {
 
     #[test]
     fn unknown_g_word_on_coordinate_line_fails_loud() {
-        for line in ["G93X0Y0", "G91X1.0Y1.0", "G33X0.5Y0.0"] {
+        for line in [
+            "G93X0Y0",
+            "G91X1.0Y1.0",
+            "G33X0.5Y0.0",
+            "X1.0Y1.0G85X2.0Y2.0G91",
+            "G91X1.0Y1.0G85X2.0Y2.0",
+        ] {
             let src = format!("M48\nMETRIC,TZ\nT1C0.500\n%\nT1\n{line}\nM30\n");
             assert!(
                 matches!(
