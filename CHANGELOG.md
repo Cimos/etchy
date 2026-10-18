@@ -9,6 +9,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- Viewer: base opacity (`S` / Settings → Diff) now applies to Overlay only.
+  At 0% it no longer blanks Old/New with no message, or empties Split/Swipe
+  under a false "no geometry in this view" hint; those views always draw the
+  board at full visibility (#324).
+
 ## [0.1.1] — 2026-10-03
 
 ### Added
