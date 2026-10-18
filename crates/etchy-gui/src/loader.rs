@@ -218,6 +218,7 @@ fn load_zip_capped(
         // keys on filename) works regardless of how the pack was zipped.
         let name = entry
             .name()
+            .with_context(|| format!("decoding zip entry {i} name"))?
             .rsplit(['/', '\\'])
             .next()
             .unwrap_or("")
@@ -377,8 +378,24 @@ mod tests {
 
         // Cap of 100: above the forged 10 (so a declared-size check passes it) but
         // below the real payload (so an actual-bytes check must reject it).
+        // zip >= 9 also refuses to read past the declared size, so either guard
+        // may fire first; both fail loud on the entry.
         let err = load_zip_capped(buf, 100, MAX_TOTAL_BYTES, MAX_ZIP_ENTRIES)
-            .expect_err("a forged small declaration must not bypass the cap")
+            .expect_err("a forged small declaration must not bypass the cap");
+        let err = format!("{err:#}");
+        assert!(err.contains("bomb-F_Cu.gtl"), "got: {err}");
+        assert!(
+            err.contains("per-file limit") || err.contains("larger than its declared"),
+            "got: {err}"
+        );
+    }
+
+    // The per-file cap still bites on an honestly-declared oversized entry.
+    #[test]
+    fn load_zip_capped_rejects_honest_entry_over_per_file_limit() {
+        let buf = zip_of_n_layers(1);
+        let err = load_zip_capped(buf, 10, MAX_TOTAL_BYTES, MAX_ZIP_ENTRIES)
+            .expect_err("an entry over the per-file cap must fail loud")
             .to_string();
         assert!(err.contains("per-file limit"), "got: {err}");
     }
