@@ -43,7 +43,7 @@ jobs:
         run: cargo install cargo-packager --version "$PACKAGER_VERSION" --locked
 
       - name: Build the CLI (static musl)
-        run: cargo build --release -p etchy-cli --features pdf --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release -p etchy-cli --features pdf --target x86_64-unknown-linux-musl
 
       - name: Build the viewer installers
         working-directory: crates/etchy-gui
@@ -83,7 +83,7 @@ jobs:
         run: cargo install cargo-packager --version "$PACKAGER_VERSION" --locked
 
       - name: Build the CLI
-        run: cargo build --release -p etchy-cli --features pdf
+        run: cargo build --locked --release -p etchy-cli --features pdf
 
       - name: Build the viewer installer (.msi)
         working-directory: crates/etchy-gui
@@ -125,8 +125,8 @@ jobs:
 
       - name: Build the CLI (arm64 + x86_64)
         run: |
-          cargo build --release -p etchy-cli --features pdf --target aarch64-apple-darwin
-          cargo build --release -p etchy-cli --features pdf --target x86_64-apple-darwin
+          cargo build --locked --release -p etchy-cli --features pdf --target aarch64-apple-darwin
+          cargo build --locked --release -p etchy-cli --features pdf --target x86_64-apple-darwin
 
       - name: Build the viewer (.dmg, arm64)
         working-directory: crates/etchy-gui

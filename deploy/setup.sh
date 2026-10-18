@@ -20,6 +20,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PORT=8080
 SERVE_DIR="$REPO/deploy/.serve"
 BUILD=1; SERVE=1; INSTALL=1
+# Keep in lockstep with the pinned trunk in .github/workflows/ci.yml (wasm job).
+TRUNK_VERSION=0.21.14
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,15 +52,17 @@ check_toolchain() {
       else die "missing target wasm32-unknown-unknown (run: rustup target add wasm32-unknown-unknown)"; fi
     fi
     if ! have trunk; then
-      if [ "$INSTALL" = 1 ]; then say "installing trunk (one-time, builds from source)…"; cargo install trunk --locked
-      else die "trunk not found (run: cargo install trunk --locked)"; fi
+      if [ "$INSTALL" = 1 ]; then say "installing trunk (one-time, builds from source)…"; cargo install trunk --version "$TRUNK_VERSION" --locked
+      else die "trunk not found (run: cargo install trunk --version $TRUNK_VERSION --locked)"; fi
+    elif ! trunk --version 2>/dev/null | grep -qF " $TRUNK_VERSION"; then
+      say "warning: $(trunk --version 2>/dev/null) differs from CI's pinned trunk $TRUNK_VERSION (cargo install trunk --version $TRUNK_VERSION --locked --force)"
     fi
   fi
 }
 
 build() {
   say "building etchy-gui for the browser (WASM, stable filenames)…"
-  ( cd "$REPO/crates/etchy-gui" && trunk build --release --filehash false )
+  ( cd "$REPO/crates/etchy-gui" && trunk build --release --filehash false --locked )
   local dist="$REPO/crates/etchy-gui/dist"
   [ -f "$dist/etchy-gui.js" ] && [ -f "$dist/etchy-gui_bg.wasm" ] \
     || die "build did not produce dist/etchy-gui.js + _bg.wasm in $dist"
