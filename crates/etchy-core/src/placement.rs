@@ -167,9 +167,9 @@ fn declared_unit(text: &str, header: Option<&str>) -> Result<Option<Unit>> {
     let mut from_header = None;
     if let Some(header) = header {
         let cols: Vec<String> = if header.contains(',') {
-            header
-                .split(',')
-                .map(|c| c.trim().trim_matches('"').to_ascii_lowercase())
+            split_csv(header)
+                .into_iter()
+                .map(|c| c.to_ascii_lowercase())
                 .collect()
         } else {
             header
@@ -237,11 +237,15 @@ fn parse_whitespace(text: &str) -> Result<Vec<Placement>> {
     let mut bad = BadRows::default();
     for (idx, raw) in text.lines().enumerate() {
         let mut line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
             continue;
         }
+        // KiCad's header is a `# Ref … PosX …` comment: it still marks data start.
         if is_header_line(line) {
             bad.anchored = true;
+            continue;
+        }
+        if line.starts_with('#') {
             continue;
         }
         // Strip a trailing `"…"` run (the Altium Description column).
@@ -342,9 +346,9 @@ fn parse_csv(text: &str) -> Result<Vec<Placement>> {
     let (_, header) = lines
         .next()
         .ok_or_else(|| EngineError::Parse("empty pick-and-place CSV".into()))?;
-    let cols: Vec<String> = header
-        .split(',')
-        .map(|c| c.trim().trim_matches('"').to_ascii_lowercase())
+    let cols: Vec<String> = split_csv(header)
+        .into_iter()
+        .map(|c| c.to_ascii_lowercase())
         .collect();
     let find = |preds: &[&str]| -> Option<usize> {
         cols.iter()
@@ -365,14 +369,11 @@ fn parse_csv(text: &str) -> Result<Vec<Placement>> {
         ..BadRows::default()
     };
     for (line_no, line) in lines {
-        let f: Vec<&str> = line
-            .split(',')
-            .map(|s| s.trim().trim_matches('"'))
-            .collect();
+        let f = split_csv(line);
         if f.iter().all(|s| s.is_empty()) {
             continue; // a `,,,,` spacer row carries nothing
         }
-        let get = |i: usize| f.get(i).copied().unwrap_or("");
+        let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
         let (x, y) = (strip_unit(get(x_i)), strip_unit(get(y_i)));
         // A missing/blank rotation cell means 0°; a present but unreadable one
         // is a bad row, never a silent 0°.
@@ -392,6 +393,28 @@ fn parse_csv(text: &str) -> Result<Vec<Placement>> {
     }
     bad.check()?;
     Ok(out)
+}
+
+/// Split one CSV line into trimmed fields, honouring `"…"` quoting (a comma
+/// inside quotes doesn't split; `""` inside quotes is a literal quote).
+fn split_csv(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => fields.push(std::mem::take(&mut cur).trim().to_string()),
+            _ => cur.push(c),
+        }
+    }
+    fields.push(cur.trim().to_string());
+    fields
 }
 
 /// Trim a trailing unit like `mm` (some exporters write `10.0mm`).
@@ -608,6 +631,29 @@ SW1          FPF1320        BottomLayer FPF1320     29.9516      38.9507      27
             "R1        1k     R_0402    fifteen",
         );
         assert_bad_rows(&text, 1, "line 5: `R1");
+    }
+
+    #[test]
+    fn kicad_bad_first_row_after_comment_header_fails_loud() {
+        let text = KICAD_POS.replace(
+            "C1        100nF  C_0402    10.0000",
+            "C1        100nF  C_0402    bad",
+        );
+        assert_bad_rows(&text, 1, "line 4: `C1");
+    }
+
+    #[test]
+    fn csv_quoted_comma_before_coordinates_parses() {
+        let text = "Designator,Comment,Layer,Center-X(mm),Center-Y(mm),Rotation\n\
+                    SW1,\"LOAD SWITCH, 1.5A \"\"X\"\"\",top,29.9516,38.9507,270\n";
+        let p = parse_placements(text).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!((p[0].x_mm - 29.9516).abs() < 1e-9);
+        assert!((p[0].rot_deg - 270.0).abs() < 1e-9);
+        assert_eq!(
+            split_csv("a, \"b, c\" ,\"d\"\"e\","),
+            vec!["a", "b, c", "d\"e", ""]
+        );
     }
 
     #[test]
