@@ -175,6 +175,19 @@ fn committed_corpus_matches_ground_truth() {
         .map(|v| v.as_str().unwrap())
         .collect();
 
+    // Every layer the ground truth names must be on disk in both revs, or a
+    // partially generated corpus would pass while checking nothing.
+    let expected: std::collections::BTreeSet<&str> = changed
+        .keys()
+        .map(String::as_str)
+        .chain(unchanged.iter().copied())
+        .collect();
+    assert!(!expected.is_empty(), "ground_truth.json names no layers");
+    for name in &expected {
+        assert!(a.contains_key(*name), "revA missing layer {name}");
+        assert!(b.contains_key(*name), "revB missing layer {name}");
+    }
+
     for (name, ca) in &a {
         let cb = &b[name];
         let d = diff_layer(ca, cb);

@@ -39,7 +39,9 @@ locally:
 ```bash
 python3 corpus/tools/gen_synth_board.py --out corpus/synthetic --copper-layers 16 --grid 24
 ETCHY_REQUIRE_CORPUS=1 cargo test -p etchy-core --test golden_corpus
-``` A live **gerbonara
+```
+
+A live **gerbonara
 parity** check is folded into the M1 parser bring-up.
 
 ## `synthetic/` — ready now
