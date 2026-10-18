@@ -9,6 +9,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- **Non-UTF-8 filenames keep their label (#299):** a layer file whose name isn't
+  valid UTF-8 (e.g. a Latin-1 export on Linux) was labelled `""` and classified
+  as Other; the CLI and viewer now use a lossy name, so the label stays readable
+  and the extension still classifies. A non-UTF-8 git-mode `[SUBDIR]` now fails
+  loud instead of silently diffing the whole tree.
+
 ## [0.1.1] — 2026-10-03
 
 ### Added

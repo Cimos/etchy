@@ -487,11 +487,14 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     }
 
     let (old, of, ow, new, nf, nw) = if git_mode {
-        let subdir = cli
-            .subdir
-            .as_deref()
-            .and_then(|p| p.to_str())
-            .unwrap_or(".");
+        // A non-UTF-8 subdir can't be passed to git as a pathspec here; fail loud
+        // rather than silently widening the scan to the whole tree (#299).
+        let subdir = match cli.subdir.as_deref() {
+            None => ".",
+            Some(p) => p
+                .to_str()
+                .with_context(|| format!("[SUBDIR] {} is not valid UTF-8", p.display()))?,
+        };
         if cli.subdir.is_none() {
             // Whole-repo scans flatten every Gerber/Excellon blob at the ref into
             // one board — fine for a single-board repo, garbage when the tree
@@ -745,15 +748,20 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>, Vec<String>)> 
                 path.display()
             );
         }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
+        let name = file_label(&path);
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         files.push((name, bytes));
     }
     board_from_files(files)
+}
+
+/// A file's basename as its layer label. Lossy, never empty-on-failure: a
+/// non-UTF-8 name (a Latin-1 export on Linux) keeps its readable part and its
+/// extension, so it still classifies and stays distinguishable in the report (#299).
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Load a revision straight from a git ref — `etchy <refA> <refB> [subdir]` over a
@@ -892,6 +900,25 @@ mod tests {
             .expect("--json alone must remain valid");
         assert!(cli.json);
         assert_eq!(cli.format, Format::Summary);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_filename_keeps_label_and_classifies() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // "b\xF6rd-F_Cu.gtl" — Latin-1 ö, invalid as UTF-8 (#299).
+        let path = Path::new("/fab").join(OsStr::from_bytes(b"b\xF6rd-F_Cu.gtl"));
+        let label = file_label(&path);
+        assert!(!label.is_empty(), "label must not collapse to empty");
+        assert!(label.ends_with(".gtl"), "extension survives: {label}");
+
+        let gerber = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
+        let (board, _, _) = board_from_files(vec![(label.clone(), gerber.to_vec())]).unwrap();
+        assert_eq!(board.layers.len(), 1);
+        assert_eq!(board.layers[0].kind, etchy_core::LayerKind::TopCopper);
+        assert_eq!(board.layers[0].label, label);
     }
 
     fn layer(kind: &'static str, area_mm2: f64, regions: u32) -> LayerReport {
