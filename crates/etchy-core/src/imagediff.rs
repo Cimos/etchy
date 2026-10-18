@@ -564,7 +564,7 @@ mod tests {
         assert_eq!((c.width, c.height), (3, 2));
         // Pixel 0 survives; pixel 3 (last column) and 8 (row 3) are cropped away.
         assert_eq!(&c.rgba[0..3], &[0, 0, 0]);
-        assert!(c.rgba[4..].chunks_exact(4).all(|p| p[0] == 255));
+        assert!(c.rgba[4..].as_chunks::<4>().0.iter().all(|p| p[0] == 255));
         // A no-op crop is the same image.
         assert_eq!(crop_top_left(&a, 4, 3).unwrap(), a);
     }
