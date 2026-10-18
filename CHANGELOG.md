@@ -9,6 +9,14 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Security
+- The viewer's `.zip` fab-pack reader is upgraded from `zip` 4.6 to 9.0.5,
+  clearing RUSTSEC-2026-0367, RUSTSEC-2026-0368 and RUSTSEC-2026-0369. etchy
+  only reads zip entries into memory and never calls the affected extract APIs,
+  so it was not exploitable; the upgrade keeps `cargo deny` green. A zip entry
+  whose real size exceeds its declared size is now also rejected by the zip
+  reader itself.
+
 ## [0.1.1] — 2026-10-03
 
 ### Added
