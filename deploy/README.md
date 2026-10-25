@@ -18,9 +18,12 @@ are **not** committed.
   layer/mode/zoom from the Rust hook). References `/etchy-gui.js` +
   `/etchy-gui_bg.wasm` with a `?v=` cache-bust.
 - `demo/etchy-server.py` — static file server **+ `POST /feedback`** → appends one
-  JSON line per submission to `feedback.jsonl` (server ts + IP + UA + payload).
+  JSON line per submission to `feedback.jsonl` (server ts + IP + UA + unique
+  `id` + payload). Bodies over 16 MiB, more than 8 screenshots or a screenshot
+  over 8 MiB decoded are refused with 413 and nothing is written (#250).
   Refuses to serve the feedback file, the `screenshots/` dir beside it, itself,
-  or any directory listing (#334).
+  or any directory listing (#334). Tests: `python3 -m unittest
+  deploy/demo/test_etchy_server.py deploy/test_collect_feedback.py`.
 
 ## Build + deploy (current host: Windows, served from `C:\Users\<user>\etchy-demo\`)
 
