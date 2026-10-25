@@ -1,0 +1,4 @@
+# Link the C runtime into the Windows binaries so they run on a clean install
+# without the Visual C++ redistributable (winget validation checks this; #415).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
