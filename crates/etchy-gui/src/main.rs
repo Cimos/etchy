@@ -232,6 +232,8 @@ mod native {
     mod tests {
         use super::{decode_icon_rgba, window_icon, WINDOW_ICON_PNG};
 
+        const WINDOWS_ICON: &[u8] = include_bytes!("../../../assets/brand/etchy-app-icon.ico");
+
         // #271: the embedded app icon must decode to a full RGBA buffer of the
         // expected dimensions, so `window_icon` hands the windowing backend a
         // valid icon (a silently-empty or mis-sized buffer would show nothing).
@@ -254,6 +256,27 @@ mod native {
         #[test]
         fn garbage_png_yields_no_icon_without_panicking() {
             assert!(decode_icon_rgba(b"not a png").is_none());
+        }
+
+        #[test]
+        fn windows_icon_contains_desktop_sizes() {
+            assert_eq!(&WINDOWS_ICON[..4], &[0, 0, 1, 0]);
+            let count = u16::from_le_bytes([WINDOWS_ICON[4], WINDOWS_ICON[5]]) as usize;
+            let sizes: Vec<_> = WINDOWS_ICON[6..6 + count * 16]
+                .chunks_exact(16)
+                .map(|entry| {
+                    let width = if entry[0] == 0 { 256 } else { entry[0] as u16 };
+                    let height = if entry[1] == 0 { 256 } else { entry[1] as u16 };
+                    assert_eq!(width, height);
+                    let length = u32::from_le_bytes(entry[8..12].try_into().unwrap()) as usize;
+                    let offset = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as usize;
+                    assert!(length > 0 && offset + length <= WINDOWS_ICON.len());
+                    width
+                })
+                .collect();
+            for size in [16, 32, 48, 256] {
+                assert!(sizes.contains(&size), "missing {size} px Windows icon");
+            }
         }
     }
 }

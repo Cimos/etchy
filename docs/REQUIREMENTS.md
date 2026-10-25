@@ -91,7 +91,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | GUI-2 | Rail side is **flippable left/right** in Settings; the choice persists. | owner | ✅ |
 | GUI-3 | Rail: **Layers and Export tabs** with the **Measure ruler as a plain tool toggle between them** (arms/disarms, no panel — see MEAS-1) and **Settings as a gear pinned at the bottom**. No monogram on the rail. | owner, #190, #211 | ✅ |
 | GUI-4 | The top bar holds only: brand icon + board label, the **mode segment** (Overlay/Old/New/Split/Swipe), and segmented **Help/Fit/Open**. Everything else lives in the rail. | #6/#200 | ✅ |
-| GUI-5 | Branding uses the real **etchy pad-built E** (`assets/brand/etchy-icon`) — never a hand-drawn substitute. Rail/panel icons are painter-drawn, never font glyphs. | #191, #16/#30 | ✅ |
+| GUI-5 | Branding uses the real **etchy pad-built E** (`assets/brand/etchy-icon`) — never a hand-drawn substitute. The Windows viewer executable and installer shortcut use the app icon. Rail/panel icons are painter-drawn, never font glyphs. | #191, #16/#30, #390 | ✅ (Windows executable icon checked in release CI) |
 | GUI-6 | **Settings is a rail panel** (not a floating window) with stacked collapsible sections: Display, Diff, Grid, Measure, Input, Colours, Layers, Hotkeys. **Resizable like the other panels, and its width holds steady** when sections open/close. | #199, #212, owner | ✅ |
 | GUI-7 | Web and native present the **same old→new labels**, derived consistently from meaningful path parts. | #177 | ✅ |
 | GUI-8 | Old/new naming everywhere (never A/B or before/after). | #160, owner | ✅ |
