@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::diff::LayerChange;
+use crate::diff::{nm2_to_mm2, ChangedRegion, LayerChange};
 use crate::model::LayerKind;
 use crate::native::{BoardSide, NativeDiagnostic, PointNm, RecordAccounting};
 
@@ -205,6 +205,94 @@ pub enum LayerStatus {
     RemovedLayer,
 }
 
+/// One reported connected region, in exact nanometre coordinates.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegionReport {
+    pub change: RegionChange,
+    pub area_mm2: f64,
+    pub area_nm2: String,
+    pub bbox_nm: [i64; 4],
+    pub centroid_nm: [i64; 2],
+    /// `None` means this layer has no X2 object attributes.
+    pub labels: Option<RegionLabels>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RegionChange {
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegionLabels {
+    pub refdes: Vec<String>,
+    pub pins: Vec<String>,
+    pub nets: Vec<String>,
+    pub truncated: bool,
+}
+
+impl RegionReport {
+    pub fn from_region(region: &ChangedRegion<'_>, change: RegionChange) -> Self {
+        Self {
+            change,
+            area_mm2: nm2_to_mm2(region.area_nm2),
+            area_nm2: region.area_nm2.to_string(),
+            bbox_nm: region.bbox_nm,
+            centroid_nm: region.centroid_nm,
+            labels: None,
+        }
+    }
+
+    /// Exact area for ordering (`area_nm2` is a decimal string in the JSON).
+    fn area(&self) -> i128 {
+        self.area_nm2.parse().unwrap_or(0)
+    }
+
+    pub fn change_str(&self) -> &'static str {
+        match self.change {
+            RegionChange::Added => "added",
+            RegionChange::Removed => "removed",
+        }
+    }
+
+    /// `[x0, y0, x1, y1]` in mm, 4 decimals.
+    pub fn bbox_mm_text(&self) -> String {
+        self.bbox_nm
+            .map(|v| format!("{:.4}", v as f64 / 1e6))
+            .join(", ")
+    }
+
+    pub fn centroid_mm_text(&self) -> String {
+        self.centroid_nm
+            .map(|v| format!("{:.4}", v as f64 / 1e6))
+            .join(", ")
+    }
+
+    /// Plain-text labels: `None` when the layer has no X2 object attributes.
+    pub fn labels_text(&self) -> Option<String> {
+        let labels = self.labels.as_ref()?;
+        let mut parts = Vec::new();
+        for (title, values) in [
+            ("refdes", &labels.refdes),
+            ("pins", &labels.pins),
+            ("nets", &labels.nets),
+        ] {
+            if !values.is_empty() {
+                parts.push(format!("{}: {}", title, values.join(", ")));
+            }
+        }
+        if labels.truncated {
+            parts.push("truncated".into());
+        }
+        Some(if parts.is_empty() {
+            "none touched".into()
+        } else {
+            parts.join("; ")
+        })
+    }
+}
+
 /// One layer's entry in the report.
 #[derive(Debug, Clone, Serialize)]
 pub struct LayerReport {
@@ -222,6 +310,10 @@ pub struct LayerReport {
     pub removed_area_nm2: String,
     pub added_regions: u32,
     pub removed_regions: u32,
+    /// Sorted by descending area within each change direction.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<RegionReport>,
+    pub labels_available: bool,
 }
 
 impl LayerReport {
@@ -244,7 +336,20 @@ impl LayerReport {
             removed_area_nm2: change.removed_area_nm2.to_string(),
             added_regions: change.added_region_count,
             removed_regions: change.removed_region_count,
+            regions: Vec::new(),
+            labels_available: false,
         }
+    }
+
+    pub fn top_regions(&self, n: usize) -> Vec<&RegionReport> {
+        let mut regions: Vec<_> = self.regions.iter().collect();
+        regions.sort_by(|a, b| {
+            b.area()
+                .cmp(&a.area())
+                .then_with(|| a.bbox_nm.cmp(&b.bbox_nm))
+        });
+        regions.truncate(n);
+        regions
     }
 
     fn is_changed(&self) -> bool {
@@ -320,6 +425,10 @@ impl DiffReport {
     /// GitHub-flavoured Markdown summary, for a CI step-summary or PR comment.
     /// Pure (no I/O); the CLI just prints it. Lists only the changed layers.
     pub fn to_markdown_summary(&self) -> String {
+        self.to_markdown_summary_with_limit(10)
+    }
+
+    pub fn to_markdown_summary_with_limit(&self, limit: usize) -> String {
         let t = &self.totals;
         let mut s = String::from("## etchy — PCB diff\n\n");
         if !self.any_changes {
@@ -341,6 +450,32 @@ impl DiffReport {
                     "| {} | {:.4} | {:.4} | {} | {} |\n",
                     name, l.added_area_mm2, l.removed_area_mm2, l.added_regions, l.removed_regions,
                 ));
+            }
+            for l in self.layers.iter().filter(|l| l.is_changed()) {
+                if l.regions.is_empty() {
+                    continue;
+                }
+                let name = l
+                    .inner_index
+                    .map_or_else(|| l.kind.to_string(), |i| format!("{}{}", l.kind, i));
+                s.push_str(&format!(
+                    "\n### {} — largest changed regions (top {})\n\n",
+                    name, limit
+                ));
+                s.push_str("| change | area mm² | bbox mm [x₀,y₀,x₁,y₁] | centroid mm [x,y] | X2 labels |\n|---|--:|---|---|---|\n");
+                for r in l.top_regions(limit) {
+                    let labels = r
+                        .labels_text()
+                        .map_or_else(|| "unavailable".to_string(), |t| md_code_span(&t));
+                    s.push_str(&format!(
+                        "| {} | {:.4} | {} | {} | {} |\n",
+                        r.change_str(),
+                        r.area_mm2,
+                        r.bbox_mm_text(),
+                        r.centroid_mm_text(),
+                        labels
+                    ));
+                }
             }
         }
         if !self.warnings.is_empty() {
@@ -517,6 +652,70 @@ mod tests {
             actual,
             include_str!("../tests/expected/report-v1.json").trim_end_matches('\n')
         );
+    }
+
+    #[test]
+    fn v1_region_json_matches_example() {
+        let change = LayerChange {
+            added_area_nm2: 1_000_000_000_000,
+            added_region_count: 1,
+            has_added: true,
+            ..Default::default()
+        };
+        let mut layer = LayerReport::new(
+            LayerKind::TopCopper,
+            Some("old.gtl".into()),
+            Some("new.gtl".into()),
+            LayerStatus::Changed,
+            &change,
+        );
+        layer.labels_available = true;
+        layer.regions.push(RegionReport {
+            change: RegionChange::Added,
+            area_mm2: 1.0,
+            area_nm2: "1000000000000".into(),
+            bbox_nm: [0, 0, 1_000_000, 1_000_000],
+            centroid_nm: [500_000, 500_000],
+            labels: Some(RegionLabels {
+                refdes: vec!["U1".into()],
+                pins: vec!["U1:1".into()],
+                nets: vec!["GND".into()],
+                truncated: false,
+            }),
+        });
+        let actual: serde_json::Value =
+            serde_json::from_str(&DiffReport::new(vec![layer], vec![]).to_json()).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/expected/report-v1-regions.json")).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn top_regions_order_by_numeric_area() {
+        // Areas are decimal strings; "9" must not outrank "10" as text would.
+        let mut layer = LayerReport::new(
+            LayerKind::TopCopper,
+            None,
+            None,
+            LayerStatus::Changed,
+            &LayerChange::default(),
+        );
+        for (area, x) in [("9", 0), ("10", 1), ("200", 2)] {
+            layer.regions.push(RegionReport {
+                change: RegionChange::Added,
+                area_mm2: 0.0,
+                area_nm2: area.into(),
+                bbox_nm: [x, 0, x, 0],
+                centroid_nm: [x, 0],
+                labels: None,
+            });
+        }
+        let top: Vec<_> = layer
+            .top_regions(2)
+            .iter()
+            .map(|r| r.area_nm2.as_str())
+            .collect();
+        assert_eq!(top, ["200", "10"]);
     }
 
     #[test]

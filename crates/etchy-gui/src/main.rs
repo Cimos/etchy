@@ -333,6 +333,7 @@ fn board_from_files(
                 label: name.clone(),
                 geometry: std::sync::Arc::new(geometry),
                 negative,
+                x2_objects: None,
             });
         }
     }

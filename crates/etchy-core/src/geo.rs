@@ -117,6 +117,11 @@ pub type Contour = Vec<Pt>;
 /// never leak across the public API.
 pub type Shape = Vec<Contour>;
 
+/// Exact filled area of one correctly wound connected shape.
+pub(crate) fn shape_area_nm2(shape: &Shape) -> i128 {
+    shape.iter().map(|ring| shoelace_2x_nm2(ring)).sum::<i128>() / 2
+}
+
 /// The filled geometry of a layer (or a diff result): a set of disjoint shapes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolygonSet {
@@ -188,10 +193,7 @@ impl PolygonSet {
     pub fn region_count_above(&self, min_area_nm2: i128) -> u32 {
         self.shapes
             .iter()
-            .filter(|s| {
-                let doubled: i128 = s.iter().map(|c| shoelace_2x_nm2(c)).sum();
-                (doubled / 2).abs() >= min_area_nm2
-            })
+            .filter(|s| shape_area_nm2(s).abs() >= min_area_nm2)
             .count() as u32
     }
 
@@ -237,7 +239,7 @@ pub fn triangulate_shape(shape: &Shape) -> Vec<[Pt; 3]> {
 
 /// Twice the signed area of a ring (shoelace), accumulated in `i128` so the
 /// per-term products (up to ~nm·nm) and their sum never overflow. CCW > 0.
-fn shoelace_2x_nm2(c: &[Pt]) -> i128 {
+pub(crate) fn shoelace_2x_nm2(c: &[Pt]) -> i128 {
     let n = c.len();
     if n < 3 {
         return 0;

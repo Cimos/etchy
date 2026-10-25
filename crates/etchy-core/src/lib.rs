@@ -32,13 +32,19 @@ pub mod view;
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
 pub use excellon::{looks_like_excellon, resolve_excellon};
-pub use export::{board_areas_csv, board_report_html, layer_svg, layer_svg_with_colors};
+pub use export::{
+    board_areas_csv, board_report_html, board_report_html_with_limit, layer_svg,
+    layer_svg_with_colors,
+};
 pub use geo::{
     quantize_mm, simplify_contour, triangulate_shape, Aperture, Contour, Polarity, PolygonSet,
     Primitive, Pt, Shape, GRID_NM, NM_PER_MM,
 };
 pub use geom::CIRCLE_SEGMENTS;
-pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};
+pub use gerber::{
+    coordinate_mismatch_warning, gerber_format, resolve_layer, resolve_layer_with_labels,
+    GerberFormat, Units,
+};
 pub use imagediff::{
     classify_pair_size, crop_top_left, diff_images, Image, ImageDiffOptions, ImageDiffResult,
     ImageDiffStats, PairSizing, SIZE_TOLERANCE_PX,
@@ -62,6 +68,7 @@ pub use report::{
 };
 pub use view::{BoardDiff, LayerView};
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The crate version, from Cargo.
@@ -138,7 +145,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
     // (a, b) are the (old, new) geometry for this kind; one is empty for a one-sided
     // layer. An empty one-sided layer stays Unchanged (no false gate).
-    let (kind, label_old, label_new, a, b, default_status, negative) = match pairing {
+    let (kind, label_old, label_new, a, b, old_x2, new_x2, default_status, negative) = match pairing
+    {
         LayerPairing::Both { kind, old, new } => {
             if old.negative != new.negative {
                 return Err(EngineError::PolarityMismatch {
@@ -152,6 +160,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
                 Some(new.label.clone()),
                 old.geometry.clone(),
                 new.geometry.clone(),
+                old.x2_objects.clone(),
+                new.x2_objects.clone(),
                 LayerStatus::Changed,
                 old.negative,
             )
@@ -165,6 +175,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
             None,
             l.geometry.clone(),
             empty,
+            l.x2_objects.clone(),
+            None,
             LayerStatus::RemovedLayer,
             false,
         ),
@@ -174,6 +186,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
             Some(l.label.clone()),
             empty,
             l.geometry.clone(),
+            None,
+            l.x2_objects.clone(),
             LayerStatus::AddedLayer,
             false,
         ),
@@ -186,13 +200,33 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         // `added`/`removed` keep meaning copper (#317).
         std::mem::swap(&mut d.added, &mut d.removed);
     }
-    let change = d.measure();
+    let (added, removed) = d.reported_regions();
+    let change = d.measure_regions(&added, &removed);
     let status = if change.is_unchanged() {
         LayerStatus::Unchanged
     } else {
         default_status
     };
-    let report = LayerReport::new(kind, label_old.clone(), label_new.clone(), status, &change);
+    let mut report = LayerReport::new(kind, label_old.clone(), label_new.clone(), status, &change);
+    let (added_x2, removed_x2) = if negative {
+        (&old_x2, &new_x2)
+    } else {
+        (&new_x2, &old_x2)
+    };
+    report.labels_available = old_x2.is_some() || new_x2.is_some();
+    report.regions = added
+        .iter()
+        .map(|r| region_report(r, report::RegionChange::Added, added_x2))
+        .chain(
+            removed
+                .iter()
+                .map(|r| region_report(r, report::RegionChange::Removed, removed_x2)),
+        )
+        .collect();
+    debug_assert_eq!(
+        report.regions.len(),
+        (change.added_region_count + change.removed_region_count) as usize
+    );
     let view = LayerView {
         kind,
         label_old,
@@ -205,6 +239,57 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         change,
     };
     Ok((report, view))
+}
+
+const MAX_LABELS_PER_KIND: usize = 20;
+
+fn region_report(
+    region: &diff::ChangedRegion<'_>,
+    direction: report::RegionChange,
+    objects: &Option<Arc<Vec<gerber::LabeledContour>>>,
+) -> report::RegionReport {
+    let mut result = report::RegionReport::from_region(region, direction);
+    let Some(objects) = objects else {
+        return result;
+    };
+    let mut refs = BTreeSet::new();
+    let mut pins = BTreeSet::new();
+    let mut nets = BTreeSet::new();
+    for object in objects.iter() {
+        let bb = &region.bbox_nm;
+        // The outline (first ring) bounds the object; holes lie inside it.
+        let outline = &object.shape[0];
+        if outline.iter().all(|p| p.x < bb[0])
+            || outline.iter().all(|p| p.x > bb[2])
+            || outline.iter().all(|p| p.y < bb[1])
+            || outline.iter().all(|p| p.y > bb[3])
+        {
+            continue;
+        }
+        if !boolean::overlaps(region.shape, &object.shape) {
+            continue;
+        }
+        if let Some(name) = &object.labels.refdes {
+            refs.insert(name.clone());
+        }
+        if let Some(name) = &object.labels.pin_refdes {
+            refs.insert(name.clone());
+        }
+        if let Some(name) = &object.labels.pin {
+            pins.insert(name.clone());
+        }
+        nets.extend(object.labels.nets.iter().cloned());
+    }
+    let truncated = refs.len() > MAX_LABELS_PER_KIND
+        || pins.len() > MAX_LABELS_PER_KIND
+        || nets.len() > MAX_LABELS_PER_KIND;
+    result.labels = Some(report::RegionLabels {
+        refdes: refs.into_iter().take(MAX_LABELS_PER_KIND).collect(),
+        pins: pins.into_iter().take(MAX_LABELS_PER_KIND).collect(),
+        nets: nets.into_iter().take(MAX_LABELS_PER_KIND).collect(),
+        truncated,
+    });
+    result
 }
 
 #[cfg(test)]
@@ -235,12 +320,14 @@ mod tests {
             label: "F_Cu".into(),
             geometry: Arc::new(polygonize_gerber(a_txt.as_bytes()).unwrap()),
             negative: false,
+            x2_objects: None,
         };
         let lb = Layer {
             kind: LayerKind::TopCopper,
             label: "F_Cu".into(),
             geometry: Arc::new(polygonize_gerber(b_txt.as_bytes()).unwrap()),
             negative: false,
+            x2_objects: None,
         };
         let old = Board { layers: vec![la] };
         let new = Board { layers: vec![lb] };
@@ -249,6 +336,80 @@ mod tests {
         assert_eq!(rep.totals.added_regions, 1);
         assert_eq!(rep.totals.removed_regions, 0);
         assert_eq!(rep.layers[0].status, LayerStatus::Changed);
+    }
+
+    #[test]
+    fn region_labels_use_the_changed_side_and_mark_unavailable() {
+        let header = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n";
+        let anchors = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let old_text =
+            format!("{header}{anchors}%TO.C,R1*%\n%TO.N,OLD*%\nX15000000Y15000000D03*\nM02*\n");
+        let new_text = format!("{header}{anchors}%TO.C,U2*%\n%TO.P,U2,4*%\n%TO.N,NEW*%\nX25000000Y25000000D03*\nM02*\n");
+        let make = |text: &str, labels: bool| {
+            let (geometry, objects) = resolve_layer_with_labels(text.as_bytes()).unwrap();
+            Layer {
+                kind: LayerKind::TopCopper,
+                label: "F_Cu".into(),
+                geometry: Arc::new(geometry),
+                negative: false,
+                x2_objects: labels.then(|| Arc::new(objects.unwrap())),
+            }
+        };
+        let old = Board {
+            layers: vec![make(&old_text, true)],
+        };
+        let new = Board {
+            layers: vec![make(&new_text, true)],
+        };
+        let report = compare(&old, &new).unwrap();
+        let regions = &report.layers[0].regions;
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].labels.as_ref().unwrap().refdes, ["U2"]);
+        assert_eq!(regions[0].labels.as_ref().unwrap().pins, ["U2:4"]);
+        assert_eq!(regions[0].labels.as_ref().unwrap().nets, ["NEW"]);
+        assert_eq!(regions[1].labels.as_ref().unwrap().refdes, ["R1"]);
+        assert_eq!(regions[1].labels.as_ref().unwrap().nets, ["OLD"]);
+        let json = report.to_json();
+        assert!(json.contains("\"regions\""));
+        assert!(report.to_markdown_summary().contains("U2:4"));
+        let unlabelled = Board {
+            layers: vec![make(&new_text, false)],
+        };
+        let report = compare(&old, &unlabelled).unwrap();
+        assert!(report.layers[0].regions[0].labels.is_none());
+        assert!(report.to_markdown_summary().contains("unavailable"));
+    }
+
+    #[test]
+    fn region_label_lists_are_capped_and_announce_truncation() {
+        let contour = vec![
+            Pt::new(0, 0),
+            Pt::new(1_000_000, 0),
+            Pt::new(1_000_000, 1_000_000),
+            Pt::new(0, 1_000_000),
+        ];
+        let shape = vec![contour.clone()];
+        let region = diff::ChangedRegion {
+            area_nm2: 1_000_000_000_000,
+            bbox_nm: [0, 0, 1_000_000, 1_000_000],
+            centroid_nm: [500_000, 500_000],
+            shape: &shape,
+        };
+        let objects = Arc::new(
+            (0..25)
+                .map(|i| gerber::LabeledContour {
+                    shape: vec![contour.clone()],
+                    labels: gerber::ObjectLabels {
+                        refdes: Some(format!("U{i}")),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+        );
+        let report = region_report(&region, report::RegionChange::Added, &Some(objects));
+        let labels = report.labels.unwrap();
+        assert_eq!(labels.refdes.len(), 20);
+        assert!(labels.truncated);
     }
 
     // ---- #240: public-API integration (through compare / compare_detailed) ----
@@ -269,6 +430,7 @@ mod tests {
             label: "In1_Cu".into(),
             geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
             negative,
+            x2_objects: None,
         };
         let pos = compare(
             &Board {
@@ -315,6 +477,7 @@ mod tests {
                 polygonize_gerber(format!("{hdr}{corners}M02*\n").as_bytes()).unwrap(),
             ),
             negative,
+            x2_objects: None,
         };
         // Top copper on both sides so the same-board guard has a shared extent.
         let old = Board {
@@ -355,6 +518,7 @@ mod tests {
             label: label.into(),
             geometry: Arc::clone(&g),
             negative,
+            x2_objects: None,
         };
         let err = compare(
             &Board {
@@ -386,6 +550,7 @@ mod tests {
             label: label.into(),
             geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
             negative: false,
+            x2_objects: None,
         }
     }
 
@@ -474,6 +639,7 @@ mod tests {
                 label: "F_Cu".into(),
                 geometry: Arc::clone(&ga),
                 negative: false,
+                x2_objects: None,
             }],
         };
         let new = Board {
@@ -482,6 +648,7 @@ mod tests {
                 label: "F_Cu".into(),
                 geometry: Arc::clone(&gb),
                 negative: false,
+                x2_objects: None,
             }],
         };
         let diff = compare_detailed(&old, &new).unwrap();

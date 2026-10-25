@@ -83,6 +83,9 @@ struct Cli {
     /// and each changed layer's overlay inlined (no external assets).
     #[arg(long, value_name = "FILE")]
     html: Option<PathBuf>,
+    /// Maximum changed regions shown per layer in Markdown and HTML (default 10).
+    #[arg(long, value_name = "N", default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=100))]
+    top_regions: u32,
 
     /// CI gate: fail (exit 1) only when the changed area on the gated layers
     /// exceeds this many mm². Omitted ⇒ any change on the gated layers fails.
@@ -554,10 +557,11 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
 
     // Optional self-contained HTML report (M1 output).
     if let Some(path) = &cli.html {
-        let html = etchy_core::board_report_html(
+        let html = etchy_core::board_report_html_with_limit(
             &diff,
             &cli.old.to_string_lossy(),
             &cli.new.to_string_lossy(),
+            cli.top_regions as usize,
         );
         std::fs::write(path, html)
             .with_context(|| format!("writing HTML report to {}", path.display()))?;
@@ -576,7 +580,7 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     let out = match format {
         Format::Json => board_json(&report, &verdict),
         Format::Md => {
-            let mut s = report.to_markdown_summary();
+            let mut s = report.to_markdown_summary_with_limit(cli.top_regions as usize);
             verdict.append_markdown_note(&mut s);
             s
         }
@@ -675,6 +679,7 @@ fn board_from_files(
         // Gerber layer, Excellon/NC drill, pick-and-place, or neither (job file,
         // README) — skip the last. Drill (#62) and P&P (#115) route through their
         // own front-ends so those changes diff instead of being silently dropped.
+        let mut x2_objects = None;
         let geometry = if etchy_core::looks_like_gerber(&bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(&bytes).ok();
@@ -698,10 +703,10 @@ fn board_from_files(
             if let Some(w) = warn {
                 warnings.push(w);
             }
-            std::sync::Arc::new(
-                etchy_core::polygonize_gerber(&bytes)
-                    .with_context(|| format!("processing layer {name}"))?,
-            )
+            let (geometry, labels) = etchy_core::resolve_layer_with_labels(&bytes)
+                .with_context(|| format!("processing layer {name}"))?;
+            x2_objects = labels.map(std::sync::Arc::new);
+            std::sync::Arc::new(geometry)
         } else if etchy_core::looks_like_excellon(&bytes) {
             // Content wins over the filename: an Excellon file named e.g.
             // Board.TXT must land on the Drill layer, not "other" — otherwise
@@ -727,6 +732,7 @@ fn board_from_files(
             label: name,
             geometry,
             negative,
+            x2_objects,
         });
     }
     Ok((Board { layers }, fmt, warnings))
@@ -950,6 +956,8 @@ mod tests {
             removed_area_nm2: "0".into(),
             added_regions: regions,
             removed_regions: 0,
+            regions: Vec::new(),
+            labels_available: false,
         }
     }
 
@@ -1301,6 +1309,19 @@ mod tests {
         assert!(json.contains("\"configured\": true"));
         assert!(json.contains("\"passed\": true"));
         assert!(json.contains("\"fail_on_area\": 1.0"));
+    }
+
+    #[test]
+    fn load_board_keeps_x2_object_labels() {
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n%TO.C,U7*%\nX10000000Y10000000D03*\nM02*\n";
+        let dir = std::env::temp_dir().join(format!("etchy-x2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("board.gtl"), g).unwrap();
+        let (board, _, _) = load_board(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let objects = board.layers[0].x2_objects.as_ref().unwrap();
+        assert_eq!(objects[0].labels.refdes.as_deref(), Some("U7"));
     }
 
     #[test]

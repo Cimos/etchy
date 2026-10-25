@@ -10,6 +10,7 @@
 //! Anything it cannot render faithfully is a loud [`EngineError`] — never a
 //! silently dropped or wrong-but-quiet result (the trust bar).
 
+use gerber_parser::gerber_types::{AttributeDeletionCriterion, Net, ObjectAttribute};
 use std::collections::HashMap;
 use std::io::{BufReader, Cursor};
 
@@ -23,7 +24,7 @@ use gerber_parser::parse;
 
 use crate::boolean;
 use crate::error::{EngineError, Result};
-use crate::geo::{quantize_mm, snap_nm, Contour, PolygonSet, Pt};
+use crate::geo::{quantize_mm, shoelace_2x_nm2, snap_nm, Contour, PolygonSet, Pt, Shape};
 use crate::geom;
 
 /// Per-layer contour ceiling. A tiny file with many large arcs or region loops
@@ -58,6 +59,13 @@ const MAX_SPANS_PER_LAYER: usize = 2_000;
 
 /// Parse + resolve one Gerber layer's bytes into its filled copper geometry.
 pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
+    resolve_layer_with_labels(bytes).map(|(geometry, _)| geometry)
+}
+
+/// Resolve geometry and retain the X2 object attributes active at each drawing.
+pub fn resolve_layer_with_labels(
+    bytes: &[u8],
+) -> Result<(PolygonSet, Option<Vec<LabeledContour>>)> {
     let normalized = normalize(bytes)?;
     // The third-party parser is the first code to touch attacker-controlled bytes.
     // Contain a panic in it as a loud typed error instead of unwinding through the
@@ -123,7 +131,24 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
         };
         acc = boolean::flatten(&result);
     }
-    Ok(result)
+    Ok((result, m.x2_seen.then_some(m.labeled_contours)))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjectLabels {
+    pub refdes: Option<String>,
+    pub pin_refdes: Option<String>,
+    pub pin: Option<String>,
+    pub nets: Vec<String>,
+}
+
+/// One labelled dark object: its outline plus any holes. A region fill keeps its
+/// clearance cut-outs, so a change inside a pour hole is not tagged with the
+/// pour's net.
+#[derive(Debug, Clone)]
+pub struct LabeledContour {
+    pub shape: Shape,
+    pub labels: ObjectLabels,
 }
 
 /// Coordinate units a Gerber declares via `%MO`.
@@ -369,6 +394,9 @@ struct Machine<'a> {
     /// are resolved in order (union for dark, subtract for clear), not as one
     /// order-independent `dark − clear` pass.
     spans: Vec<(bool, Vec<Contour>)>,
+    x2_seen: bool,
+    labels: ObjectLabels,
+    labeled_contours: Vec<LabeledContour>,
 
     cur: Pt,
     ap: Option<i32>,
@@ -418,6 +446,9 @@ impl<'a> Machine<'a> {
             nm_per_unit,
             grid_step_nm,
             spans: Vec::new(),
+            x2_seen: false,
+            labels: ObjectLabels::default(),
+            labeled_contours: Vec::new(),
             cur: Pt::new(0, 0),
             ap: None,
             interp: InterpolationMode::Linear,
@@ -499,13 +530,42 @@ impl<'a> Machine<'a> {
                     ));
                 }
             }
+            ExtendedCode::ObjectAttribute(attr) => {
+                self.x2_seen = true;
+                match attr {
+                    ObjectAttribute::Component(name) => self.labels.refdes = Some(name.clone()),
+                    ObjectAttribute::Pin(pin) => {
+                        self.labels.pin_refdes = Some(pin.refdes.clone());
+                        self.labels.pin = Some(format!("{}:{}", pin.refdes, pin.name));
+                    }
+                    ObjectAttribute::Net(Net::Connected(names)) => self.labels.nets = names.clone(),
+                    ObjectAttribute::Net(Net::NotConnected) => {
+                        self.labels.nets = vec!["N/C".into()]
+                    }
+                    ObjectAttribute::Net(Net::None) => self.labels.nets.clear(),
+                    _ => {}
+                }
+            }
+            ExtendedCode::DeleteAttribute(criterion) => match criterion {
+                AttributeDeletionCriterion::AllApertureAndObjectAttributes => {
+                    self.labels = ObjectLabels::default()
+                }
+                AttributeDeletionCriterion::SingleObjectAttribute(name) => match name.as_str() {
+                    ".C" => self.labels.refdes = None,
+                    ".P" => {
+                        self.labels.pin_refdes = None;
+                        self.labels.pin = None;
+                    }
+                    ".N" => self.labels.nets.clear(),
+                    _ => {}
+                },
+                AttributeDeletionCriterion::SingleApertureAttribute(_) => {}
+            },
             ExtendedCode::Unit(_)
             | ExtendedCode::ApertureDefinition(_)
             | ExtendedCode::ApertureMacro(_)
             | ExtendedCode::FileAttribute(_)
-            | ExtendedCode::ObjectAttribute(_)
             | ExtendedCode::ApertureAttribute(_)
-            | ExtendedCode::DeleteAttribute(_)
             | ExtendedCode::ImageName(_) => {}
             ExtendedCode::ImagePolarity(ImagePolarity::Positive)
             | ExtendedCode::MirrorImage(ImageMirroring::None)
@@ -1093,6 +1153,23 @@ impl<'a> Machine<'a> {
         // solid (filling pour clearances — the pour-render regression). The one
         // exception (a macro Outline, whose winding is the exporter's choice) is
         // normalized at its own call site, not here.
+        // Only dark copper carries labels: a clear object is a cut, not copper a
+        // change can touch. A CW ring is a hole of the region fill just emitted.
+        if self.x2_seen && is_dark && self.labels != ObjectLabels::default() {
+            let doubled = shoelace_2x_nm2(&c);
+            if doubled > 0 {
+                self.labeled_contours.push(LabeledContour {
+                    shape: vec![c.clone()],
+                    labels: self.labels.clone(),
+                });
+            } else if doubled < 0 {
+                if let Some(last) = self.labeled_contours.last_mut() {
+                    if last.labels == self.labels {
+                        last.shape.push(c.clone());
+                    }
+                }
+            }
+        }
         match self.spans.last_mut() {
             Some((d, run)) if *d == is_dark => run.push(c),
             _ => self.spans.push((is_dark, vec![c])),
@@ -1299,6 +1376,64 @@ mod tests {
 
     fn area_mm2(g: &str) -> f64 {
         resolve_layer(g.as_bytes()).unwrap().area_mm2()
+    }
+
+    #[test]
+    fn x2_attributes_follow_objects_and_td_deletes_them() {
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n\
+%TO.C,U1*%\n%TO.P,U1,1*%\n%TO.N,GND*%\nX10000000Y10000000D03*\n\
+%TD.P*%\nX20000000Y10000000D03*\n%TD*%\nX30000000Y10000000D03*\nM02*\n";
+        let (_, objects) = resolve_layer_with_labels(g).unwrap();
+        let objects = objects.expect("X2 attributes were present");
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].labels.refdes.as_deref(), Some("U1"));
+        assert_eq!(objects[0].labels.pin.as_deref(), Some("U1:1"));
+        assert_eq!(objects[0].labels.nets, ["GND"]);
+        assert_eq!(objects[1].labels.refdes.as_deref(), Some("U1"));
+        assert_eq!(objects[1].labels.pin, None);
+        assert_eq!(objects[1].labels.nets, ["GND"]);
+    }
+
+    #[test]
+    fn clear_objects_carry_no_labels() {
+        // A clear flash is a cut, not copper: it must not label a change.
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,2X2*%\n%ADD11R,1X1*%\nD10*\n\
+%TO.N,GND*%\nX10000000Y10000000D03*\n%LPC*%\n%TO.N,CUT*%\nD11*\nX10000000Y10000000D03*\nM02*\n";
+        let (_, objects) = resolve_layer_with_labels(g).unwrap();
+        let objects = objects.unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].labels.nets, ["GND"]);
+    }
+
+    #[test]
+    fn region_fill_keeps_its_hole_with_the_label() {
+        // A pour with a clearance hole: the labelled object must include the hole,
+        // so a change inside the clearance does not overlap the pour's net.
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%TO.N,GND*%\nG36*\n\
+X0Y0D02*\nX10000000Y0D01*\nX10000000Y10000000D01*\nX0Y10000000D01*\nX0Y0D01*\n\
+X4000000Y4000000D02*\nX6000000Y4000000D01*\nX6000000Y6000000D01*\nX4000000Y6000000D01*\nX4000000Y4000000D01*\n\
+G37*\nM02*\n";
+        let (_, objects) = resolve_layer_with_labels(g).unwrap();
+        let objects = objects.unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].shape.len(), 2, "outline plus its hole");
+        let inside_hole = vec![vec![
+            Pt::new(4_500_000, 4_500_000),
+            Pt::new(5_500_000, 4_500_000),
+            Pt::new(5_500_000, 5_500_000),
+            Pt::new(4_500_000, 5_500_000),
+        ]];
+        assert!(!boolean::overlaps(&inside_hole, &objects[0].shape));
+    }
+
+    #[test]
+    fn pin_attribute_retains_its_own_refdes() {
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n%TO.P,J3,2*%\nX10000000Y10000000D03*\nM02*\n";
+        let (_, objects) = resolve_layer_with_labels(g).unwrap();
+        let labels = &objects.unwrap()[0].labels;
+        assert_eq!(labels.refdes, None);
+        assert_eq!(labels.pin_refdes.as_deref(), Some("J3"));
+        assert_eq!(labels.pin.as_deref(), Some("J3:2"));
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! DEVELOPER_GUIDE "one computation, three views").
 
 use crate::boolean;
-use crate::geo::PolygonSet;
+use crate::geo::{shape_area_nm2, PolygonSet, Shape};
 
 /// Region-count noise floor (nm²): a diff region smaller than this is a sub-feature
 /// sliver — a sub-µm rim produced along near-coincident edges — whose *number* swings
@@ -51,6 +51,81 @@ impl LayerChange {
     }
 }
 
+/// One connected component of a boolean difference. The same area floor used by
+/// `LayerChange` determines membership, so the list and count cannot diverge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedRegion<'a> {
+    pub area_nm2: i128,
+    pub bbox_nm: [i64; 4],
+    pub centroid_nm: [i64; 2],
+    pub shape: &'a Shape,
+}
+
+fn regions(set: &PolygonSet) -> Vec<ChangedRegion<'_>> {
+    let mut out: Vec<_> = set
+        .shapes
+        .iter()
+        .filter_map(|shape| {
+            let area_nm2 = shape_area_nm2(shape).abs();
+            if area_nm2 < REGION_NOISE_FLOOR_NM2 {
+                return None;
+            }
+            let first = shape.iter().flat_map(|ring| ring.iter()).next()?;
+            let mut bbox_nm = [first.x, first.y, first.x, first.y];
+            for point in shape.iter().flat_map(|ring| ring.iter()) {
+                bbox_nm[0] = bbox_nm[0].min(point.x);
+                bbox_nm[1] = bbox_nm[1].min(point.y);
+                bbox_nm[2] = bbox_nm[2].max(point.x);
+                bbox_nm[3] = bbox_nm[3].max(point.y);
+            }
+            // Compute the filled polygon centroid (holes subtract). Translate first
+            // to avoid cancellation at large absolute board coordinates.
+            let mut twice_area = 0.0;
+            let mut cx_sum = 0.0;
+            let mut cy_sum = 0.0;
+            for ring in shape {
+                for (a, b) in ring
+                    .iter()
+                    .zip(ring.iter().cycle().skip(1))
+                    .take(ring.len())
+                {
+                    let ax = (a.x - bbox_nm[0]) as f64;
+                    let ay = (a.y - bbox_nm[1]) as f64;
+                    let bx = (b.x - bbox_nm[0]) as f64;
+                    let by = (b.y - bbox_nm[1]) as f64;
+                    let cross = ax * by - bx * ay;
+                    twice_area += cross;
+                    cx_sum += (ax + bx) * cross;
+                    cy_sum += (ay + by) * cross;
+                }
+            }
+            let centroid_nm = if twice_area == 0.0 {
+                [
+                    (bbox_nm[0] / 2 + bbox_nm[2] / 2),
+                    (bbox_nm[1] / 2 + bbox_nm[3] / 2),
+                ]
+            } else {
+                [
+                    bbox_nm[0] + (cx_sum / (3.0 * twice_area)).round() as i64,
+                    bbox_nm[1] + (cy_sum / (3.0 * twice_area)).round() as i64,
+                ]
+            };
+            Some(ChangedRegion {
+                area_nm2,
+                bbox_nm,
+                centroid_nm,
+                shape,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.area_nm2
+            .cmp(&a.area_nm2)
+            .then_with(|| a.bbox_nm.cmp(&b.bbox_nm))
+    });
+    out
+}
+
 /// One layer-pair's diff: the two difference polygon sets, from a single pair of
 /// boolean computations.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -60,13 +135,24 @@ pub struct LayerDiff {
 }
 
 impl LayerDiff {
+    pub fn reported_regions(&self) -> (Vec<ChangedRegion<'_>>, Vec<ChangedRegion<'_>>) {
+        (regions(&self.added), regions(&self.removed))
+    }
     pub fn measure(&self) -> LayerChange {
+        let (added, removed) = self.reported_regions();
+        self.measure_regions(&added, &removed)
+    }
+    pub fn measure_regions(
+        &self,
+        added: &[ChangedRegion<'_>],
+        removed: &[ChangedRegion<'_>],
+    ) -> LayerChange {
         LayerChange {
             added_area_nm2: self.added.area_nm2(),
             removed_area_nm2: self.removed.area_nm2(),
             // Reported counts exclude sub-floor slivers (tessellation-robust, #94)...
-            added_region_count: self.added.region_count_above(REGION_NOISE_FLOOR_NM2),
-            removed_region_count: self.removed.region_count_above(REGION_NOISE_FLOOR_NM2),
+            added_region_count: added.len() as u32,
+            removed_region_count: removed.len() as u32,
             // ...but raw presence still flags any change, so nothing is silently missed.
             has_added: !self.added.is_empty(),
             has_removed: !self.removed.is_empty(),
@@ -119,6 +205,25 @@ mod tests {
             Pt::new(x0 + s, y0 + s),
             Pt::new(x0, y0 + s),
         ]]
+    }
+
+    #[test]
+    fn regions_are_area_sorted_with_exact_bounds_and_centroid() {
+        let set = PolygonSet::new(vec![
+            square(5_000_000, 0, 1_000_000),
+            square(0, 0, 2_000_000),
+        ]);
+        let d = LayerDiff {
+            added: set,
+            removed: PolygonSet::default(),
+        };
+        let (added, removed) = d.reported_regions();
+        assert!(removed.is_empty());
+        assert_eq!(d.measure_regions(&added, &removed).added_region_count, 2);
+        assert_eq!(added[0].area_nm2, 4_000_000_000_000);
+        assert_eq!(added[0].bbox_nm, [0, 0, 2_000_000, 2_000_000]);
+        assert_eq!(added[0].centroid_nm, [1_000_000, 1_000_000]);
+        assert_eq!(added[1].area_nm2, 1_000_000_000_000);
     }
 
     #[test]
