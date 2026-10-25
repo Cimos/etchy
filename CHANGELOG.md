@@ -49,6 +49,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   upload or drop no longer reads `uploaded -> uploaded`; a zip shows its name
   without `.zip`, loose layer files their shared filename prefix. Native Open
   now labels a folder the same way as a command-line argument (#329).
+- Web viewer: dropping a folder did nothing, because a browser can't hand
+  over a folder's files. It now shows "folders can't be dropped in the
+  browser — zip the fab pack or select the files", and the web welcome screen
+  and Open menu no longer suggest dragging a folder (#331).
 - Layer pairing: two different non-UTF-8 filenames that read the same after
   the lossy conversion (`board-\xF6.gbr`, `board-\xF7.gbr`) no longer count as
   an exact name match. They pair only if their extents overlap, like any

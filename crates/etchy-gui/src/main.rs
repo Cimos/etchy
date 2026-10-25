@@ -383,6 +383,7 @@ fn main() {
                 canvas,
                 web_options,
                 Box::new(|cc| {
+                    install_web_folder_drop_guard(cc.egui_ctx.clone());
                     let (old, new, diff) = demo_seed();
                     let (ol, nl) = (old.label.clone(), new.label.clone());
                     let mut app = ViewApp::from_cc(cc, diff, ol, nl);
@@ -1337,6 +1338,80 @@ enum DroppedSources {
 /// so the user learns the accepted shapes instead of guessing why nothing loaded.
 const DROP_SHAPE_HINT: &str =
     "drop one fab pack per side: either one zip, or two zips for old and new, or loose layer files";
+
+/// Shown when a folder is dropped on the web viewer (#331). A browser can't
+/// hand over a folder's files, so the drop is refused out loud instead of
+/// loading nothing (or only the loose files beside it).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const WEB_FOLDER_DROP_ERROR: &str =
+    "folders can't be dropped in the browser — zip the fab pack or select the files";
+
+/// Set by the web drop listener when a drop held a folder; drained once per
+/// frame into `load_error` (#331).
+#[cfg(target_arch = "wasm32")]
+static WEB_FOLDER_DROPPED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The welcome screen's drag-and-drop hint. The web copy never offers a folder,
+/// since a browser can't deliver one (#331).
+fn welcome_drop_hint(web: bool) -> &'static str {
+    if web {
+        "…or drag a .zip fab pack, a schematic PDF, or Gerber files onto the page."
+    } else {
+        "…or drag a folder, a .zip fab pack, or Gerber files onto the window."
+    }
+}
+
+/// The Open menu's drag-and-drop hint, per surface (#331).
+fn open_menu_drop_hint(web: bool) -> &'static str {
+    if web {
+        "…or drag a .zip or Gerber files onto the page\n\
+         (a folder can't be dropped in the browser)"
+    } else {
+        "…or drag a folder / .zip onto the window\n\
+         (if the file dialog doesn't open)"
+    }
+}
+
+/// Web: watch drops for folders (#331). eframe reads only `DataTransfer.files`,
+/// and a folder there fails to read and is skipped, so a folder drop loaded
+/// nothing with no message. This listener runs in the capture phase, before
+/// eframe's own, and refuses any drop holding a folder: it stops the event so
+/// no partial set of loose files loads either, and flags the error for the
+/// next frame.
+#[cfg(target_arch = "wasm32")]
+fn install_web_folder_drop_guard(ctx: egui::Context) {
+    use eframe::wasm_bindgen::closure::Closure;
+    use eframe::wasm_bindgen::JsCast as _;
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let on_drop = Closure::<dyn FnMut(web_sys::DragEvent)>::new(move |ev: web_sys::DragEvent| {
+        let Some(items) = ev.data_transfer().map(|dt| dt.items()) else {
+            return;
+        };
+        let has_folder = (0..items.length()).any(|i| {
+            items
+                .get(i)
+                .filter(|item| item.kind() == "file")
+                .and_then(|item| item.webkit_get_as_entry().ok().flatten())
+                .is_some_and(|entry| entry.is_directory())
+        });
+        if has_folder {
+            ev.prevent_default();
+            ev.stop_propagation();
+            WEB_FOLDER_DROPPED.store(true, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        }
+    });
+    let _ = win.add_event_listener_with_callback_and_bool(
+        "drop",
+        on_drop.as_ref().unchecked_ref(),
+        true,
+    );
+    // The listener lives as long as the page.
+    on_drop.forget();
+}
 
 /// The computed comparison of two sources: a geometric board diff, or a per-page
 /// PDF pixel diff (#63).
@@ -2822,11 +2897,18 @@ impl ViewApp {
     fn load_dropped(&mut self, side: RevSide, files: Vec<egui::DroppedFile>) {
         // Web drops carry bytes; the shared classifier routes a `.zip` (or a
         // pair of them, #325), a schematic `.pdf` (#63), or loose Gerber layers.
+        let had_entries = !files.is_empty();
         let byte_files: Vec<(String, Vec<u8>)> = files
             .into_iter()
             .filter_map(|f| f.bytes.map(|b| (basename(&f.name), b.to_vec())))
             .collect();
         if byte_files.is_empty() {
+            // Entries with no bytes are what a browser gives for a folder; say
+            // so rather than doing nothing (#331). The drop listener normally
+            // catches a folder first; this is the fallback.
+            if had_entries {
+                self.load_error = Some(WEB_FOLDER_DROP_ERROR.to_string());
+            }
             return;
         }
         match files_to_sources(byte_files) {
@@ -2920,11 +3002,9 @@ impl ViewApp {
                 });
                 ui.add_space(12.0);
                 ui.label(
-                    egui::RichText::new(
-                        "…or drag a folder, a .zip fab pack, or Gerber files onto the window.",
-                    )
-                    .weak()
-                    .small(),
+                    egui::RichText::new(welcome_drop_hint(cfg!(target_arch = "wasm32")))
+                        .weak()
+                        .small(),
                 );
                 if let Some(err) = self.load_error.clone() {
                     ui.add_space(16.0);
@@ -3380,7 +3460,12 @@ impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Loader (#120): drain any async web file picks, then accept drag-and-drop.
         #[cfg(target_arch = "wasm32")]
-        self.poll_file_picks();
+        {
+            self.poll_file_picks();
+            if WEB_FOLDER_DROPPED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.load_error = Some(WEB_FOLDER_DROP_ERROR.to_string());
+            }
+        }
         self.handle_dropped_files(ui.ctx());
 
         // Startup splash (foreground overlay; skipped once done). Drawn before the
@@ -3778,10 +3863,9 @@ impl eframe::App for ViewApp {
                                 }
                                 ui.separator();
                                 ui.label(
-                                    egui::RichText::new(
-                                        "…or drag a folder / .zip onto the window\n\
-                                         (if the file dialog doesn't open)",
-                                    )
+                                    egui::RichText::new(open_menu_drop_hint(cfg!(
+                                        target_arch = "wasm32"
+                                    )))
                                     .weak()
                                     .small(),
                                 );
@@ -7606,6 +7690,23 @@ mod tests {
             "b\u{FFFD}rd"
         );
         assert_eq!(loose_files_label(std::iter::empty()), "?");
+    }
+
+    // #331: a browser can't take a dropped folder, so the web copy must not
+    // offer one; native keeps the folder hint.
+    #[test]
+    fn web_drop_hints_never_offer_a_folder() {
+        use super::{open_menu_drop_hint, welcome_drop_hint, WEB_FOLDER_DROP_ERROR};
+        for web_hint in [welcome_drop_hint(true), open_menu_drop_hint(true)] {
+            assert!(!web_hint.contains("drag a folder"), "web copy: {web_hint}");
+            assert!(
+                web_hint.contains(".zip"),
+                "web copy names the zip: {web_hint}"
+            );
+        }
+        assert!(welcome_drop_hint(false).contains("drag a folder"));
+        assert!(open_menu_drop_hint(false).contains("drag a folder"));
+        assert!(WEB_FOLDER_DROP_ERROR.contains("zip the fab pack"));
     }
 
     // #329: two different web-loaded packs must not share one label.
