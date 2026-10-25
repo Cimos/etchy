@@ -3,7 +3,7 @@
 //! Pipeline (see `docs/DEVELOPER_GUIDE.md` and `docs/M1_ENGINE_DESIGN.md`):
 //! `parse → resolve graphics state → polygonize → boolean diff → measure → report`.
 //!
-//! **Pure logic, no I/O policy.** The engine takes bytes and an already-classified
+//! **Pure logic, no I/O policy.** The engine takes named bytes or an already-classified
 //! [`Board`], and returns a [`DiffReport`] or a typed [`EngineError`]; it never
 //! reads a file, prints, or exits — the CLI/GUI own all I/O (CLAUDE.md).
 //!
@@ -12,6 +12,7 @@
 //! polarity. Features it cannot render faithfully fail loud (the trust bar).
 //! Excellon, and the SVG/HTML renderers, are later increments.
 
+mod board_input;
 mod boolean;
 pub mod diff;
 pub mod error;
@@ -29,6 +30,7 @@ pub mod placement;
 pub mod report;
 pub mod view;
 
+pub use board_input::{board_from_bytes, BoardBuilder};
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
 pub use excellon::{

@@ -6,7 +6,7 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use etchy_core::{Board, GerberFormat, Layer};
+use etchy_core::{Board, GerberFormat};
 
 /// Reject any single layer file larger than this before reading it into RAM. The
 /// loaders copy the bytes a few times (read → utf8 → normalized), so an oversized
@@ -49,22 +49,13 @@ pub(crate) fn check_total(total: u64, limit: u64, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build a [`Board`] from an in-memory set of `(filename, bytes)` layer files.
-/// Shared by every input path — the folder loader, the `.zip` loader, and GUI
-/// drag-and-drop — so the classify/sniff/polygonize logic lives in exactly one
-/// place (#93). Files are processed in filename order for a deterministic layer
-/// order. Non-Gerber files are skipped; a Gerber that fails to polygonize is a
-/// hard error (fail-loud over wrong-but-quiet). Non-fatal notices (an assumed
-/// drill digit format, #429) come back as warnings, each naming its file (#449).
+/// Enforce the GUI byte limit and filename order before core parses the files.
 pub fn board_from_bytes(
     files: impl IntoIterator<Item = (String, Vec<u8>)>,
-) -> Result<(Board, Option<etchy_core::GerberFormat>, Vec<String>)> {
+) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
     let mut files: Vec<(String, Vec<u8>)> = files.into_iter().collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut layers = Vec::new();
-    let mut fmt = None;
-    let mut warnings = Vec::new();
+    let mut builder = etchy_core::BoardBuilder::new();
     for (name, bytes) in files {
         if bytes.len() as u64 > MAX_LAYER_FILE_BYTES {
             bail!(
@@ -72,57 +63,9 @@ pub fn board_from_bytes(
                 bytes.len()
             );
         }
-        let (stem, ext) = match name.rsplit_once('.') {
-            Some((s, e)) => (s, e),
-            None => (name.as_str(), ""),
-        };
-        let mut kind = etchy_core::classify(stem, ext);
-        let mut negative = false;
-        // Gerber layer, Excellon/NC drill, pick-and-place, or neither (skip). Drill
-        // (#62) and P&P (#115) route through their own front-ends so those changes
-        // diff instead of being silently dropped.
-        let (geometry, x2_objects) = if etchy_core::looks_like_gerber(&bytes) {
-            if fmt.is_none() {
-                fmt = etchy_core::gerber_format(&bytes).ok();
-            }
-            // #317: a negative image's objects are clearances; the engine swaps
-            // added/removed for such a layer so the diff speaks in material.
-            negative =
-                etchy_core::file_polarity(&bytes) == Some(etchy_core::FilePolarity::Negative);
-            let (geometry, labels) = etchy_core::resolve_layer_with_labels(&bytes)
-                .with_context(|| format!("processing layer {name}"))?;
-            (std::sync::Arc::new(geometry), labels)
-        } else if etchy_core::looks_like_excellon(&bytes) {
-            // Content wins over the filename: an Excellon file named e.g.
-            // Board.TXT must land on the Drill layer, not "other". Plating
-            // (PTH/NPTH) still comes from the filename (#237).
-            kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
-            let drill = etchy_core::resolve_excellon_detailed(&bytes)
-                .with_context(|| format!("processing drill layer {name}"))?;
-            warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
-            (std::sync::Arc::new(drill.geometry), None)
-        } else if etchy_core::looks_like_placement(&bytes) {
-            kind = etchy_core::LayerKind::Placement;
-            (
-                std::sync::Arc::new(
-                    etchy_core::resolve_placement(&bytes)
-                        .with_context(|| format!("processing placement file {name}"))?,
-                ),
-                None,
-            )
-        } else {
-            continue;
-        };
-        layers.push(Layer {
-            kind,
-            label: name,
-            geometry,
-            negative,
-            x2_objects: x2_objects.map(std::sync::Arc::new),
-            drill_tools: None,
-        });
+        builder.push(name, bytes)?;
     }
-    Ok((Board { layers }, fmt, warnings))
+    Ok(builder.finish())
 }
 
 /// Walk a directory (one level), read each Gerber file, classify it, and

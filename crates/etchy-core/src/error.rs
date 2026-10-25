@@ -21,8 +21,18 @@ pub enum GeoError {
 /// `model`, and `lib`.
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum EngineError {
-    /// A Gerber, Excellon or placement file could not be parsed. The caller adds
-    /// the file name and kind, so the text itself stays format-neutral (#448).
+    /// Parsing a named board input failed. The inner error is part of the text
+    /// and deliberately not a `source`, or a caller printing the cause chain
+    /// (anyhow `{:#}`) would show it twice.
+    #[error("processing {kind} {name}: {inner}")]
+    Processing {
+        kind: &'static str,
+        name: String,
+        inner: Box<EngineError>,
+    },
+
+    /// A Gerber, Excellon or placement file could not be parsed. The named-input
+    /// builder wraps this with the file name and kind (#448).
     #[error("parse failed: {0}")]
     Parse(String),
 
