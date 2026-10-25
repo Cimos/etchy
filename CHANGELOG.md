@@ -9,6 +9,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Documentation
+- Dependency, corpus and web-demo docs now match the tree and `Cargo.lock`
+  (#345).
+
 ### Fixed
 - **Non-UTF-8 filenames keep their label (#299):** a layer file whose name isn't
   valid UTF-8 (e.g. a Latin-1 export on Linux) was labelled `""` and classified

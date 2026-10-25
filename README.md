@@ -80,7 +80,7 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
   plus a `SHA256SUMS` file, are on the [Releases](../../releases) page.
 
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
-changed-first layer list, overlay / before / after / split / swipe modes, pan /
+changed-first layer list, Overlay / Old / New / Split / Swipe modes, pan /
 zoom / fit, a settings panel, an Open-A / Open-B loader (folder, `.zip`, or
 drag-and-drop), and a Help menu. A **web viewer** build also exists (see `deploy/`).
 

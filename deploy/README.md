@@ -2,8 +2,8 @@
 
 The web build of `etchy-gui` (WASM) served on a LAN so others can try the diff
 viewer in a browser. This folder is the **page + server**, version-controlled so
-they can't be lost; the WASM/JS bundle and the demo board are build artifacts and
-are **not** committed.
+they can't be lost. The WASM/JS bundle is a build artifact; the demo board is
+committed at `crates/etchy-gui/assets/demo/` and checked against `scripts/demo-assets.sha256` by `scripts/check-demo-assets.sh`.
 
 > **New machine?** Use the runbook + one-command setup: [`SETUP.md`](SETUP.md)
 > (`deploy/setup.sh` builds, stages, and serves). Feedback is collected in
@@ -22,7 +22,7 @@ are **not** committed.
   Refuses to serve the feedback file, the `screenshots/` dir beside it, itself,
   or any directory listing (#334).
 
-## Build + deploy (current host: Windows, served from `C:\Users\<user>\etchy-demo\`)
+## Build + deploy (Windows serves the staged `deploy/.serve/` directory)
 
 ```sh
 # 1. Build the web bundle with STABLE filenames (so index.html refs never change):
