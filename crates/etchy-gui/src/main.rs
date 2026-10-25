@@ -293,15 +293,22 @@ fn main() -> std::process::ExitCode {
 
 /// The bundled demo board (committed and hash-checked by
 /// scripts/check-demo-assets.sh, embedded at compile time). A layer that
-/// fails to parse is skipped rather than crashing the demo.
+/// fails to parse is skipped rather than crashing the demo, and the skip is a
+/// warning naming the file and the error, so the diff never looks complete
+/// when it is not (#449).
 #[cfg(target_arch = "wasm32")]
 fn board_from_files(
     dir: &include_dir::Dir,
-) -> (etchy_core::Board, Option<etchy_core::GerberFormat>) {
+) -> (
+    etchy_core::Board,
+    Option<etchy_core::GerberFormat>,
+    Vec<String>,
+) {
     let mut files: Vec<_> = dir.files().collect();
     files.sort_by_key(|f| f.path().to_path_buf());
     let mut layers = Vec::new();
     let mut fmt = None;
+    let mut warnings = Vec::new();
     for f in files {
         let bytes = f.contents();
         let name = f
@@ -312,23 +319,33 @@ fn board_from_files(
         let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), ""));
         let mut kind = etchy_core::classify(stem, ext);
         // Gerber, Excellon/NC drill (#62), or pick-and-place (#115); anything else
-        // is skipped. Best-effort: a layer that fails to parse is dropped rather
-        // than crashing the demo.
+        // is skipped. A layer that fails to parse is dropped with a warning
+        // rather than crashing the demo.
         let mut negative = false;
         let geometry = if etchy_core::looks_like_gerber(bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(bytes).ok();
             }
             negative = etchy_core::file_polarity(bytes) == Some(etchy_core::FilePolarity::Negative);
-            etchy_core::polygonize_gerber(bytes).ok()
+            etchy_core::polygonize_gerber(bytes).map(Some)
         } else if etchy_core::looks_like_excellon(bytes) {
             kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
-            etchy_core::resolve_excellon(bytes).ok()
+            etchy_core::resolve_excellon_detailed(bytes).map(|drill| {
+                warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
+                Some(drill.geometry)
+            })
         } else if etchy_core::looks_like_placement(bytes) {
             kind = etchy_core::LayerKind::Placement;
-            etchy_core::resolve_placement(bytes).ok()
+            etchy_core::resolve_placement(bytes).map(Some)
         } else {
-            None
+            Ok(None)
+        };
+        let geometry = match geometry {
+            Ok(g) => g,
+            Err(e) => {
+                warnings.push(format!("{name}: layer skipped, it could not be read: {e}"));
+                None
+            }
         };
         if let Some(geometry) = geometry {
             layers.push(etchy_core::Layer {
@@ -341,26 +358,28 @@ fn board_from_files(
             });
         }
     }
-    (etchy_core::Board { layers }, fmt)
+    (etchy_core::Board { layers }, fmt, warnings)
 }
 
 #[cfg(target_arch = "wasm32")]
 fn demo_seed() -> (LoadedBoard, LoadedBoard, BoardDiff) {
     static OLD: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/old");
     static NEW: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets/demo/new");
-    let (ob, of) = board_from_files(&OLD);
-    let (nb, nf) = board_from_files(&NEW);
+    let (ob, of, ow) = board_from_files(&OLD);
+    let (nb, nf, nw) = board_from_files(&NEW);
     // Derive the demo labels through the same helper native uses (#177), from the
     // board's release layout, so web and native present the same old->new text.
     let old = LoadedBoard {
         label: derive_label(std::path::Path::new("Mad_RP2040/v0.0.0")),
         board: ob,
         fmt: of,
+        warnings: ow,
     };
     let new = LoadedBoard {
         label: derive_label(std::path::Path::new("Mad_RP2040/v0.0.1")),
         board: nb,
         fmt: nf,
+        warnings: nw,
     };
     let diff = diff_from_sources(&old, &new).expect("demo diff");
     (old, new, diff)
@@ -1299,6 +1318,9 @@ struct LoadedBoard {
     label: String,
     board: etchy_core::Board,
     fmt: Option<etchy_core::GerberFormat>,
+    /// Load notices for this revision (an assumed drill format, a skipped demo
+    /// layer), shown in the warnings chip with the diff warnings (#449).
+    warnings: Vec<String>,
 }
 
 /// One loaded schematic PDF revision (#63): the raw bytes, rasterized when both
@@ -3076,6 +3098,10 @@ fn layer_new_areas(diff: &BoardDiff) -> Vec<f64> {
 /// mismatch warning if the formats disagree (same as the CLI startup path).
 fn diff_from_sources(old: &LoadedBoard, new: &LoadedBoard) -> anyhow::Result<BoardDiff> {
     let mut d = etchy_core::compare_detailed(&old.board, &new.board)?;
+    // Load notices first, old then new, prefixed like the CLI does (#449).
+    let loaded = old.warnings.iter().map(|w| format!("old {w}"));
+    let loaded = loaded.chain(new.warnings.iter().map(|w| format!("new {w}")));
+    d.report.warnings.splice(0..0, loaded);
     if let (Some(o), Some(n)) = (old.fmt.as_ref(), new.fmt.as_ref()) {
         if let Some(w) = etchy_core::coordinate_mismatch_warning(o, n) {
             d.report.warnings.push(w);
@@ -3236,22 +3262,24 @@ fn files_to_sources(files: Vec<(String, Vec<u8>)>) -> anyhow::Result<DroppedSour
             byte_files.push((name, bytes));
         }
     }
-    let board_source =
-        |board, fmt, label: String| LoadedSource::Board(LoadedBoard { label, board, fmt });
+    let board_source = |(board, fmt, warnings), label: String| {
+        LoadedSource::Board(LoadedBoard {
+            label,
+            board,
+            fmt,
+            warnings,
+        })
+    };
     match (zips.len(), byte_files.is_empty()) {
         (0, _) => {
             let label = loose_files_label(byte_files.iter().map(|(n, _)| n.as_str()));
-            let (board, fmt) = loader::board_from_bytes(byte_files)?;
-            Ok(DroppedSources::One(board_source(board, fmt, label)))
+            let loaded = loader::board_from_bytes(byte_files)?;
+            Ok(DroppedSources::One(board_source(loaded, label)))
         }
         (1, true) => {
             let (name, bytes) = zips.pop().expect("len checked above");
-            let (board, fmt) = loader::load_zip(bytes)?;
-            Ok(DroppedSources::One(board_source(
-                board,
-                fmt,
-                name_label(&name),
-            )))
+            let loaded = loader::load_zip(bytes)?;
+            Ok(DroppedSources::One(board_source(loaded, name_label(&name))))
         }
         (2, true) => {
             // Two packs at once fill both sides (#325); name order decides
@@ -3259,11 +3287,11 @@ fn files_to_sources(files: Vec<(String, Vec<u8>)>) -> anyhow::Result<DroppedSour
             zips.sort_by(|a, b| a.0.cmp(&b.0));
             let (new_name, new_bytes) = zips.pop().expect("len checked above");
             let (old_name, old_bytes) = zips.pop().expect("len checked above");
-            let (ob, of) = loader::load_zip(old_bytes)?;
-            let (nb, nf) = loader::load_zip(new_bytes)?;
+            let old = loader::load_zip(old_bytes)?;
+            let new = loader::load_zip(new_bytes)?;
             Ok(DroppedSources::Pair {
-                old: board_source(ob, of, name_label(&old_name)),
-                new: board_source(nb, nf, name_label(&new_name)),
+                old: board_source(old, name_label(&old_name)),
+                new: board_source(new, name_label(&new_name)),
             })
         }
         (n, true) => anyhow::bail!("{n} zip files dropped together — {DROP_SHAPE_HINT}"),
@@ -3331,8 +3359,13 @@ fn load_source_any(path: &std::path::Path, label: String) -> anyhow::Result<Load
         let bytes = read_pdf_bytes(path)?;
         return Ok(LoadedSource::Pdf(LoadedPdf { label, bytes }));
     }
-    let (board, fmt) = loader::load_source(path)?;
-    Ok(LoadedSource::Board(LoadedBoard { label, board, fmt }))
+    let (board, fmt, warnings) = loader::load_source(path)?;
+    Ok(LoadedSource::Board(LoadedBoard {
+        label,
+        board,
+        fmt,
+        warnings,
+    }))
 }
 
 /// Native: is this path a whole fab pack — a Gerber folder or a `.zip`?
@@ -7377,9 +7410,31 @@ mod tests {
     }
 
     #[test]
+    fn load_warnings_reach_the_diff_report() {
+        // #449: each side's load notices land in the warnings chip, prefixed
+        // old/new like the CLI, ahead of the diff's own warnings.
+        use super::{diff_from_sources, LoadedBoard};
+        let side = |w: &str| {
+            let (board, fmt, _) = crate::loader::board_from_bytes(vec![(
+                "board-F_Cu.gtl".to_string(),
+                MIN_GERBER.to_vec(),
+            )])
+            .unwrap();
+            LoadedBoard {
+                label: "x".into(),
+                board,
+                fmt,
+                warnings: vec![w.to_string()],
+            }
+        };
+        let d = diff_from_sources(&side("a.drl: one"), &side("b.drl: two")).unwrap();
+        assert_eq!(d.report.warnings[..2], ["old a.drl: one", "new b.drl: two"]);
+    }
+
+    #[test]
     fn compute_diff_refuses_a_mixed_pair() {
         use super::{compute_diff, LoadedBoard, LoadedPdf, LoadedSource};
-        let (board, fmt) = crate::loader::board_from_bytes(vec![(
+        let (board, fmt, warnings) = crate::loader::board_from_bytes(vec![(
             "board-F_Cu.gtl".to_string(),
             MIN_GERBER.to_vec(),
         )])
@@ -7388,6 +7443,7 @@ mod tests {
             label: "a".into(),
             board,
             fmt,
+            warnings,
         });
         let pdf = LoadedSource::Pdf(LoadedPdf {
             label: "b.pdf".into(),
@@ -7411,7 +7467,7 @@ mod tests {
         // the other side diffs against it and not against the rejected PDF.
         use super::{LoadedBoard, LoadedPdf, LoadedSource, RevSide, ViewApp};
         let board = |label: &str| {
-            let (board, fmt) = crate::loader::board_from_bytes(vec![(
+            let (board, fmt, warnings) = crate::loader::board_from_bytes(vec![(
                 "board-F_Cu.gtl".to_string(),
                 MIN_GERBER.to_vec(),
             )])
@@ -7420,6 +7476,7 @@ mod tests {
                 label: label.into(),
                 board,
                 fmt,
+                warnings,
             })
         };
         let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());

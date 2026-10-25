@@ -13,6 +13,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - A drill or placement file that fails to parse is no longer reported as
   "gerber parse failed". The message now reads "parse failed", after the
   file name and layer kind (#448).
+- Viewer: load warnings now show in the warnings chip. A TZ drill file with no
+  declared format (#429) warns there as it does in the CLI, and a web demo layer
+  that fails to parse is named in a warning instead of silently missing from
+  the diff (#449).
 
 ## [0.2.0] — 2026-10-26
 

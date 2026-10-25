@@ -54,15 +54,17 @@ pub(crate) fn check_total(total: u64, limit: u64, name: &str) -> Result<()> {
 /// drag-and-drop — so the classify/sniff/polygonize logic lives in exactly one
 /// place (#93). Files are processed in filename order for a deterministic layer
 /// order. Non-Gerber files are skipped; a Gerber that fails to polygonize is a
-/// hard error (fail-loud over wrong-but-quiet).
+/// hard error (fail-loud over wrong-but-quiet). Non-fatal notices (an assumed
+/// drill digit format, #429) come back as warnings, each naming its file (#449).
 pub fn board_from_bytes(
     files: impl IntoIterator<Item = (String, Vec<u8>)>,
-) -> Result<(Board, Option<etchy_core::GerberFormat>)> {
+) -> Result<(Board, Option<etchy_core::GerberFormat>, Vec<String>)> {
     let mut files: Vec<(String, Vec<u8>)> = files.into_iter().collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut layers = Vec::new();
     let mut fmt = None;
+    let mut warnings = Vec::new();
     for (name, bytes) in files {
         if bytes.len() as u64 > MAX_LAYER_FILE_BYTES {
             bail!(
@@ -96,10 +98,10 @@ pub fn board_from_bytes(
             // Board.TXT must land on the Drill layer, not "other". Plating
             // (PTH/NPTH) still comes from the filename (#237).
             kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
-            std::sync::Arc::new(
-                etchy_core::resolve_excellon(&bytes)
-                    .with_context(|| format!("processing drill layer {name}"))?,
-            )
+            let drill = etchy_core::resolve_excellon_detailed(&bytes)
+                .with_context(|| format!("processing drill layer {name}"))?;
+            warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
+            std::sync::Arc::new(drill.geometry)
         } else if etchy_core::looks_like_placement(&bytes) {
             kind = etchy_core::LayerKind::Placement;
             std::sync::Arc::new(
@@ -118,14 +120,14 @@ pub fn board_from_bytes(
             drill_tools: None,
         });
     }
-    Ok((Board { layers }, fmt))
+    Ok((Board { layers }, fmt, warnings))
 }
 
 /// Walk a directory (one level), read each Gerber file, classify it, and
 /// polygonize it into a [`Layer`]. Non-Gerber files are skipped (Excellon later).
 /// Native only — the web build has no filesystem (it loads via bytes/zip).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>)> {
+pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>, Vec<String>)> {
     if !dir.is_dir() {
         bail!("{} is not a directory", dir.display());
     }
@@ -181,7 +183,7 @@ fn file_label(path: &Path) -> String {
 /// can't OOM us — per entry, in aggregate, and by entry count (#326).
 /// Cross-platform (in-memory) so the same path serves native file picks and web
 /// uploads.
-pub fn load_zip(bytes: Vec<u8>) -> Result<(Board, Option<GerberFormat>)> {
+pub fn load_zip(bytes: Vec<u8>) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
     load_zip_capped(
         bytes,
         MAX_LAYER_FILE_BYTES,
@@ -205,7 +207,7 @@ fn load_zip_capped(
     limit: u64,
     total_limit: u64,
     max_entries: usize,
-) -> Result<(Board, Option<GerberFormat>)> {
+) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("reading zip archive")?;
     if zip.len() > max_entries {
         bail!(
@@ -260,7 +262,7 @@ fn load_zip_capped(
 /// Load one revision from a filesystem path: a directory of Gerbers, or a `.zip`
 /// fab pack. The native GUI's "Open…" and drag-and-drop both go through here.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_source(path: &Path) -> Result<(Board, Option<GerberFormat>)> {
+pub fn load_source(path: &Path) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
     if path.is_dir() {
         return load_board(path);
     }
@@ -305,10 +307,28 @@ mod tests {
         assert!(!label.is_empty(), "label must not collapse to empty");
         assert!(label.ends_with(".gtl"), "extension survives: {label}");
 
-        let (board, _) = board_from_bytes(vec![(label.clone(), MIN_GERBER.to_vec())]).unwrap();
+        let (board, _, _) = board_from_bytes(vec![(label.clone(), MIN_GERBER.to_vec())]).unwrap();
         assert_eq!(board.layers.len(), 1);
         assert_eq!(board.layers[0].kind, LayerKind::TopCopper);
         assert_eq!(board.layers[0].label, label);
+    }
+
+    #[test]
+    fn assumed_drill_format_is_a_named_warning() {
+        // #449: the TZ assumed-format notice (#429) reaches the viewer, named by
+        // file, and a declared format stays silent.
+        let drl = b"M48\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n".to_vec();
+        let (board, _, warnings) =
+            board_from_bytes(vec![("board-PTH.drl".to_string(), drl)]).unwrap();
+        assert_eq!(board.layers.len(), 1);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("board-PTH.drl: no digit format declared"),
+            "{warnings:?}"
+        );
+        let drl = b"M48\n;FILE_FORMAT=2:4\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n".to_vec();
+        let (_, _, warnings) = board_from_bytes(vec![("board-PTH.drl".to_string(), drl)]).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
@@ -317,7 +337,7 @@ mod tests {
             ("readme.txt".to_string(), b"not a gerber file".to_vec()),
             ("board-F_Cu.gtl".to_string(), MIN_GERBER.to_vec()),
         ];
-        let (board, fmt) = board_from_bytes(files).unwrap();
+        let (board, fmt, _) = board_from_bytes(files).unwrap();
         assert_eq!(board.layers.len(), 1, "the non-Gerber file is skipped");
         assert_eq!(board.layers[0].kind, LayerKind::TopCopper);
         assert_eq!(board.layers[0].label, "board-F_Cu.gtl");
@@ -348,7 +368,7 @@ mod tests {
             w.write_all(b"just notes").unwrap();
             w.finish().unwrap();
         }
-        let (board, fmt) = load_zip(buf).unwrap();
+        let (board, fmt, _) = load_zip(buf).unwrap();
         assert_eq!(board.layers.len(), 1, "non-Gerber entry skipped");
         assert_eq!(board.layers[0].kind, LayerKind::TopCopper);
         assert_eq!(
@@ -433,7 +453,7 @@ mod tests {
             w.write_all(MIN_GERBER).unwrap();
             w.finish().unwrap();
         }
-        let (board, _) =
+        let (board, _, _) =
             load_zip_capped(buf, MAX_LAYER_FILE_BYTES, MAX_TOTAL_BYTES, MAX_ZIP_ENTRIES).unwrap();
         assert_eq!(board.layers.len(), 1);
     }
@@ -450,7 +470,7 @@ mod tests {
         for name in ["c-B_Cu.gbl", "a-F_Cu.gtl", "b-F_Mask.gts"] {
             std::fs::write(dir.join(name), MIN_GERBER).unwrap();
         }
-        let (board, _) = load_board(&dir).unwrap();
+        let (board, _, _) = load_board(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         let labels: Vec<&str> = board.layers.iter().map(|l| l.label.as_str()).collect();
@@ -494,7 +514,7 @@ mod tests {
     fn load_zip_capped_accepts_aggregate_at_total_limit() {
         let one = MIN_GERBER.len() as u64;
         let buf = zip_of_n_layers(3);
-        let (board, _) = load_zip_capped(buf, one, 3 * one, MAX_ZIP_ENTRIES).unwrap();
+        let (board, _, _) = load_zip_capped(buf, one, 3 * one, MAX_ZIP_ENTRIES).unwrap();
         assert_eq!(board.layers.len(), 3);
     }
 
@@ -507,7 +527,7 @@ mod tests {
             .to_string();
         assert!(err.contains("entry limit"), "got: {err}");
         // At the cap exactly it still loads.
-        let (board, _) =
+        let (board, _, _) =
             load_zip_capped(zip_of_n_layers(4), MAX_LAYER_FILE_BYTES, MAX_TOTAL_BYTES, 4).unwrap();
         assert_eq!(board.layers.len(), 4);
     }
@@ -515,7 +535,7 @@ mod tests {
     // A normal small pack still loads through the public, real-constant path.
     #[test]
     fn load_zip_accepts_a_normal_small_pack() {
-        let (board, fmt) = load_zip(zip_of_n_layers(6)).unwrap();
+        let (board, fmt, _) = load_zip(zip_of_n_layers(6)).unwrap();
         assert_eq!(board.layers.len(), 6);
         assert!(fmt.is_some());
     }
