@@ -109,7 +109,7 @@ icons = ["../../assets/brand/etchy-app-icon.ico", "../../assets/brand/png/etchy-
 out-dir = "../../target/packager"
 # The installers carry the `etchy` command-line tool too, on PATH: /usr/bin in
 # the .deb, the install folder in the .msi, and a brew `binary` link on macOS.
-before-packaging-command = "cargo build --release -p etchy-gui -p etchy-cli --features etchy-cli/pdf"
+before-packaging-command = "cargo build --locked --release -p etchy-gui -p etchy-cli --features etchy-cli/pdf"
 binaries = [{ path = "etchy-gui", main = true }, { path = "etchy" }]
 
 [package.metadata.packager.deb]

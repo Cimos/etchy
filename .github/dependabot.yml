@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # The Dockerfile pins its base images by digest (#347) so a floating tag can't
+  # silently change a release. Dependabot bumps those digests via reviewable PRs.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

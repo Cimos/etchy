@@ -50,7 +50,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       # TRUST gate: populate the golden corpus (revA/revB are gitignored,
       # regenerated on demand) so the deep cross-validation test
@@ -73,7 +73,7 @@ jobs:
       # (rather than skip) if the corpus is missing, so the deep test can never
       # quietly stop running here.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
         env:
           ETCHY_REQUIRE_CORPUS: "1"
 
@@ -84,14 +84,14 @@ jobs:
       - name: Test (pdf feature)
         run: |
           set -euo pipefail
-          cargo test --workspace --features pdf
-          cargo test -p etchy-cli --features pdf
+          cargo test --locked --workspace --features pdf
+          cargo test --locked -p etchy-cli --features pdf
 
       - name: rustfmt
         run: cargo fmt --all --check
 
       - name: clippy (warnings are errors)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   # Windows (2x) and macOS (10x) minutes are expensive, so the cross-platform
   # build+test only runs on pushes to main — not on every PR iteration. PRs get
@@ -124,7 +124,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       # The golden-corpus cross-validation runs for real in the ubuntu `test` job
       # (which generates the corpus with python3). This cross-OS leg only needs to
@@ -132,7 +132,7 @@ jobs:
       # regenerate the corpus here — that step relied on python3, which the
       # GitHub-hosted Windows runner doesn't provide, and on a bash-only guard.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   wasm:
     name: web build (wasm)
@@ -191,7 +191,7 @@ jobs:
       # include_dir! — the gate that keeps the public demo board buildable.
       - name: Build web viewer (embeds the committed demo board)
         working-directory: crates/etchy-gui
-        run: trunk build --release --filehash false
+        run: trunk build --release --filehash false --locked
 
       # Size-optimize the bundle the way deploy does, and prove it validates. This
       # is the real #99 gate: a regression that reintroduces the bulk-memory issue

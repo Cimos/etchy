@@ -16,7 +16,7 @@ browser and submit structured feedback.
 |---|---|---|
 | **Rust + rustup** | build the WASM bundle | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 | **`wasm32-unknown-unknown`** target | compile to WebAssembly | `rustup target add wasm32-unknown-unknown` *(setup.sh auto-adds)* |
-| **trunk** | WASM bundler for `etchy-gui` | `cargo install trunk --locked` *(setup.sh auto-installs)* |
+| **trunk** | WASM bundler for `etchy-gui` | `cargo install trunk --version 0.21.14 --locked` *(setup.sh auto-installs)* |
 | **Python 3** | the static + `/feedback` server | usually present; else your package manager |
 
 `setup.sh` checks all of these and installs the two cheap ones automatically
@@ -31,7 +31,7 @@ deploy/setup.sh --build-only    # build + stage into deploy/.serve, don't serve
 deploy/setup.sh --serve-only    # serve an already-staged bundle
 ```
 
-It builds `crates/etchy-gui` with `trunk build --release --filehash false`
+It builds `crates/etchy-gui` with `trunk build --release --filehash false --locked`
 (stable filenames so `index.html` refs never change), stages the bundle +
 `index.html` + `etchy-server.py` into `deploy/.serve/` (gitignored), then serves
 on `0.0.0.0:<port>` and prints the LAN URL. Stop with Ctrl+C.
@@ -52,7 +52,7 @@ the owner's call.
 ## 4. Manual build (if you'd rather not use the script)
 
 ```bash
-cd crates/etchy-gui && trunk build --release --filehash false   # -> dist/
+cd crates/etchy-gui && trunk build --release --filehash false --locked   # -> dist/
 # copy next to each other into a serve dir:
 #   dist/etchy-gui.js, dist/etchy-gui_bg.wasm,
 #   deploy/demo/index.html, deploy/demo/etchy-server.py
