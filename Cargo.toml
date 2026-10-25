@@ -13,7 +13,9 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.1.2"
 edition = "2021"
-rust-version = "1.75"
+# MSRV for etchy-core/-cli/-kicad: the floor set by the locked deps (i_overlay 7
+# needs 1.88). etchy-gui/etchy-pdf carry a higher one. Checked by the CI `msrv` job.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Cimos/etchy"
 authors = ["Cimos"]

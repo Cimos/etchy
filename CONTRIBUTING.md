@@ -14,7 +14,11 @@ are fastest there and the CI Linux target is the distribution target).
    cd etchy
    ```
 2. **Install Rust** via rustup (the repo pins `stable` + rustfmt + clippy in
-   `rust-toolchain.toml`, so the right toolchain is selected automatically):
+   `rust-toolchain.toml`, so the right toolchain is selected automatically).
+   **MSRV:** Rust 1.88 for `etchy-core` / `etchy-cli` / `etchy-kicad`; 1.92 for
+   `etchy-gui`, `etchy-pdf` and any `--features pdf` build. The CI `msrv` job
+   checks both against the `rust-version` in the manifests — bump them together
+   if a dependency raises the floor:
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    source "$HOME/.cargo/env"
@@ -40,7 +44,7 @@ display and graphics libraries on Linux:
   `kicad-cli pcb export gerbers -o out/ board.kicad_pcb`.
 - **PDF path (`etchy-pdf`, hayro):** **pure Rust — no system packages, no C++
   toolchain, no `libpdfium`.** Build it with `--features pdf` (release binaries
-  and the container ship it on). It raises that crate's MSRV to 1.85; it's
+  and the container ship it on). It raises that crate's MSRV to 1.92; it's
   feature-gated, so the core build is unaffected.
 
 ## Conventions
