@@ -105,7 +105,7 @@ also makes diffs **deterministic** (stable CI output), which the trust bar requi
 | Polygon booleans and triangulation | `i_overlay`, `i_triangle` | Integer geometry; `i_triangle` is declared in `etchy-core`. |
 | CLI and reports | `clap`, `anyhow`, `serde_json` | HTML and SVG are written by the workspace code. |
 | GUI | `eframe`, `egui` | The native and web viewers share the app code. |
-| PDF raster | `hayro`, `png` | Feature-gated pure-Rust path. |
+| PDF raster | `hayro`, `png` | Feature-gated pure-Rust path. Needs rustc 1.92; the workspace default is 1.88. |
 | Parallel diff and property tests | `rayon`, `proptest` | Rayon is used on native targets. |
 
 See the crate manifests and `Cargo.lock` for the complete dependency list and

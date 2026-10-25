@@ -3,10 +3,9 @@ name = "etchy-gui"
 description = "etchy native desktop viewer (egui) — secondary surface."
 version.workspace = true
 edition.workspace = true
-# The default `pdf` feature pulls etchy-pdf/hayro, which needs 1.85 (see that
-# crate's manifest). A --no-default-features build still compiles on the
-# workspace MSRV, but the shipped default is pdf-on so the floor is declared here.
-rust-version = "1.85"
+# egui/eframe 0.34 (and the hayro/vello stack behind the default `pdf` feature)
+# need 1.92. Checked by the CI `msrv` job.
+rust-version = "1.92"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

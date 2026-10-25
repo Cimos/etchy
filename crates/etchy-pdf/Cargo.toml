@@ -3,9 +3,10 @@ name = "etchy-pdf"
 description = "etchy schematic-PDF pixel diff (feature-gated; pure-Rust hayro rasterizer)."
 version.workspace = true
 edition.workspace = true
-# hayro needs a newer toolchain than the workspace MSRV; this crate is opt-in
-# (the `pdf` feature) and never in the default binaries, so it carries its own MSRV.
-rust-version = "1.85"
+# hayro's vello stack needs a newer toolchain (1.92) than the workspace MSRV; this
+# crate is opt-in (the `pdf` feature), so it carries its own MSRV. Checked by the
+# CI `msrv` job.
+rust-version = "1.92"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
