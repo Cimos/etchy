@@ -10,6 +10,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 ## [Unreleased]
 
 ### Fixed
+- Viewer: base opacity (`S` / Settings → Diff) now applies to Overlay only.
+  At 0% it no longer blanks Old/New with no message, or empties Split/Swipe
+  under a false "no geometry in this view" hint; those views always draw the
+  board at full visibility (#324).
 - `--gate-layers` group words now match exactly against an explicit table
   instead of by substring (#304): `pth` gates plated drill only (it used to
   gate `drill-npth` too), new `npth` gates non-plated drill only, and
