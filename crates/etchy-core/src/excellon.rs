@@ -12,10 +12,10 @@
 //! fail loud on an ambiguous header (no units, suppressed coordinates with no
 //! declared mode, or `LZ` coordinates with no declared digit split) rather than
 //! guess — a wrong hole position is exactly the silent miss etchy exists to
-//! prevent. (TZ coordinates with no declared split use the conventional decimal
-//! count, 2.4 inch / 3.3 metric: TZ decoding depends only on that count, and
-//! it is what real `INCH,TZ` exporters emit without a format line.) Anything
-//! we can't render faithfully (incremental coordinates, arc routing) is a loud
+//! prevent. (TZ coordinates with no declared split use the conventional
+//! 2.4 inch / 3.3 metric format, which KiCad's minimal-header export relies on,
+//! and [`resolve_excellon_detailed`] reports that it was assumed (#429).)
+//! Anything we can't render faithfully (incremental coordinates, arc routing) is a loud
 //! [`EngineError`], never a quiet drop.
 //!
 //! Alongside the geometry the resolver counts holes and slots per tool
@@ -88,6 +88,13 @@ struct Format {
 }
 
 impl Format {
+    /// Whether decoding `field` relies on the per-units default split: a
+    /// decimal-less `TZ` field in a file that declares no digit format. (The
+    /// `LZ` case never gets this far; it fails loud in [`Format::decode`].)
+    fn assumes_split(&self, field: &str) -> bool {
+        !self.declared && self.zeros == Some(Zeros::Trailing) && !field.contains('.')
+    }
+
     /// Decode one coordinate field (the text after `X`/`Y`, e.g. `-0150` or `1.5`)
     /// into the file's units. Explicit decimal points win; otherwise apply the
     /// declared zero-suppression against the integer/decimal width.
@@ -122,7 +129,9 @@ impl Format {
             // digits the field has: a 4.2 file decoded as the 3.3 default puts
             // every hole at one-tenth the distance. TZ right-aligns against the
             // decimal count, which the conventional default fixes (2.4 inch / 3.3
-            // metric is what headerless-format TZ exporters emit).
+            // metric is what headerless-format TZ exporters such as KiCad's
+            // minimal header emit); the caller is warned that it was assumed
+            // (#429).
             if zeros == Zeros::Leading && !self.declared {
                 return Err(EngineError::Parse(format!(
                     "drill coordinate '{field}' is leading-zero (LZ) with no decimal point, \
@@ -263,13 +272,33 @@ pub struct DrillTools {
 }
 
 /// Parse + resolve one Excellon drill file's bytes into filled hole/slot geometry.
-/// Same as [`resolve_excellon_with_tools`] without the per-tool counts.
+/// Same as [`resolve_excellon_detailed`] without the counts or warnings.
 pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
-    resolve_excellon_with_tools(bytes).map(|(geometry, _)| geometry)
+    resolve_excellon_detailed(bytes).map(|r| r.geometry)
+}
+
+/// Same as [`resolve_excellon_detailed`] without the warnings.
+pub fn resolve_excellon_with_tools(bytes: &[u8]) -> Result<(PolygonSet, DrillTools)> {
+    resolve_excellon_detailed(bytes).map(|r| (r.geometry, r.tools))
+}
+
+/// Everything one walk of a drill file produces.
+#[derive(Debug, Clone)]
+pub struct ResolvedDrill {
+    /// Filled hole and slot geometry.
+    pub geometry: PolygonSet,
+    /// Hole and slot counts per tool diameter.
+    pub tools: DrillTools,
+    /// Non-fatal notices about the file. Today that is one: a `TZ` file with
+    /// decimal-less coordinates and no declared digit format was decoded with
+    /// the conventional 2.4 inch / 3.3 metric split (#429). The caller decides
+    /// where the notice goes (CLI warnings, JSON report).
+    pub warnings: Vec<String>,
 }
 
 /// Parse + resolve one Excellon drill file's bytes into filled hole/slot geometry,
-/// plus the hole and slot counts per tool diameter from the same walk.
+/// plus the hole and slot counts per tool diameter and any warnings, from the
+/// same walk.
 ///
 /// Two passes so a **headerless** file (no `M48`, a form the sniff deliberately
 /// accepts) still resolves its body: pass 1 collects header facts (units, zero
@@ -277,7 +306,7 @@ pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
 /// wherever they appear; pass 2 interprets the body — every line after the `M48`
 /// header's `%`/`M95` terminator, or the whole file when there is no header
 /// (header-form lines don't match any body form and are ignored there).
-pub fn resolve_excellon_with_tools(bytes: &[u8]) -> Result<(PolygonSet, DrillTools)> {
+pub fn resolve_excellon_detailed(bytes: &[u8]) -> Result<ResolvedDrill> {
     // Contain a panic anywhere in the header/body walk as a loud typed error
     // instead of unwinding through the caller / aborting a batch — the same
     // boundary `resolve_layer` puts around the Gerber parser (#85, #308). Relies
@@ -288,7 +317,7 @@ pub fn resolve_excellon_with_tools(bytes: &[u8]) -> Result<(PolygonSet, DrillToo
     .map_err(|_| EngineError::Parse("excellon parser panicked on this input".into()))?
 }
 
-fn resolve_excellon_inner(bytes: &[u8]) -> Result<(PolygonSet, DrillTools)> {
+fn resolve_excellon_inner(bytes: &[u8]) -> Result<ResolvedDrill> {
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
@@ -341,7 +370,23 @@ fn resolve_excellon_inner(bytes: &[u8]) -> Result<(PolygonSet, DrillTools)> {
     for line in &lines[body_start..] {
         m.step(line)?;
     }
-    Ok(m.finish())
+    let mut warnings = Vec::new();
+    if m.assumed_split.get() {
+        let (unit, example) = match units {
+            Units::Inch => ("inch", "INCH,TZ,00.0000"),
+            Units::Metric => ("metric", "METRIC,TZ,000.000"),
+        };
+        warnings.push(format!(
+            "no digit format declared; assuming {int_digits}:{dec_digits} ({unit}, TZ) — add \
+             ;FILE_FORMAT={int_digits}:{dec_digits} or {example} to the header to make it explicit"
+        ));
+    }
+    let (geometry, tools) = m.finish();
+    Ok(ResolvedDrill {
+        geometry,
+        tools,
+        warnings,
+    })
 }
 
 /// Parse one header line, updating the accumulated state. Unknown but harmless
@@ -471,6 +516,9 @@ struct Body {
     /// shared `MAX_POINTS_PER_LAYER` on every push (#308). The contour count is
     /// `contours.len()`, checked against `MAX_CONTOURS_PER_LAYER` the same way.
     total_points: usize,
+    /// Set once any coordinate was decoded with the assumed default split
+    /// ([`Format::assumes_split`]), so the caller can warn about it (#429).
+    assumed_split: std::cell::Cell<bool>,
 }
 
 impl Body {
@@ -487,6 +535,7 @@ impl Body {
             counts: BTreeMap::new(),
             contours: Vec::new(),
             total_points: 0,
+            assumed_split: std::cell::Cell::new(false),
         }
     }
 
@@ -664,15 +713,18 @@ impl Body {
         // Explicit-decimal fields accept anything `f64` parses (`1.0e300`,
         // `1.0e999` = inf); guard every decoded coordinate so it fails loud instead
         // of saturating the nm cast in the geometry builders (#308).
-        let x = match extract_axis(frag, 'X') {
-            Some(f) => self.nm(self.fmt.decode(f)? * self.unit_nm)?,
-            None => dx,
+        let axis = |a: char, keep: f64| -> Result<f64> {
+            match extract_axis(frag, a) {
+                Some(f) => {
+                    if self.fmt.assumes_split(f) {
+                        self.assumed_split.set(true);
+                    }
+                    self.nm(self.fmt.decode(f)? * self.unit_nm)
+                }
+                None => Ok(keep),
+            }
         };
-        let y = match extract_axis(frag, 'Y') {
-            Some(f) => self.nm(self.fmt.decode(f)? * self.unit_nm)?,
-            None => dy,
-        };
-        Ok((x, y))
+        Ok((axis('X', dx)?, axis('Y', dy)?))
     }
 
     fn emit_hit(&mut self, x: f64, y: f64) -> Result<()> {
@@ -925,6 +977,84 @@ mod tests {
             (cx - 25.4).abs() < 0.1,
             "hole at 1.0 in = 25.4 mm, got {cx}"
         );
+    }
+
+    /// Resolve and return the hole-centre x of a one-hit file (mm) + warnings.
+    fn one_hit_x(src: &str) -> (f64, Vec<String>) {
+        let ResolvedDrill {
+            geometry: ps,
+            warnings,
+            ..
+        } = resolve_excellon_detailed(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        ((bb[0] + bb[2]) as f64 / 2.0 / 1e6, warnings)
+    }
+
+    #[test]
+    fn undeclared_split_tz_warns_that_the_default_was_assumed() {
+        // #429: the default is kept for TZ (KiCad's minimal-header export has
+        // no format line), but the caller is told it was assumed.
+        let (cx, w) = one_hit_x("M48\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n");
+        assert!((cx - 25.4).abs() < 0.05, "2.4 inch: 1.0 in, got {cx}");
+        assert_eq!(
+            w,
+            [
+                "no digit format declared; assuming 2:4 (inch, TZ) — add ;FILE_FORMAT=2:4 \
+              or INCH,TZ,00.0000 to the header to make it explicit"
+            ]
+        );
+        let (cx, w) = one_hit_x("M48\nMETRIC,TZ\nT1C0.5\n%\nT1\nX10000Y10000\nM30\n");
+        assert!((cx - 10.0).abs() < 0.05, "3.3 metric: 10 mm, got {cx}");
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("assuming 3:3 (metric, TZ)") && w[0].contains("METRIC,TZ,000.000"),
+            "{w:?}"
+        );
+        // Verbatim head of the bundled demo's KiCad 9 minimal-header export
+        // (crates/etchy-gui/assets/demo/old/Mad_RP2040-NPTH.drl): resolves,
+        // with the warning.
+        let src = "M48\nINCH,TZ\nT1C0.0256\nT2C0.0748\nT3C0.0866\nT4C0.1181\nT5C0.1969\n%\n\
+                   G90\nG05\nT1\nX52143Y-19165\nX54418Y-19165\nT2\nX49786Y-24252\nM30\n";
+        let ResolvedDrill {
+            geometry: ps,
+            warnings: w,
+            ..
+        } = resolve_excellon_detailed(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 3, "three holes");
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("assuming 2:4 (inch, TZ)"), "{w:?}");
+    }
+
+    #[test]
+    fn declared_or_decimal_tz_resolves_without_warning() {
+        for (src, want_mm) in [
+            (
+                "M48\n;FILE_FORMAT=2:4\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n",
+                25.4,
+            ),
+            (
+                "M48\nINCH,TZ,00.0000\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n",
+                25.4,
+            ),
+            // The declared split decides the scale: 2.5 puts "10000" at 0.1 in.
+            (
+                "M48\n;FILE_FORMAT=2:5\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n",
+                2.54,
+            ),
+            (
+                "M48\nMETRIC,TZ,000.000\nT1C0.5\n%\nT1\nX10000Y10000\nM30\n",
+                10.0,
+            ),
+            // Explicit decimals need no split, declared or not.
+            ("M48\nINCH,TZ\nT1C0.032\n%\nT1\nX1.0Y1.0\nM30\n", 25.4),
+        ] {
+            let (cx, w) = one_hit_x(src);
+            assert!(
+                (cx - want_mm).abs() < 0.05,
+                "{src}: want {want_mm}, got {cx}"
+            );
+            assert!(w.is_empty(), "{src}: unexpected warnings {w:?}");
+        }
     }
 
     #[test]

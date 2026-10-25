@@ -68,7 +68,10 @@ etchy deliberately does **not** do.
   formats, and feed/speed tool fields are supported. **Arc routing** (`G02`/`G03`
   rout) and **incremental coordinates** fail loud. Coordinates with
   zero-suppression but no declared `LZ`/`TZ` mode fail loud rather than guess
-  hole positions.
+  hole positions, as do decimal-less `LZ` coordinates with no declared digit
+  format. Decimal-less `TZ` coordinates with no declared format use the
+  conventional 2:4 inch / 3:3 metric split, and the report carries a warning
+  naming the file and the assumed split.
 - **Pick-and-place is placement geometry, not a BOM.** Each component is rendered
   as a marker at its centroid + rotation and diffed geometrically (moved / rotated
   / added / removed parts show up); etchy does **not** compare values, footprints,

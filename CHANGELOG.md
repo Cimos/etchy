@@ -82,6 +82,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   guessed 2.4 / 3.3 split, so a 4.2 file put every hole at one-tenth the
   distance. `TZ` files keep the conventional default, which their decoding
   depends on only through the decimal count (#319).
+- Excellon: a trailing-zero (`TZ`) drill file with decimal-less coordinates
+  and no declared digit format still uses the conventional 2:4 inch / 3:3
+  metric split (KiCad's minimal-header export relies on it), but now says so
+  with a warning in the summary and JSON naming the file and what to add to
+  the header (`;FILE_FORMAT=2:4` or `INCH,TZ,00.0000`). Before, the guess
+  was silent (#429).
 - Pick-and-place files: a data row whose position or rotation can't be read
   (e.g. an unquoted multi-word description or an unexpected column layout) now
   fails the file with the row count and line numbers, instead of the component
