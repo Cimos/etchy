@@ -9,6 +9,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Documentation
+- Dependency, corpus and web-demo docs now match the tree and `Cargo.lock`
+  (#345).
+- README, landing page and docs page quote the same Mad_RP2040 demo numbers;
+  `scripts/check-landing.py` fails if they drift apart (#342).
+
 ### Fixed
 - Excellon: a body tool change that carries a diameter (`T2C0.040`) now
   selects that tool. Before, the previous tool stayed active. A body

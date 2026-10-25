@@ -146,7 +146,7 @@ docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.2 --format summary -- /
     <p>Point etchy at two directories of fab output. Layers are paired by kind, such as top copper or inner copper 1, so filenames may differ between revisions. When several files have the same kind, exact filename matches come first; remaining files pair in stack order only when their board extents plausibly overlap.</p>
     <pre class="code"><span class="k">etchy</span> &lt;old&gt; &lt;new&gt;                  <span class="c"># human-readable per-layer summary</span>
 <span class="k">etchy</span> &lt;old&gt; &lt;new&gt; --format json    <span class="c"># machine-readable report on stdout</span></pre>
-    <p>The summary lists each layer with changed area (mm²) and region counts. This is the real output on the two board revisions bundled in the repo:</p>
+    <p>The summary lists each layer with changed area (mm²) and region counts. This is the current CLI output on the two board revisions bundled in the repo:</p>
     <pre class="code"><span class="k">$</span> etchy crates/etchy-gui/assets/demo/old crates/etchy-gui/assets/demo/new
 layer            status           added_mm2  removed_mm2  +regions  -regions
 top-copper       changed           <span class="add">80.16495</span>    <span class="rem">127.98536</span>       133       121

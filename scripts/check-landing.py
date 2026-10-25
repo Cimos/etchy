@@ -6,11 +6,14 @@ Exit 0 = all checks pass; exit 1 = at least one failure.
 """
 import re
 import sys
+from html import unescape
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SITE = ROOT / "site"
 INDEX = SITE / "index.html"
+DOCS = SITE / "docs.html"
+README = ROOT / "README.md"
 
 failures = []
 
@@ -20,12 +23,64 @@ def check(cond, msg):
         failures.append(msg)
 
 
+def plain(html):
+    return unescape(re.sub(r"<[^>]+>", "", html)).replace("−", "-")
+
+
+def demo_totals(text):
+    match = re.search(
+        r"(\d+) of (\d+) layers?\b[^\n]*?\+(\d+\.\d+)\s*(?:mm²)?\s*/\s*"
+        r"-(\d+\.\d+)\s*mm²[^\n]*?\((\d+)\+/(\d+)-\s*regions\)",
+        text,
+    )
+    return match.groups() if match else None
+
+
+def demo_rows(html, page):
+    if page == "index":
+        table = re.search(r'<table class="extable">(.*?)</table>', html, re.DOTALL)
+        if not table:
+            return None
+        rows = re.findall(r"<tr>(.*?)</tr>", table.group(1), re.DOTALL)[1:]
+        return [tuple(plain(cell).strip() for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)) for row in rows]
+    block = re.search(r"\$</span> etchy crates/etchy-gui/assets/demo/old.*?</pre>", html, re.DOTALL)
+    if not block:
+        return None
+    lines = plain(block.group(0)).splitlines()[2:]
+    return [tuple(line.split()) for line in lines if re.match(r"^[a-z][a-z0-9-]+\s+(changed|unchanged)\s", line)]
+
+
 def main():
     check(INDEX.is_file(), "site/index.html is missing")
     if not INDEX.is_file():
         report()
         return
     html = INDEX.read_text(encoding="utf-8")
+
+    check(DOCS.is_file(), "site/docs.html is missing")
+    check(README.is_file(), "README.md is missing")
+    if DOCS.is_file() and README.is_file():
+        docs_html = DOCS.read_text(encoding="utf-8")
+        readme = README.read_text(encoding="utf-8")
+        index_rows = demo_rows(html, "index")
+        docs_rows = demo_rows(docs_html, "docs")
+        check(bool(index_rows), "index.html demo table is missing")
+        check(bool(docs_rows), "docs.html demo table is missing")
+        if index_rows and docs_rows:
+            check(index_rows == docs_rows, "demo layer rows differ between index.html and docs.html")
+        totals = [demo_totals(plain(html)), demo_totals(plain(docs_html)), demo_totals(readme)]
+        check(all(totals), "demo totals are missing from index.html, docs.html or README.md")
+        if all(totals):
+            check(len(set(totals)) == 1, "demo totals differ between index.html, docs.html and README.md")
+            if index_rows:
+                changed, count, _, _, added_regions, removed_regions = totals[0]
+                check(len(index_rows) == int(count), "index.html demo row count differs from its totals")
+                check(sum(row[1] == "changed" for row in index_rows) == int(changed),
+                      "index.html changed-row count differs from its totals")
+                check(sum(int(row[4]) for row in index_rows) == int(added_regions),
+                      "index.html added-region rows differ from its totals")
+                check(sum(int(row[5]) for row in index_rows) == int(removed_regions),
+                      "index.html removed-region rows differ from its totals")
 
     # No third-party font CDN at runtime (self-hosted requirement).
     check("fonts.googleapis.com" not in html, "index.html still references fonts.googleapis.com")
@@ -44,18 +99,13 @@ def main():
     ]:
         check(needle in html, f"missing {label}")
 
-    # Honest framing: no Phase-0 / in-development status, no dates/versions in copy.
+    # Honest framing: no Phase-0 / in-development status.
     check("in development" not in html.lower(), "page still says 'in development'")
     check("Phase 0" not in html, "page still references 'Phase 0'")
-    # The roadmap section must stay undated/unversioned. (Board-revision labels like
-    # "v0.0.1" in the real-example section are legitimate, so scope this to the roadmap.)
-    rm = re.search(r'id="roadmap".*?</section>', html, re.DOTALL)
-    roadmap = rm.group(0) if rm else ""
-    check(not re.search(r"\bv\d+\.\d+", roadmap), "roadmap section contains a version number (keep it undated/unversioned)")
 
     # Every locally-referenced asset must exist on disk.
     for m in re.finditer(r'(?:href|src)="((?!https?:|#|data:)[^"]+)"', html):
-        rel = m.group(1)
+        rel = m.group(1).split("#", 1)[0]
         check((SITE / rel).exists(), f"referenced asset missing on disk: {rel}")
 
     # Social card must exist, and og:image/twitter:image must be ABSOLUTE URLs

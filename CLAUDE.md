@@ -43,16 +43,17 @@ green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 
 | `etchy-core` | engine: parse → resolve → polygonize → diff → measure → render. **Pure logic** (no I/O policy). |
 | `etchy-cli` | binary `etchy` — primary CLI/CI surface. Exit codes: 0 no diff · 1 diff · 2 error. |
 | `etchy-gui` | native egui viewer (separate binary; never compiled headless). |
-| `etchy-pdf` | schematic-PDF pixel diff (feature-gated; keeps the heavy PDFium dep out of core). |
+| `etchy-pdf` | schematic-PDF pixel diff (feature-gated; uses pure-Rust `hayro`). |
+| `etchy-kicad` | bounded `.kicad_pcb` S-expression parser (0.2.0 work in progress). |
 
 ## Conventions
 
 - `etchy-core` stays pure: no `println!`, no `process::exit`, no path policy.
 - Geometry is fixed-point (deterministic diffs).
 - Permissive deps only — `deny.toml` blocks copyleft; `cargo deny check` before adding one.
-- The verified crate stack (i_overlay, gerber-parser, eframe, hayro,
-  askama, serde_json, rstar/petgraph, tiny-skia, cargo-dist/zigbuild, proptest/
-  insta/cargo-fuzz) is in `docs/DEVELOPER_GUIDE.md` — use those, don't reinvent.
+- The crate stack used by this workspace (`i_overlay`, `gerber_parser`, `eframe`,
+  `hayro`, `serde_json`, `i_triangle`, `rayon`, and `proptest`) is recorded in
+  `Cargo.lock`; see `docs/DEVELOPER_GUIDE.md` for the current architecture.
 - Build/test/run + WSL setup: `CONTRIBUTING.md`.
 
 ## Next work
