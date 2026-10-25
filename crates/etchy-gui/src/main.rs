@@ -2984,9 +2984,9 @@ fn diff_from_sources(old: &LoadedBoard, new: &LoadedBoard) -> anyhow::Result<Boa
 fn derive_label(path: &std::path::Path) -> String {
     let base = path
         .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .trim();
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let base = base.trim();
     if base.is_empty() {
         return "?".to_string();
     }
@@ -2994,7 +2994,7 @@ fn derive_label(path: &std::path::Path) -> String {
         if let Some(parent) = path
             .parent()
             .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
+            .map(|s| s.to_string_lossy())
         {
             let parent = parent.trim();
             if !parent.is_empty() && !is_generic_rev_name(parent) {
@@ -3114,9 +3114,8 @@ fn files_to_sources(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Resul
 #[cfg(not(target_arch = "wasm32"))]
 fn path_label(path: &std::path::Path) -> String {
     path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("?")
-        .to_string()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 /// Native: is this path a schematic PDF? Both signals must agree — `.pdf`
