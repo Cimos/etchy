@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "tool_version": "0.1.2",
+  "any_changes": true,
+  "totals": {"added_area_mm2": 1.0, "removed_area_mm2": 0.0, "added_regions": 1, "removed_regions": 0, "layers_changed": 1, "layers_total": 1},
+  "layers": [{
+    "kind": "top-copper", "inner_index": null, "label_old": "old.gtl", "label_new": "new.gtl", "status": "changed",
+    "added_area_mm2": 1.0, "removed_area_mm2": 0.0, "added_area_nm2": "1000000000000", "removed_area_nm2": "0",
+    "added_regions": 1, "removed_regions": 0,
+    "regions": [{"change": "added", "area_mm2": 1.0, "area_nm2": "1000000000000", "bbox_nm": [0, 0, 1000000, 1000000], "centroid_nm": [500000, 500000], "labels": {"refdes": ["U1"], "pins": ["U1:1"], "nets": ["GND"], "truncated": false}}],
+    "labels_available": true
+  }],
+  "warnings": []
+}

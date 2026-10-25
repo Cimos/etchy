@@ -47,6 +47,16 @@ pub(crate) fn difference(subj: &[Contour], clip: &[Contour]) -> PolygonSet {
     )
 }
 
+/// True when two filled contour sets share positive area (boundary contact alone
+/// is not an object label hit).
+pub(crate) fn overlaps(a: &[Contour], b: &[Contour]) -> bool {
+    let a = to_int(a);
+    let b = to_int(b);
+    !Overlay::<i64>::with_contours(&a, &b)
+        .overlay(OverlayRule::Intersect, FillRule::NonZero)
+        .is_empty()
+}
+
 /// Triangulate every shape in the set (each outer ring with its holes
 /// subtracted) into one flat triangle list (nm), for filled rendering.
 pub(crate) fn triangulate_set(ps: &PolygonSet) -> Vec<[Pt; 3]> {

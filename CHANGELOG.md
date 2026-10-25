@@ -9,6 +9,14 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Added
+- Each changed layer lists its connected changed regions with area, bounding
+  box and centroid: every region in JSON (`regions[]`), the largest ten in the
+  Markdown and HTML reports (`--top-regions N` to change) (#419).
+- Regions carry the reference designators, pins and nets of the Gerber X2
+  objects they touch, as labels only. Layers without X2 object attributes say
+  so (#420).
+
 ### Documentation
 - Dependency, corpus and web-demo docs now match the tree and `Cargo.lock`
   (#345).

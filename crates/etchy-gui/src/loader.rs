@@ -114,6 +114,7 @@ pub fn board_from_bytes(
             label: name,
             geometry,
             negative,
+            x2_objects: None,
         });
     }
     Ok((Board { layers }, fmt))

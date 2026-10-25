@@ -75,8 +75,20 @@ injected-delta corpus), behind this same fail-loud contract.
 added/removed_regions, layers_changed, layers_total}`, `layers[]{kind (kebab),
 inner_index, label_old, label_new, status (unchanged|changed|added-layer|
 removed-layer), added/removed_area_mm2, added/removed_area_nm2 (i128 as **string**
-— JSON has no i128), added/removed_regions}`, `warnings[]` (forward-compat;
-metadata-only parse issues land here in a later increment — empty this slice).
+— JSON has no i128), added/removed_regions, optional regions[],
+labels_available}`. Each region has `change` (`added`/`removed`), `area_mm2`,
+`area_nm2` (decimal string), `bbox_nm` (`[min_x,min_y,max_x,max_y]`),
+`centroid_nm` (`[x,y]`), and `labels` (`null` when the source side lacks
+X2 object attributes; otherwise `{refdes[],pins[],nets[],truncated}`).
+Regions are sorted by area descending within each change direction, using the
+same area floor as the reported region counts. Labels are stored X2 object
+attributes only; they do not imply connectivity. Top-level `warnings[]` is forward-compatible;
+metadata-only parse issues can land there in a later increment.
+
+Markdown and HTML show the largest 10 regions per changed layer by default;
+`--top-regions N` selects 1–100. JSON contains every reported region, independently
+of that display limit. Each label kind is capped at 20 sorted unique values per
+region, and `truncated: true` announces any omitted values.
 
 ## Same-board guard (the corpus-tripping risk all three flagged)
 

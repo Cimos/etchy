@@ -32,13 +32,19 @@ pub mod view;
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
 pub use excellon::{looks_like_excellon, resolve_excellon};
-pub use export::{board_areas_csv, board_report_html, layer_svg, layer_svg_with_colors};
+pub use export::{
+    board_areas_csv, board_report_html, board_report_html_with_limit, layer_svg,
+    layer_svg_with_colors,
+};
 pub use geo::{
     quantize_mm, simplify_contour, triangulate_shape, Aperture, Contour, Polarity, PolygonSet,
     Primitive, Pt, Shape, GRID_NM, NM_PER_MM,
 };
 pub use geom::CIRCLE_SEGMENTS;
-pub use gerber::{coordinate_mismatch_warning, gerber_format, resolve_layer, GerberFormat, Units};
+pub use gerber::{
+    coordinate_mismatch_warning, gerber_format, resolve_layer, resolve_layer_with_labels,
+    GerberFormat, Units,
+};
 pub use imagediff::{
     classify_pair_size, crop_top_left, diff_images, Image, ImageDiffOptions, ImageDiffResult,
     ImageDiffStats, PairSizing, SIZE_TOLERANCE_PX,
@@ -62,6 +68,7 @@ pub use report::{
 };
 pub use view::{BoardDiff, LayerView};
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The crate version, from Cargo.
@@ -138,7 +145,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
     // (a, b) are the (old, new) geometry for this kind; one is empty for a one-sided
     // layer. An empty one-sided layer stays Unchanged (no false gate).
-    let (kind, label_old, label_new, a, b, default_status, negative) = match pairing {
+    let (kind, label_old, label_new, a, b, old_x2, new_x2, default_status, negative) = match pairing
+    {
         LayerPairing::Both { kind, old, new } => {
             if old.negative != new.negative {
                 return Err(EngineError::PolarityMismatch {
@@ -152,6 +160,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
                 Some(new.label.clone()),
                 old.geometry.clone(),
                 new.geometry.clone(),
+                old.x2_objects.clone(),
+                new.x2_objects.clone(),
                 LayerStatus::Changed,
                 old.negative,
             )
@@ -165,6 +175,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
             None,
             l.geometry.clone(),
             empty,
+            l.x2_objects.clone(),
+            None,
             LayerStatus::RemovedLayer,
             false,
         ),
@@ -174,6 +186,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
             Some(l.label.clone()),
             empty,
             l.geometry.clone(),
+            None,
+            l.x2_objects.clone(),
             LayerStatus::AddedLayer,
             false,
         ),
@@ -186,13 +200,37 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         // `added`/`removed` keep meaning copper (#317).
         std::mem::swap(&mut d.added, &mut d.removed);
     }
-    let change = d.measure();
+    let (added, removed) = d.reported_regions();
+    let change = d.measure_regions(&added, &removed);
     let status = if change.is_unchanged() {
         LayerStatus::Unchanged
     } else {
         default_status
     };
-    let report = LayerReport::new(kind, label_old.clone(), label_new.clone(), status, &change);
+    let mut report = LayerReport::new(kind, label_old.clone(), label_new.clone(), status, &change);
+    let (added_x2, removed_x2) = if negative {
+        (&old_x2, &new_x2)
+    } else {
+        (&new_x2, &old_x2)
+    };
+    report.labels_available = old_x2.is_some() || new_x2.is_some();
+    // Index each side's labelled objects once per layer, not once per region:
+    // a scan of every object for every region is quadratic on big changes.
+    let added_index = added_x2.as_deref().map(|o| LabelIndex::new(o));
+    let removed_index = removed_x2.as_deref().map(|o| LabelIndex::new(o));
+    report.regions = added
+        .iter()
+        .map(|r| region_report(r, report::RegionChange::Added, added_index.as_ref()))
+        .chain(
+            removed
+                .iter()
+                .map(|r| region_report(r, report::RegionChange::Removed, removed_index.as_ref())),
+        )
+        .collect();
+    debug_assert_eq!(
+        report.regions.len(),
+        (change.added_region_count + change.removed_region_count) as usize
+    );
     let view = LayerView {
         kind,
         label_old,
@@ -205,6 +243,160 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         change,
     };
     Ok((report, view))
+}
+
+const MAX_LABELS_PER_KIND: usize = 20;
+
+/// Cells per grid axis at most; the grid is sized to about one object per cell.
+const LABEL_GRID_MAX: usize = 128;
+/// An object spanning more cells than this (a pour, a long track) is kept in a
+/// short always-checked list instead of being copied into every cell it covers.
+const LABEL_GRID_LARGE: usize = 64;
+
+/// A uniform grid over one side's labelled objects, keyed by outline bounding
+/// box. It only narrows the candidates: every hit is still confirmed by the
+/// bounding-box test and the exact boolean overlap, so labels match a full scan.
+struct LabelIndex<'a> {
+    objects: &'a [gerber::LabeledContour],
+    /// `[min_x, min_y, max_x, max_y]` of each object's outline (first ring).
+    boxes: Vec<[i64; 4]>,
+    origin: [i64; 2],
+    cell: i64,
+    cols: usize,
+    rows: usize,
+    cells: Vec<Vec<u32>>,
+    large: Vec<u32>,
+}
+
+impl<'a> LabelIndex<'a> {
+    fn new(objects: &'a [gerber::LabeledContour]) -> Self {
+        // The outline bounds the object; holes lie inside it.
+        let boxes: Vec<[i64; 4]> = objects
+            .iter()
+            .map(|o| {
+                let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+                for p in o.shape.first().into_iter().flatten() {
+                    b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
+                }
+                b
+            })
+            .collect();
+        let mut ext = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+        for b in boxes.iter().filter(|b| b[0] <= b[2]) {
+            ext = [
+                ext[0].min(b[0]),
+                ext[1].min(b[1]),
+                ext[2].max(b[2]),
+                ext[3].max(b[3]),
+            ];
+        }
+        let mut index = LabelIndex {
+            objects,
+            boxes,
+            origin: [0, 0],
+            cell: 1,
+            cols: 1,
+            rows: 1,
+            cells: vec![Vec::new()],
+            large: Vec::new(),
+        };
+        if ext[0] > ext[2] {
+            return index; // no object has an outline
+        }
+        let side = ((objects.len() as f64).sqrt().ceil() as usize).clamp(1, LABEL_GRID_MAX);
+        let span = (ext[2] - ext[0]).max(ext[3] - ext[1]).max(1);
+        index.origin = [ext[0], ext[1]];
+        index.cell = (span / side as i64 + 1).max(1);
+        index.cols = ((ext[2] - ext[0]) / index.cell) as usize + 1;
+        index.rows = ((ext[3] - ext[1]) / index.cell) as usize + 1;
+        index.cells = vec![Vec::new(); index.cols * index.rows];
+        for (i, b) in index.boxes.iter().enumerate() {
+            if b[0] > b[2] {
+                continue;
+            }
+            let (c0, r0, c1, r1) = index.cell_range(b);
+            if (c1 - c0 + 1) * (r1 - r0 + 1) > LABEL_GRID_LARGE {
+                index.large.push(i as u32);
+                continue;
+            }
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    index.cells[r * index.cols + c].push(i as u32);
+                }
+            }
+        }
+        index
+    }
+
+    /// Inclusive grid cell range covered by a box, clamped to the grid.
+    fn cell_range(&self, b: &[i64; 4]) -> (usize, usize, usize, usize) {
+        let col = |x: i64| ((x - self.origin[0]).max(0) / self.cell).min(self.cols as i64 - 1);
+        let row = |y: i64| ((y - self.origin[1]).max(0) / self.cell).min(self.rows as i64 - 1);
+        (
+            col(b[0]) as usize,
+            row(b[1]) as usize,
+            col(b[2]) as usize,
+            row(b[3]) as usize,
+        )
+    }
+
+    /// Objects whose outline box touches `bb`, in index order (deterministic).
+    fn candidates(&self, bb: &[i64; 4]) -> Vec<u32> {
+        let (c0, r0, c1, r1) = self.cell_range(bb);
+        let mut out = self.large.clone();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                out.extend_from_slice(&self.cells[r * self.cols + c]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out.retain(|&i| {
+            let b = &self.boxes[i as usize];
+            b[0] <= b[2] && !(b[2] < bb[0] || b[0] > bb[2] || b[3] < bb[1] || b[1] > bb[3])
+        });
+        out
+    }
+}
+
+fn region_report(
+    region: &diff::ChangedRegion<'_>,
+    direction: report::RegionChange,
+    index: Option<&LabelIndex<'_>>,
+) -> report::RegionReport {
+    let mut result = report::RegionReport::from_region(region, direction);
+    let Some(index) = index else {
+        return result;
+    };
+    let mut refs = BTreeSet::new();
+    let mut pins = BTreeSet::new();
+    let mut nets = BTreeSet::new();
+    for i in index.candidates(&region.bbox_nm) {
+        let object = &index.objects[i as usize];
+        if !boolean::overlaps(region.shape, &object.shape) {
+            continue;
+        }
+        if let Some(name) = &object.labels.refdes {
+            refs.insert(name.clone());
+        }
+        if let Some(name) = &object.labels.pin_refdes {
+            refs.insert(name.clone());
+        }
+        if let Some(name) = &object.labels.pin {
+            pins.insert(name.clone());
+        }
+        nets.extend(object.labels.nets.iter().cloned());
+    }
+    let truncated = refs.len() > MAX_LABELS_PER_KIND
+        || pins.len() > MAX_LABELS_PER_KIND
+        || nets.len() > MAX_LABELS_PER_KIND;
+    result.labels = Some(report::RegionLabels {
+        refdes: refs.into_iter().take(MAX_LABELS_PER_KIND).collect(),
+        pins: pins.into_iter().take(MAX_LABELS_PER_KIND).collect(),
+        nets: nets.into_iter().take(MAX_LABELS_PER_KIND).collect(),
+        truncated,
+    });
+    result
 }
 
 #[cfg(test)]
@@ -235,12 +427,14 @@ mod tests {
             label: "F_Cu".into(),
             geometry: Arc::new(polygonize_gerber(a_txt.as_bytes()).unwrap()),
             negative: false,
+            x2_objects: None,
         };
         let lb = Layer {
             kind: LayerKind::TopCopper,
             label: "F_Cu".into(),
             geometry: Arc::new(polygonize_gerber(b_txt.as_bytes()).unwrap()),
             negative: false,
+            x2_objects: None,
         };
         let old = Board { layers: vec![la] };
         let new = Board { layers: vec![lb] };
@@ -249,6 +443,123 @@ mod tests {
         assert_eq!(rep.totals.added_regions, 1);
         assert_eq!(rep.totals.removed_regions, 0);
         assert_eq!(rep.layers[0].status, LayerStatus::Changed);
+    }
+
+    #[test]
+    fn region_labels_use_the_changed_side_and_mark_unavailable() {
+        let header = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n";
+        let anchors = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let old_text =
+            format!("{header}{anchors}%TO.C,R1*%\n%TO.N,OLD*%\nX15000000Y15000000D03*\nM02*\n");
+        let new_text = format!("{header}{anchors}%TO.C,U2*%\n%TO.P,U2,4*%\n%TO.N,NEW*%\nX25000000Y25000000D03*\nM02*\n");
+        let make = |text: &str, labels: bool| {
+            let (geometry, objects) = resolve_layer_with_labels(text.as_bytes()).unwrap();
+            Layer {
+                kind: LayerKind::TopCopper,
+                label: "F_Cu".into(),
+                geometry: Arc::new(geometry),
+                negative: false,
+                x2_objects: labels.then(|| Arc::new(objects.unwrap())),
+            }
+        };
+        let old = Board {
+            layers: vec![make(&old_text, true)],
+        };
+        let new = Board {
+            layers: vec![make(&new_text, true)],
+        };
+        let report = compare(&old, &new).unwrap();
+        let regions = &report.layers[0].regions;
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].labels.as_ref().unwrap().refdes, ["U2"]);
+        assert_eq!(regions[0].labels.as_ref().unwrap().pins, ["U2:4"]);
+        assert_eq!(regions[0].labels.as_ref().unwrap().nets, ["NEW"]);
+        assert_eq!(regions[1].labels.as_ref().unwrap().refdes, ["R1"]);
+        assert_eq!(regions[1].labels.as_ref().unwrap().nets, ["OLD"]);
+        let json = report.to_json();
+        assert!(json.contains("\"regions\""));
+        assert!(report.to_markdown_summary().contains("U2:4"));
+        let unlabelled = Board {
+            layers: vec![make(&new_text, false)],
+        };
+        let report = compare(&old, &unlabelled).unwrap();
+        assert!(report.layers[0].regions[0].labels.is_none());
+        assert!(report.to_markdown_summary().contains("unavailable"));
+    }
+
+    #[test]
+    fn region_label_lists_are_capped_and_announce_truncation() {
+        let contour = vec![
+            Pt::new(0, 0),
+            Pt::new(1_000_000, 0),
+            Pt::new(1_000_000, 1_000_000),
+            Pt::new(0, 1_000_000),
+        ];
+        let shape = vec![contour.clone()];
+        let region = diff::ChangedRegion {
+            area_nm2: 1_000_000_000_000,
+            bbox_nm: [0, 0, 1_000_000, 1_000_000],
+            centroid_nm: [500_000, 500_000],
+            shape: &shape,
+        };
+        let objects: Vec<_> = (0..25)
+            .map(|i| gerber::LabeledContour {
+                shape: vec![contour.clone()],
+                labels: gerber::ObjectLabels {
+                    refdes: Some(format!("U{i}")),
+                    ..Default::default()
+                },
+            })
+            .collect();
+        let index = LabelIndex::new(&objects);
+        let report = region_report(&region, report::RegionChange::Added, Some(&index));
+        let labels = report.labels.unwrap();
+        assert_eq!(labels.refdes.len(), 20);
+        assert!(labels.truncated);
+    }
+
+    #[test]
+    fn label_index_finds_the_same_objects_as_a_full_scan() {
+        // A 30x30 grid of 1 mm pads at 2 mm pitch plus one board-wide pour (kept
+        // in the always-checked list). Every query box must get exactly the
+        // objects a plain bounding-box scan finds.
+        let sq = |x: i64, y: i64, s: i64| {
+            vec![
+                Pt::new(x, y),
+                Pt::new(x + s, y),
+                Pt::new(x + s, y + s),
+                Pt::new(x, y + s),
+            ]
+        };
+        let mut objects: Vec<_> = (0..30)
+            .flat_map(|i| (0..30).map(move |j| (i, j)))
+            .map(|(i, j)| gerber::LabeledContour {
+                shape: vec![sq(i * 2_000_000, j * 2_000_000, 1_000_000)],
+                labels: gerber::ObjectLabels::default(),
+            })
+            .collect();
+        objects.push(gerber::LabeledContour {
+            shape: vec![sq(-5_000_000, -5_000_000, 70_000_000)],
+            labels: gerber::ObjectLabels::default(),
+        });
+        let index = LabelIndex::new(&objects);
+        assert_eq!(index.large, [900]);
+        for bb in [
+            [0, 0, 1_000_000, 1_000_000],
+            [1_500_000, 1_500_000, 4_200_000, 2_100_000],
+            [-9_000_000, -9_000_000, -6_000_000, -6_000_000],
+            [10_000_000, 10_000_000, 90_000_000, 90_000_000],
+            [59_000_000, 0, 99_000_000, 1_000],
+        ] {
+            let full: Vec<u32> = index
+                .boxes
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| !(b[2] < bb[0] || b[0] > bb[2] || b[3] < bb[1] || b[1] > bb[3]))
+                .map(|(i, _)| i as u32)
+                .collect();
+            assert_eq!(index.candidates(&bb), full, "query {bb:?}");
+        }
     }
 
     // ---- #240: public-API integration (through compare / compare_detailed) ----
@@ -269,6 +580,7 @@ mod tests {
             label: "In1_Cu".into(),
             geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
             negative,
+            x2_objects: None,
         };
         let pos = compare(
             &Board {
@@ -315,6 +627,7 @@ mod tests {
                 polygonize_gerber(format!("{hdr}{corners}M02*\n").as_bytes()).unwrap(),
             ),
             negative,
+            x2_objects: None,
         };
         // Top copper on both sides so the same-board guard has a shared extent.
         let old = Board {
@@ -355,6 +668,7 @@ mod tests {
             label: label.into(),
             geometry: Arc::clone(&g),
             negative,
+            x2_objects: None,
         };
         let err = compare(
             &Board {
@@ -386,6 +700,7 @@ mod tests {
             label: label.into(),
             geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
             negative: false,
+            x2_objects: None,
         }
     }
 
@@ -474,6 +789,7 @@ mod tests {
                 label: "F_Cu".into(),
                 geometry: Arc::clone(&ga),
                 negative: false,
+                x2_objects: None,
             }],
         };
         let new = Board {
@@ -482,6 +798,7 @@ mod tests {
                 label: "F_Cu".into(),
                 geometry: Arc::clone(&gb),
                 negative: false,
+                x2_objects: None,
             }],
         };
         let diff = compare_detailed(&old, &new).unwrap();

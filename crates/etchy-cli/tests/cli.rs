@@ -61,6 +61,57 @@ fn exit_codes_and_json_contract() {
 }
 
 #[test]
+fn x2_region_labels_reach_json_markdown_and_html() {
+    let root = scratch("x2-regions");
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    write_layer(&old, "F_Cu.gbr", "");
+    write_layer(
+        &new,
+        "F_Cu.gbr",
+        "%TO.P,U3,7*%\n%TO.N,GND*%\nX25000000Y25000000D03*\n",
+    );
+    let out = etchy()
+        .arg("--format")
+        .arg("json")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let layer = &value["layers"][0];
+    assert_eq!(layer["labels_available"], true);
+    assert_eq!(layer["regions"][0]["change"], "added");
+    assert_eq!(layer["regions"][0]["labels"]["refdes"][0], "U3");
+    assert_eq!(layer["regions"][0]["labels"]["pins"][0], "U3:7");
+    assert_eq!(layer["regions"][0]["labels"]["nets"][0], "GND");
+
+    let html = root.join("report.html");
+    let out = etchy()
+        .arg("--format")
+        .arg("md")
+        .arg("--top-regions")
+        .arg("1")
+        .arg("--html")
+        .arg(&html)
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let md = String::from_utf8(out.stdout).unwrap();
+    assert!(md.contains("largest changed regions (top 1)"));
+    assert!(md.contains("U3:7"));
+    let html_text = fs::read_to_string(html).unwrap();
+    assert!(html_text.contains("Largest changed regions (top 1)"));
+    assert!(html_text.contains("U3:7"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn passing_gate_output_matches_exit_0() {
     // #258: a change smaller than --fail-on-area exits 0, but the summary/JSON
     // used to say "differences found" / any_changes:true with no hint that the

@@ -180,6 +180,15 @@ border:1px solid #262c38;border-radius:6px;}\n\
 /// file, no external assets — shareable and printable. Pure (no I/O); the CLI
 /// writes the returned string to disk.
 pub fn board_report_html(diff: &BoardDiff, old: &str, new: &str) -> String {
+    board_report_html_with_limit(diff, old, new, 10)
+}
+
+pub fn board_report_html_with_limit(
+    diff: &BoardDiff,
+    old: &str,
+    new: &str,
+    limit: usize,
+) -> String {
     let t = &diff.report.totals;
     let mut s = String::with_capacity(4096);
     s.push_str("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n");
@@ -228,7 +237,29 @@ pub fn board_report_html(diff: &BoardDiff, old: &str, new: &str) -> String {
             c.removed_region_count,
         ));
         s.push_str(&layer_svg(layer));
-        s.push_str("\n</div></section>\n");
+        s.push_str("\n</div>");
+        if let Some(report) =
+            diff.report.layers.iter().find(|r| {
+                r.kind == layer.kind.kind_str() && r.inner_index == layer.kind.inner_index()
+            })
+        {
+            if !report.regions.is_empty() {
+                s.push_str(&format!("<h3>Largest changed regions (top {})</h3><table><thead><tr><th>Change</th><th>Area mm²</th><th>Bbox mm</th><th>Centroid mm</th><th>X2 labels</th></tr></thead><tbody>", limit));
+                for r in report.top_regions(limit) {
+                    let labels = r.labels_text().unwrap_or_else(|| "unavailable".into());
+                    s.push_str(&format!(
+                        "<tr><td>{}</td><td>{:.4}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        r.change_str(),
+                        r.area_mm2,
+                        xml_escape(&r.bbox_mm_text()),
+                        xml_escape(&r.centroid_mm_text()),
+                        xml_escape(&labels)
+                    ));
+                }
+                s.push_str("</tbody></table>");
+            }
+        }
+        s.push_str("</section>\n");
     }
     if !any {
         s.push_str(

@@ -147,6 +147,8 @@ pub struct Layer {
     /// layer is diffed and a negative layer never pairs against a positive one
     /// (#317). Always `false` for Excellon and placement layers.
     pub negative: bool,
+    /// X2 object labels and their source contours; None when unavailable.
+    pub x2_objects: Option<Arc<Vec<crate::gerber::LabeledContour>>>,
 }
 
 /// A whole fab pack: the set of resolved layers for one revision.
@@ -411,6 +413,7 @@ mod tests {
                 Pt::new(x0, y1),
             ]]])),
             negative: false,
+            x2_objects: None,
         }
     }
 
@@ -545,6 +548,7 @@ mod tests {
                 Pt::new(0, 1),
             ]]])),
             negative: false,
+            x2_objects: None,
         };
         let a = Board {
             layers: vec![mk("M.GM1"), mk("M.GM2")],
@@ -572,6 +576,7 @@ mod tests {
                 Pt::new(0, 1),
             ]]])),
             negative: false,
+            x2_objects: None,
         };
         let a = Board {
             layers: vec![mk("revA-F_Cu.gbr")],
@@ -844,6 +849,7 @@ mod tests {
                     Pt::new(0, 1_000_000),
                 ]]])),
                 negative: false,
+                x2_objects: None,
             }
         };
         let old = Board {
