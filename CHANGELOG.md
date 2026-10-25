@@ -45,6 +45,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - GitHub Action: refreshing an existing sticky PR comment replaced its text
   with `@-` (the `gh api -f` flag sends `@` values literally). It now sends the
   comment text (#421).
+- Layer pairing: two different non-UTF-8 filenames that read the same after
+  the lossy conversion (`board-\xF6.gbr`, `board-\xF7.gbr`) no longer count as
+  an exact name match. They pair only if their extents overlap, like any
+  renamed layer (#431).
 - Excellon: a body tool change that carries a diameter (`T2C0.040`) now
   selects that tool. Before, the previous tool stayed active. A body
   redefinition now applies only to the hits that follow it, not to earlier
