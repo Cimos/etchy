@@ -10,6 +10,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 ## [Unreleased]
 
 ### Fixed
+- `--gate-layers` group words now match exactly against an explicit table
+  instead of by substring (#304): `pth` gates plated drill only (it used to
+  gate `drill-npth` too), new `npth` gates non-plated drill only, and
+  fragments such as `e` or `top` are a loud exit 2 instead of silently
+  selecting several layer kinds.
 - **A Gerber region left open no longer bypasses the per-layer point ceiling**
   (#315). Points buffered in a region under construction were only counted at
   `G37`, so a small file with one never-closed region and thousands of arc
