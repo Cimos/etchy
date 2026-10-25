@@ -136,7 +136,7 @@ docker pull ghcr.io/cimos/etchy:v0.2.0
 docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.2.0 --format summary -- /work/old /work/new</pre></div>
     </div>
 
-    <p>The v0.2.0 downloads shown here become available when the release tag is published.</p>
+    <p>Download v0.2.0 from the <a href="https://github.com/Cimos/etchy/releases/tag/v0.2.0">release page</a>.</p>
     <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS).</p>
     <p>The <strong>desktop viewer</strong> has its own installers on the <a href="https://github.com/Cimos/etchy/releases">Releases</a> page: <code class="inline">etchy-viewer-v0.2.0-windows-x86_64.msi</code>, <code class="inline">etchy-viewer-v0.2.0-macos-aarch64.dmg</code> (Apple Silicon), <code class="inline">etchy-viewer-v0.2.0-linux-x86_64.AppImage</code>, and <code class="inline">etchy-viewer-v0.2.0-linux-x86_64.deb</code>. The MSI and DEB add the <code class="inline">etchy</code> CLI to PATH; Homebrew links it on macOS with <code class="inline">brew install --cask cimos/etchy/etchy</code>. The AppImage and a DMG opened directly do not put the CLI on PATH. The installers are not code-signed yet: Windows shows a SmartScreen prompt (More info, then Run anyway) and macOS asks you to allow the app once in System Settings, Privacy &amp; Security. A browser build exists, but no hosted viewer is offered yet.</p>
   </section>
