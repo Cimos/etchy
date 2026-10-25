@@ -680,6 +680,7 @@ fn board_from_files(
         // README) — skip the last. Drill (#62) and P&P (#115) route through their
         // own front-ends so those changes diff instead of being silently dropped.
         let mut x2_objects = None;
+        let mut drill_tools = None;
         let geometry = if etchy_core::looks_like_gerber(&bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(&bytes).ok();
@@ -714,10 +715,10 @@ fn board_from_files(
             // (PTH/NPTH) still comes from the filename so a misnamed-but-marked
             // file (e.g. `board-NPTH.txt`) keeps its plating (#237).
             kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
-            std::sync::Arc::new(
-                etchy_core::resolve_excellon(&bytes)
-                    .with_context(|| format!("processing drill layer {name}"))?,
-            )
+            let (geometry, tools) = etchy_core::resolve_excellon_with_tools(&bytes)
+                .with_context(|| format!("processing drill layer {name}"))?;
+            drill_tools = Some(tools);
+            std::sync::Arc::new(geometry)
         } else if etchy_core::looks_like_placement(&bytes) {
             kind = etchy_core::LayerKind::Placement;
             std::sync::Arc::new(
@@ -733,6 +734,7 @@ fn board_from_files(
             geometry,
             negative,
             x2_objects,
+            drill_tools,
         });
     }
     Ok((Board { layers }, fmt, warnings))
@@ -888,6 +890,35 @@ fn format_summary(report: &DiffReport, verdict: &GateVerdict) -> String {
         t.added_regions,
         t.removed_regions
     );
+    // Drill table: only the tool sizes whose counts changed, plus the layer
+    // total, e.g. `drill-pth 0.300 mm: 412 -> 418 holes`.
+    for l in &report.layers {
+        let Some(table) = l.drill_table.as_ref().filter(|t| t.has_changes()) else {
+            continue;
+        };
+        let counts = |c: &etchy_core::DrillCounts| {
+            let mut text = format!("{} -> {} holes", c.old_holes, c.new_holes);
+            if table.has_slots() {
+                let _ = write!(text, ", {} -> {} slots", c.old_slots, c.new_slots);
+            }
+            text
+        };
+        let name = l.name();
+        for r in table
+            .rows
+            .iter()
+            .filter(|r| r.change != etchy_core::DrillRowChange::Unchanged)
+        {
+            let _ = writeln!(
+                s,
+                "{name} {:.3} mm: {} ({})",
+                r.diameter_mm,
+                counts(&r.counts),
+                r.change.as_str()
+            );
+        }
+        let _ = writeln!(s, "{name} total: {}", counts(&table.total));
+    }
     s.push_str(&verdict.summary_result_line());
     s
 }
@@ -958,6 +989,7 @@ mod tests {
             removed_regions: 0,
             regions: Vec::new(),
             labels_available: false,
+            drill_table: None,
         }
     }
 

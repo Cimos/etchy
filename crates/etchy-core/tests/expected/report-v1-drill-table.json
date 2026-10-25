@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "tool_version": "0.1.2",
+  "any_changes": true,
+  "totals": {"added_area_mm2": 1e-12, "removed_area_mm2": 0.0, "added_regions": 0, "removed_regions": 0, "layers_changed": 1, "layers_total": 1},
+  "layers": [{
+    "kind": "drill-pth", "inner_index": null, "label_old": "old-PTH.drl", "label_new": "new-PTH.drl", "status": "changed",
+    "added_area_mm2": 1e-12, "removed_area_mm2": 0.0, "added_area_nm2": "1", "removed_area_nm2": "0",
+    "added_regions": 0, "removed_regions": 0,
+    "labels_available": false,
+    "drill_table": {
+      "rows": [
+        {"diameter_mm": 0.3, "diameter_um": 300, "change": "changed", "old_holes": 412, "new_holes": 418, "old_slots": 0, "new_slots": 0},
+        {"diameter_mm": 0.8, "diameter_um": 800, "change": "removed", "old_holes": 10, "new_holes": 0, "old_slots": 0, "new_slots": 0},
+        {"diameter_mm": 1.0, "diameter_um": 1000, "change": "unchanged", "old_holes": 4, "new_holes": 4, "old_slots": 1, "new_slots": 1},
+        {"diameter_mm": 1.2, "diameter_um": 1200, "change": "added", "old_holes": 0, "new_holes": 2, "old_slots": 0, "new_slots": 0}
+      ],
+      "total": {"old_holes": 426, "new_holes": 424, "old_slots": 1, "new_slots": 1}
+    }
+  }],
+  "warnings": []
+}

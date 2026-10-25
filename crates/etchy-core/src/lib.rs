@@ -31,7 +31,9 @@ pub mod view;
 
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
-pub use excellon::{looks_like_excellon, resolve_excellon};
+pub use excellon::{
+    looks_like_excellon, resolve_excellon, resolve_excellon_with_tools, DrillTools, ToolCount,
+};
 pub use export::{
     board_areas_csv, board_report_html, board_report_html_with_limit, layer_svg,
     layer_svg_with_colors,
@@ -62,9 +64,10 @@ pub use pagealign::{
 };
 pub use placement::{looks_like_placement, resolve_placement};
 pub use report::{
-    DiffReport, LayerReport, LayerStatus, NativeDiagnosticsReport, NativeDiffReport,
-    NativeInputReport, ObjectChange, ObjectChangeFlag, ObjectChangeStatus, ObjectIdentity,
-    ObjectKind, ObjectSnapshot, ObjectSummary, Totals, NATIVE_SCHEMA_VERSION, SCHEMA_VERSION,
+    DiffReport, DrillCounts, DrillRowChange, DrillTableReport, DrillTableRow, LayerReport,
+    LayerStatus, NativeDiagnosticsReport, NativeDiffReport, NativeInputReport, ObjectChange,
+    ObjectChangeFlag, ObjectChangeStatus, ObjectIdentity, ObjectKind, ObjectSnapshot,
+    ObjectSummary, Totals, NATIVE_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 pub use view::{BoardDiff, LayerView};
 
@@ -143,6 +146,17 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     // fan-out doesn't multiply peak memory (#81). `empty` is the shared placeholder
     // for a one-sided layer's absent side.
     let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
+    // The tool table compares only when every present side has one: an Excellon
+    // file paired with a Gerber-format drill file would otherwise read as every
+    // size added or removed.
+    let drill_table = match &pairing {
+        LayerPairing::Both { old, new, .. } => match (&old.drill_tools, &new.drill_tools) {
+            (Some(o), Some(n)) => report::DrillTableReport::compare(Some(o), Some(n)),
+            _ => None,
+        },
+        LayerPairing::OnlyOld(l) => report::DrillTableReport::compare(l.drill_tools.as_ref(), None),
+        LayerPairing::OnlyNew(l) => report::DrillTableReport::compare(None, l.drill_tools.as_ref()),
+    };
     // (a, b) are the (old, new) geometry for this kind; one is empty for a one-sided
     // layer. An empty one-sided layer stays Unchanged (no false gate).
     let (kind, label_old, label_new, a, b, old_x2, new_x2, default_status, negative) = match pairing
@@ -214,6 +228,7 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         (&new_x2, &old_x2)
     };
     report.labels_available = old_x2.is_some() || new_x2.is_some();
+    report.drill_table = drill_table;
     // Index each side's labelled objects once per layer, not once per region:
     // a scan of every object for every region is quadratic on big changes.
     let added_index = added_x2.as_deref().map(|o| LabelIndex::new(o));
@@ -428,6 +443,7 @@ mod tests {
             geometry: Arc::new(polygonize_gerber(a_txt.as_bytes()).unwrap()),
             negative: false,
             x2_objects: None,
+            drill_tools: None,
         };
         let lb = Layer {
             kind: LayerKind::TopCopper,
@@ -435,6 +451,7 @@ mod tests {
             geometry: Arc::new(polygonize_gerber(b_txt.as_bytes()).unwrap()),
             negative: false,
             x2_objects: None,
+            drill_tools: None,
         };
         let old = Board { layers: vec![la] };
         let new = Board { layers: vec![lb] };
@@ -460,6 +477,7 @@ mod tests {
                 geometry: Arc::new(geometry),
                 negative: false,
                 x2_objects: labels.then(|| Arc::new(objects.unwrap())),
+                drill_tools: None,
             }
         };
         let old = Board {
@@ -581,6 +599,7 @@ mod tests {
             geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
             negative,
             x2_objects: None,
+            drill_tools: None,
         };
         let pos = compare(
             &Board {
@@ -628,6 +647,7 @@ mod tests {
             ),
             negative,
             x2_objects: None,
+            drill_tools: None,
         };
         // Top copper on both sides so the same-board guard has a shared extent.
         let old = Board {
@@ -669,6 +689,7 @@ mod tests {
             geometry: Arc::clone(&g),
             negative,
             x2_objects: None,
+            drill_tools: None,
         };
         let err = compare(
             &Board {
@@ -701,6 +722,7 @@ mod tests {
             geometry: Arc::new(polygonize_gerber(txt.as_bytes()).unwrap()),
             negative: false,
             x2_objects: None,
+            drill_tools: None,
         }
     }
 
@@ -771,6 +793,96 @@ mod tests {
         ));
     }
 
+    /// A PTH drill layer, with its tool table, from Excellon source.
+    fn drill_layer(src: &str) -> Layer {
+        let (geometry, tools) = resolve_excellon_with_tools(src.as_bytes()).unwrap();
+        Layer {
+            kind: LayerKind::Drill(DrillKind::Plated),
+            label: "PTH.drl".into(),
+            geometry: Arc::new(geometry),
+            negative: false,
+            x2_objects: None,
+            drill_tools: Some(tools),
+        }
+    }
+
+    #[test]
+    fn compare_reports_the_drill_table_across_units() {
+        // Old is metric, new is inch; 0.8 mm and 0.0315 in are one size. New
+        // adds a 0.8 mm hole and drops the 0.3 mm tool.
+        let old = drill_layer(
+            "M48\nMETRIC,TZ\nT1C0.300\nT2C0.800\n%\nT1\nX5.0Y5.0\nT2\nX50.0Y50.0\nM30\n",
+        );
+        let new =
+            drill_layer("M48\nINCH,TZ\nT2C0.0315\n%\nT2\nX0.19685Y0.19685\nX1.9685Y1.9685\nM30\n");
+        let report = compare(&Board { layers: vec![old] }, &Board { layers: vec![new] }).unwrap();
+        let table = report.layers[0].drill_table.as_ref().unwrap();
+        let rows: Vec<_> = table
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.diameter_um,
+                    r.change,
+                    r.counts.old_holes,
+                    r.counts.new_holes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (300, DrillRowChange::Removed, 1, 0),
+                (800, DrillRowChange::Changed, 1, 2),
+            ]
+        );
+        assert!(report.to_json().contains("\"drill_table\""));
+    }
+
+    #[test]
+    fn drill_table_needs_a_tool_table_on_every_present_side() {
+        // An Excellon file paired with a Gerber-format drill file: no table,
+        // rather than every size reading as added or removed.
+        let excellon = drill_layer("M48\nMETRIC,TZ\nT1C0.300\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nM30\n");
+        let mut gerber = excellon.clone();
+        gerber.drill_tools = None;
+        let report = compare(
+            &Board {
+                layers: vec![excellon.clone()],
+            },
+            &Board {
+                layers: vec![gerber],
+            },
+        )
+        .unwrap();
+        assert!(report.layers[0].drill_table.is_none());
+        assert!(!report.to_json().contains("drill_table"));
+        // A one-sided Excellon layer gets its table, every size removed.
+        let copper = cu_layer(
+            LayerKind::TopCopper,
+            "F_Cu",
+            "X5000000Y5000000D03*\nX50000000Y50000000D03*\n",
+        );
+        let report = compare(
+            &Board {
+                layers: vec![copper.clone(), excellon],
+            },
+            &Board {
+                layers: vec![copper],
+            },
+        )
+        .unwrap();
+        let drill = report
+            .layers
+            .iter()
+            .find(|l| l.kind == "drill-pth")
+            .unwrap();
+        assert_eq!(drill.status, LayerStatus::RemovedLayer);
+        let table = drill.drill_table.as_ref().unwrap();
+        assert_eq!(table.rows[0].change, DrillRowChange::Removed);
+        assert_eq!(table.total.old_holes, 2);
+    }
+
     #[test]
     fn compare_detailed_shares_geometry_via_arc() {
         // #81: the view must reuse each board layer's geometry allocation, not
@@ -790,6 +902,7 @@ mod tests {
                 geometry: Arc::clone(&ga),
                 negative: false,
                 x2_objects: None,
+                drill_tools: None,
             }],
         };
         let new = Board {
@@ -799,6 +912,7 @@ mod tests {
                 geometry: Arc::clone(&gb),
                 negative: false,
                 x2_objects: None,
+                drill_tools: None,
             }],
         };
         let diff = compare_detailed(&old, &new).unwrap();

@@ -17,6 +17,11 @@
 //! it is what real `INCH,TZ` exporters emit without a format line.) Anything
 //! we can't render faithfully (incremental coordinates, arc routing) is a loud
 //! [`EngineError`], never a quiet drop.
+//!
+//! Alongside the geometry the resolver counts holes and slots per tool
+//! diameter ([`DrillTools`]), for the drill table in the report (#422).
+
+use std::collections::BTreeMap;
 
 use crate::error::{EngineError, Result};
 use crate::geo::{snap_nm, Contour, PolygonSet};
@@ -219,7 +224,33 @@ fn tool_select(line: &str) -> Option<u32> {
     }
 }
 
+/// Hole and slot counts for one tool diameter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolCount {
+    /// Drill hits, including each hit a repeat code (`R<n>`) makes.
+    pub holes: u32,
+    /// Slots: one per `G85` canned slot, one per routed `M15`…`M16` run.
+    pub slots: u32,
+}
+
+/// What one drill file drilled, per tool diameter. The key is the diameter in
+/// whole micrometres, rounded from the unit-normalised nm value, so a tool
+/// written in inches and its metric equivalent land on the same key
+/// (0.0315 in = 800.1 µm → 800, same as 0.8 mm). Tools that are defined but
+/// never used are not listed; tool numbers are not kept, only sizes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DrillTools {
+    pub by_diameter_um: BTreeMap<i64, ToolCount>,
+}
+
 /// Parse + resolve one Excellon drill file's bytes into filled hole/slot geometry.
+/// Same as [`resolve_excellon_with_tools`] without the per-tool counts.
+pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
+    resolve_excellon_with_tools(bytes).map(|(geometry, _)| geometry)
+}
+
+/// Parse + resolve one Excellon drill file's bytes into filled hole/slot geometry,
+/// plus the hole and slot counts per tool diameter from the same walk.
 ///
 /// Two passes so a **headerless** file (no `M48`, a form the sniff deliberately
 /// accepts) still resolves its body: pass 1 collects header facts (units, zero
@@ -227,7 +258,7 @@ fn tool_select(line: &str) -> Option<u32> {
 /// wherever they appear; pass 2 interprets the body — every line after the `M48`
 /// header's `%`/`M95` terminator, or the whole file when there is no header
 /// (header-form lines don't match any body form and are ignored there).
-pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
+pub fn resolve_excellon_with_tools(bytes: &[u8]) -> Result<(PolygonSet, DrillTools)> {
     // Contain a panic anywhere in the header/body walk as a loud typed error
     // instead of unwinding through the caller / aborting a batch — the same
     // boundary `resolve_layer` puts around the Gerber parser (#85, #308). Relies
@@ -238,7 +269,7 @@ pub fn resolve_excellon(bytes: &[u8]) -> Result<PolygonSet> {
     .map_err(|_| EngineError::Parse("excellon parser panicked on this input".into()))?
 }
 
-fn resolve_excellon_inner(bytes: &[u8]) -> Result<PolygonSet> {
+fn resolve_excellon_inner(bytes: &[u8]) -> Result<(PolygonSet, DrillTools)> {
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
@@ -413,6 +444,9 @@ struct Body {
     x: f64,      // current position (nm), modal
     y: f64,
     routing: bool, // between M15 (down) and M16/M17 (up)
+    /// The current routed run already counted as a slot.
+    run_counted: bool,
+    counts: BTreeMap<i64, ToolCount>,
     contours: Vec<Contour>,
     /// Running sum of vertices across all pushed contours, checked against the
     /// shared `MAX_POINTS_PER_LAYER` on every push (#308). The contour count is
@@ -430,6 +464,8 @@ impl Body {
             x: 0.0,
             y: 0.0,
             routing: false,
+            run_counted: false,
+            counts: BTreeMap::new(),
             contours: Vec::new(),
             total_points: 0,
         }
@@ -442,10 +478,12 @@ impl Body {
         match line {
             "M15" => {
                 self.routing = true;
+                self.run_counted = false;
                 return Ok(());
             }
             "M16" | "M17" => {
                 self.routing = false;
+                self.run_counted = false;
                 return Ok(());
             }
             "M30" | "M00" | "M95" | "G05" | "G90" | "T0" => return Ok(()),
@@ -543,6 +581,8 @@ impl Body {
         // Range-guard the nm diameter like the Gerber `dim()` chokepoint: an absurd
         // value must fail loud here, not saturate inside geom::ngon (#308).
         self.dia_nm = self.nm(d * self.unit_nm)?;
+        // Cutting on with a new tool is a new slot, counted under its size.
+        self.run_counted = false;
         Ok(())
     }
 
@@ -564,6 +604,7 @@ impl Body {
             let (x1, y1) = self.read_xy(from, self.x, self.y)?;
             let (x2, y2) = self.read_xy(&to[3..], x1, y1)?;
             self.emit_slot(x1, y1, x2, y2)?;
+            self.count().slots += 1;
             self.x = x2;
             self.y = y2;
             return Ok(());
@@ -584,6 +625,11 @@ impl Body {
         if self.routing {
             // Tool down: any move cuts a slot segment from here to there.
             self.emit_slot(self.x, self.y, nx, ny)?;
+            // A run of several segments is one routed slot.
+            if !self.run_counted {
+                self.run_counted = true;
+                self.count().slots += 1;
+            }
         } else if !is_move {
             // Drill mode: a hit at the new point.
             self.emit_hit(nx, ny)?;
@@ -618,7 +664,17 @@ impl Body {
         }
         // Repeat codes accumulate `x += dx`, so guard the final position too.
         let (x, y) = (self.nm(x)?, self.nm(y)?);
-        self.push(geom::ngon(x, y, self.dia_nm / 2.0))
+        self.push(geom::ngon(x, y, self.dia_nm / 2.0))?;
+        self.count().holes += 1;
+        Ok(())
+    }
+
+    /// The count entry for the current tool's diameter, rounded to whole µm.
+    /// Only called after a hit or slot was emitted, so the diameter is positive
+    /// and range-checked.
+    fn count(&mut self) -> &mut ToolCount {
+        let um = (self.dia_nm / 1000.0).round() as i64;
+        self.counts.entry(um).or_default()
     }
 
     fn emit_slot(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) -> Result<()> {
@@ -659,11 +715,14 @@ impl Body {
     /// Union every hole/slot into one filled set in a single boolean pass —
     /// disjoint holes come back as separate shapes, overlapping ones merge (like
     /// the Gerber path, but all objects are "dark" so no per-object accumulation).
-    fn finish(self) -> PolygonSet {
+    fn finish(self) -> (PolygonSet, DrillTools) {
+        let tools = DrillTools {
+            by_diameter_um: self.counts,
+        };
         if self.contours.is_empty() {
-            return PolygonSet::default();
+            return (PolygonSet::default(), tools);
         }
-        crate::boolean::union(&self.contours, &[])
+        (crate::boolean::union(&self.contours, &[]), tools)
     }
 }
 
@@ -796,6 +855,40 @@ mod tests {
         let bb = ps.bbox_nm().unwrap();
         assert!((bb[0] as f64 / 1e6 - 9.75).abs() < 0.1, "min x {}", bb[0]);
         assert!((bb[2] as f64 / 1e6 - 15.25).abs() < 0.1, "max x {}", bb[2]);
+    }
+
+    fn tools(src: &str) -> Vec<(i64, u32, u32)> {
+        let (_, tools) = resolve_excellon_with_tools(src.as_bytes()).unwrap();
+        tools
+            .by_diameter_um
+            .iter()
+            .map(|(d, c)| (*d, c.holes, c.slots))
+            .collect()
+    }
+
+    #[test]
+    fn counts_holes_and_slots_per_tool_size() {
+        // T1 0.5 mm: two hits + a repeat of two more; T2 1.0 mm: one G85 slot and
+        // one routed run of two segments (one slot); T3 is defined but unused.
+        let src = "M48\nMETRIC,TZ\nT1C0.500\nT2C1.000\nT3C2.000\n%\nT1\nX10.0Y10.0\nX20.0Y10.0\nR2X5.0\n\
+                   T2\nX10.0Y30.0G85X15.0Y30.0\nG00X10.0Y40.0\nM15\nG01X15.0Y40.0\nG01X15.0Y45.0\nM16\nM30\n";
+        assert_eq!(tools(src), [(500, 4, 0), (1000, 0, 2)]);
+    }
+
+    #[test]
+    fn tool_sizes_match_across_units() {
+        // 0.0315 in = 0.8001 mm: rounds to the same 800 µm key as 0.8 mm.
+        let inch = "M48\nINCH,TZ\nT1C0.0315\n%\nT1\nX1.0Y1.0\nM30\n";
+        let metric = "M48\nMETRIC,TZ\nT1C0.800\n%\nT1\nX25.4Y25.4\nM30\n";
+        assert_eq!(tools(inch), [(800, 1, 0)]);
+        assert_eq!(tools(inch), tools(metric));
+    }
+
+    #[test]
+    fn two_tool_numbers_of_one_size_share_a_row() {
+        let src =
+            "M48\nMETRIC,TZ\nT1C0.300\nT7C0.300\n%\nT1\nX1.0Y1.0\nT7\nX2.0Y1.0\nX3.0Y1.0\nM30\n";
+        assert_eq!(tools(src), [(300, 3, 0)]);
     }
 
     #[test]

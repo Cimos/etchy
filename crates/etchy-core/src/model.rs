@@ -149,6 +149,9 @@ pub struct Layer {
     pub negative: bool,
     /// X2 object labels and their source contours; None when unavailable.
     pub x2_objects: Option<Arc<Vec<crate::gerber::LabeledContour>>>,
+    /// Hole and slot counts per tool size for an Excellon drill file; None for
+    /// every other layer, Gerber-format drill files included (#422).
+    pub drill_tools: Option<crate::excellon::DrillTools>,
 }
 
 /// A whole fab pack: the set of resolved layers for one revision.
@@ -421,6 +424,7 @@ mod tests {
             ]]])),
             negative: false,
             x2_objects: None,
+            drill_tools: None,
         }
     }
 
@@ -556,6 +560,7 @@ mod tests {
             ]]])),
             negative: false,
             x2_objects: None,
+            drill_tools: None,
         };
         let a = Board {
             layers: vec![mk("M.GM1"), mk("M.GM2")],
@@ -584,6 +589,7 @@ mod tests {
             ]]])),
             negative: false,
             x2_objects: None,
+            drill_tools: None,
         };
         let a = Board {
             layers: vec![mk("revA-F_Cu.gbr")],
@@ -888,6 +894,7 @@ mod tests {
                 ]]])),
                 negative: false,
                 x2_objects: None,
+                drill_tools: None,
             }
         };
         let old = Board {
