@@ -1,9 +1,10 @@
 # deploy/feedback/ — collected demo feedback (development stage)
 
 One `*.jsonl` file per host that ran the demo. Each line is one submission: server
-timestamp plus the widget payload (`sentiment`, `category`, `severity`, `name`,
-`text`, and `ctx` = screen/viewport/url/app-state at submit time). The server also
-records the client IP and User-Agent in the files it writes locally.
+timestamp and `id` plus the widget payload (`sentiment`, `category`, `severity`,
+`name`, `text`, and `ctx` = screen/viewport/url/app-state at submit time). The
+client IP and User-Agent are not recorded (#287); logs written by older server
+builds may still carry them as `ip`, `ua` and `ctx.ua`.
 
 - **`<hostname>.jsonl`** — written live by `etchy-server.py` when launched via
   `deploy/setup.sh` (which sets `$ETCHY_FEEDBACK` to point here). These stay
@@ -13,11 +14,13 @@ records the client IP and User-Agent in the files it writes locally.
   removed and the demo URL genericised. The feedback text is intact.
 - Triage everything with **`python3 deploy/collect-feedback.py`**. To prepare a
   single stream for sharing, **`python3 deploy/collect-feedback.py --merged`**
-  de-duplicates and time-sorts all local logs, emits JSONL to stdout, and omits
-  only the collector's temporary `_src` field. It does **not** scrub the IP,
-  User-Agent, tester name, or URL; remove those identifying fields from its
-  output before sharing it.
+  de-duplicates (dropping only copies of the same submission, matched by its
+  server `id` or, for older records, by full content), time-sorts all local
+  logs, and emits JSONL to stdout. It drops the collector's temporary `_src`
+  field and any `ip`, `ua` or `ctx.ua` left in older logs. It does **not**
+  scrub the tester name or URL; remove those from its output before sharing it.
 
-> ⚠ **Live logs contain IPs, User-Agents and tester names (PII), so they are
-> gitignored — don't commit one.** If a log has to be shared, strip those fields
-> first, the way `m1-seed.jsonl` is stripped.
+> ⚠ **Live logs contain tester names (and, if written by an older server build,
+> IPs and User-Agents), so they are gitignored — don't commit one.** If a log
+> has to be shared, strip those fields first, the way `m1-seed.jsonl` is
+> stripped.

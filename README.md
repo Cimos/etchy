@@ -25,7 +25,8 @@ etchy old/ new/ --format json         # machine-readable magnitudes (schema v1)
 
 ```sh
 etchy crates/etchy-gui/assets/demo/old crates/etchy-gui/assets/demo/new --html diff.html
-# 10 of 13 layers changed — open diff.html to see every overlay
+# 10 of 13 layers changed; +213.29638 / -448.70036 mm² (967+/863- regions)
+# Open diff.html to see every overlay
 ```
 
 Diff two committed revisions straight from git, no checkout:
@@ -80,7 +81,7 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
   plus a `SHA256SUMS` file, are on the [Releases](../../releases) page.
 
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
-changed-first layer list, overlay / before / after / split / swipe modes, pan /
+changed-first layer list, Overlay / Old / New / Split / Swipe modes, pan /
 zoom / fit, a settings panel, an Open-A / Open-B loader (folder, `.zip`, or
 drag-and-drop), and a Help menu. A **web viewer** build also exists (see `deploy/`).
 

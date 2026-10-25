@@ -28,8 +28,8 @@ are fastest there and the CI Linux target is the distribution target).
 
 ## System packages (Linux/WSL), by milestone
 
-The Phase-0 scaffold is **pure Rust — no system packages needed**. They come in
-as real dependencies land:
+The core and PDF crates use pure Rust dependencies. The desktop GUI needs system
+display and graphics libraries on Linux:
 
 - **GUI (`etchy-gui`, eframe/egui — M1):** X11/Wayland + GPU libs, e.g. on
   Debian/Ubuntu: `libxkbcommon-dev libwayland-dev libxcb1-dev libgl1-mesa-dev`.
@@ -58,9 +58,14 @@ as real dependencies land:
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets   # tighten to -D warnings once deps land
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test  --workspace
 ```
+
+`committed_corpus_matches_ground_truth` skips unless the gitignored golden
+corpus is generated; CI generates it and sets `ETCHY_REQUIRE_CORPUS=1` so it
+fails instead. To run it locally the same way, see
+[`corpus/README.md`](corpus/README.md#harness).
 
 ## Cutting a release
 
@@ -84,5 +89,5 @@ as a pre-release. Before pushing the tag:
    at the new one.
 
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what to build next and
-[`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) for the architecture +
-verified crate stack.
+[`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) for the architecture and
+current crate stack.

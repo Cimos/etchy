@@ -2,8 +2,8 @@
 
 The web build of `etchy-gui` (WASM) served on a LAN so others can try the diff
 viewer in a browser. This folder is the **page + server**, version-controlled so
-they can't be lost; the WASM/JS bundle and the demo board are build artifacts and
-are **not** committed.
+they can't be lost. The WASM/JS bundle is a build artifact; the demo board is
+committed at `crates/etchy-gui/assets/demo/` and checked against `scripts/demo-assets.sha256` by `scripts/check-demo-assets.sh`.
 
 > **New machine?** Use the runbook + one-command setup: [`SETUP.md`](SETUP.md)
 > (`deploy/setup.sh` builds, stages, and serves). Feedback is collected in
@@ -18,11 +18,15 @@ are **not** committed.
   layer/mode/zoom from the Rust hook). References `/etchy-gui.js` +
   `/etchy-gui_bg.wasm` with a `?v=` cache-bust.
 - `demo/etchy-server.py` — static file server **+ `POST /feedback`** → appends one
-  JSON line per submission to `feedback.jsonl` (server ts + IP + UA + payload).
+  JSON line per submission to `feedback.jsonl` (server ts + unique `id` +
+  payload; the client IP and User-Agent are not recorded, #287). Bodies over
+  16 MiB, more than 8 screenshots or a screenshot
+  over 8 MiB decoded are refused with 413 and nothing is written (#250).
   Refuses to serve the feedback file, the `screenshots/` dir beside it, itself,
-  or any directory listing (#334).
+  or any directory listing (#334). Tests: `python3 -m unittest
+  deploy/demo/test_etchy_server.py deploy/test_collect_feedback.py`.
 
-## Build + deploy (current host: Windows, served from `C:\Users\<user>\etchy-demo\`)
+## Build + deploy (Windows serves the staged `deploy/.serve/` directory)
 
 ```sh
 # 1. Build the web bundle with STABLE filenames (so index.html refs never change):

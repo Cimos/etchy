@@ -74,7 +74,8 @@ winresource = "0.1.31"
 serde_json.workspace = true
 
 # Web (WASM) build only — the browser entry point + canvas wiring + the bundled
-# demo board (embedded at compile time; the board itself is gitignored).
+# demo board (embedded at compile time; committed and hash-checked by
+# scripts/check-demo-assets.sh).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

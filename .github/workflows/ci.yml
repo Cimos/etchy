@@ -69,8 +69,13 @@ jobs:
           test -n "$(ls -A corpus/synthetic/revA 2>/dev/null)"
           test -n "$(ls -A corpus/synthetic/revB 2>/dev/null)"
 
+      # ETCHY_REQUIRE_CORPUS=1 makes committed_corpus_matches_ground_truth fail
+      # (rather than skip) if the corpus is missing, so the deep test can never
+      # quietly stop running here.
       - name: Test
         run: cargo test --locked --workspace
+        env:
+          ETCHY_REQUIRE_CORPUS: "1"
 
       # The PDF path is behind an off-by-default feature, so `--workspace` alone
       # never compiles the etchy-pdf engine tests or the PDF CLI contract tests
