@@ -16,6 +16,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   now rejected as `Unsupported` (stroked and region arcs alike); a `G75` full
   circle is unaffected (#321).
 
+## [0.1.2] — 2026-10-25
+
+### Fixed
+- Windows: `etchy.exe` and `etchy-gui.exe` link the C runtime statically, so
+  they run on a clean install without the Visual C++ redistributable. 0.1.1
+  failed winget validation with STATUS_DLL_NOT_FOUND (#415).
+
 ## [0.1.1] — 2026-10-03
 
 ### Added
@@ -315,7 +322,8 @@ production fab packs, with the release pipeline proven across four platforms.
   toolchain; the verified real dependencies (clap, i_overlay, eframe,
   pdfium-render, askama, …) are added per-module starting in Milestone 1.
 
-[Unreleased]: https://github.com/Cimos/etchy/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Cimos/etchy/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Cimos/etchy/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Cimos/etchy/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Cimos/etchy/compare/v0.1.0-rc1...v0.1.0
 [0.1.0-rc1]: https://github.com/Cimos/etchy/releases/tag/v0.1.0-rc1
