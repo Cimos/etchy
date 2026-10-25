@@ -9,6 +9,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- A drill or placement file that fails to parse is no longer reported as
+  "gerber parse failed". The message now reads "parse failed", after the
+  file name and layer kind (#448).
+
 ## [0.2.0] — 2026-10-26
 
 ### Added
