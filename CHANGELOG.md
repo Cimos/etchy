@@ -66,6 +66,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   selects that tool. Before, the previous tool stayed active. A body
   redefinition now applies only to the hits that follow it, not to earlier
   ones (#310).
+- Excellon: a tool definition whose diameter can't be read (`T2Cbad`,
+  `T2C`) now fails loud and names the line. Before, it was skipped and the
+  next hit used the previous tool (#428).
 - Excellon: body `G91` (incremental coordinates) now fails loud instead of
   being ignored. So does any other unrecognised G-code on a coordinate line,
   such as `G93` or `G32`/`G33`, which used to be drawn as plain hits (#309).

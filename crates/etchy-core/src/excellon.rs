@@ -205,6 +205,25 @@ fn is_tool_def(line: &str) -> Option<(u32, &str)> {
     Some((num, dia))
 }
 
+/// [`is_tool_def`], but loud about a definition whose diameter can't be read.
+/// A line such as `T2Cbad` or `T2C` has a tool number and a `C` yet no diameter,
+/// so it matches neither a definition nor a select; skipping it would let the
+/// next hit silently use the previous tool (#428).
+fn tool_def(line: &str) -> Result<Option<(u32, &str)>> {
+    if let Some(def) = is_tool_def(line) {
+        return Ok(Some(def));
+    }
+    let Some(rest) = line.strip_prefix('T') else {
+        return Ok(None);
+    };
+    if rest.starts_with(|c: char| c.is_ascii_digit()) && rest.contains('C') {
+        return Err(EngineError::Parse(format!(
+            "tool definition '{line}' has no readable diameter after C"
+        )));
+    }
+    Ok(None)
+}
+
 /// A tool select `T<n>` in the body, returning the tool number. Tolerates
 /// trailing feed/speed/retract fields (`T01F200S65`) — but a `C` tail is a tool
 /// *definition*, not a select.
@@ -359,7 +378,7 @@ fn parse_header_line(
         apply_inline_format(rest, fmt_digits);
         return Ok(());
     }
-    if let Some((num, dia)) = is_tool_def(line) {
+    if let Some((num, dia)) = tool_def(line)? {
         if let Some(tools) = tools {
             tools.insert(num, parse_tool_dia(line, dia)?);
         }
@@ -505,7 +524,7 @@ impl Body {
         // `T2F00S00C0.040`): (re)define the tool for subsequent hits only, then
         // select it (#310). Checked before the bare select, which would otherwise
         // take a feed-led definition as a plain select.
-        if let Some((t, dia)) = is_tool_def(line) {
+        if let Some((t, dia)) = tool_def(line)? {
             let d = parse_tool_dia(line, dia)?;
             self.tools.insert(t, d);
             self.select_tool(t)?;
@@ -1243,6 +1262,29 @@ mod tests {
         assert!(resolve_excellon(src.as_bytes()).is_err());
         let src = "METRIC,TZ\nT1C0.400\nT1\nX1.0Y1.0\nM30\n";
         assert!((area(src) - one_hole(0.4)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unreadable_tool_diameter_fails_loud() {
+        // #428: `T2Cbad` used to match neither a definition nor a select and
+        // was skipped, so the next hit drew with the previous tool (T1).
+        for src in [
+            "M48\nMETRIC,TZ\nT1C0.200\n%\nT1\nX1.0Y1.0\nT2Cbad\nX2.0Y1.0\nM30\n",
+            "M48\nMETRIC,TZ\nT1C0.200\n%\nT1\nT2C\nX2.0Y1.0\nM30\n",
+            "M48\nMETRIC,TZ\nT1C0.200\n%\nT1\nT2F00S00Cbad\nX2.0Y1.0\nM30\n",
+            "M48\nMETRIC,TZ\nT1C0.200\nT2Cbad\n%\nT1\nX1.0Y1.0\nM30\n",
+            "METRIC,TZ\nT1C0.200\nT1\nX1.0Y1.0\nT2Cbad\nX2.0Y1.0\nM30\n",
+        ] {
+            let msg = resolve_excellon(src.as_bytes()).unwrap_err().to_string();
+            assert!(
+                msg.contains("tool definition 'T2") && msg.contains("diameter"),
+                "want a loud error naming the line, got: {msg}"
+            );
+        }
+        // Tool selects and header words that only start with T are not
+        // definitions and still resolve.
+        let src = "M48\nMETRIC,TZ\nTCST,ON\nT1C0.200\n%\nT01F200S65\nX1.0Y1.0\nM30\n";
+        assert!(resolve_excellon(src.as_bytes()).is_ok());
     }
 
     #[test]
