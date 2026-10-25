@@ -41,7 +41,8 @@ class BlockTests(unittest.TestCase):
         os.makedirs(cls.shots)
         # The default layout: bundle, page, script copy, feedback and screenshots
         # all in the served directory.
-        for name in ("index.html", "etchy-gui.js", "etchy-server.py", "feedback.jsonl"):
+        for name in ("index.html", "etchy-gui.js", "feedback-widget.js",
+                     "etchy-server.py", "feedback.jsonl"):
             with open(os.path.join(cls.root, name), "w") as f:
                 f.write("x")
         with open(os.path.join(cls.shots, "x.png"), "wb") as f:
@@ -78,7 +79,8 @@ class BlockTests(unittest.TestCase):
                                      script=os.path.join(HERE, "etchy-server.py")))
 
     def test_bundle_is_served(self):
-        for p in ("/index.html", "/etchy-gui.js", "/etchy-gui.js?v=3", "/",
+        for p in ("/index.html", "/etchy-gui.js", "/etchy-gui.js?v=3",
+                  "/feedback-widget.js", "/",
                   "/etchy-gui_bg.wasm", "/missing.txt"):
             with self.subTest(path=p):
                 self.assertFalse(self.blocked(p))

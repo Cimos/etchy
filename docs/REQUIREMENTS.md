@@ -164,6 +164,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | PROC-2 | CI is the merge gate. Local verification remains good practice before pushing: `cargo test`, `clippy --all-targets` warning-clean, `fmt --check`, and the wasm build for GUI changes. | working agreement | standing |
 | PROC-3 | Feedback screenshots may show confidential boards: reference local paths in issues; never commit `deploy/feedback/`. | working agreement | standing |
 | PROC-4 | Every feedback widget ships **Ctrl+Enter to send** and **Ctrl+V screenshot paste** with removable thumbnails. | working agreement | ✅ |
+| PROC-5 | The default web viewer shell has no feedback widget or collection. The demo shell alone loads the feedback widget; its payload omits client IP and User-Agent. | #337, #412 | ✅ |
 
 ---
 

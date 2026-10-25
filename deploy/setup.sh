@@ -79,7 +79,7 @@ build() {
   say "staging serve dir: $SERVE_DIR"
   mkdir -p "$SERVE_DIR"
   cp "$dist/etchy-gui.js" "$dist/etchy-gui_bg.wasm" "$SERVE_DIR/"
-  cp "$REPO/deploy/demo/index.html" "$REPO/deploy/demo/etchy-server.py" "$SERVE_DIR/"
+  cp "$REPO/deploy/demo/index.html" "$REPO/deploy/demo/feedback-widget.js" "$REPO/deploy/demo/etchy-server.py" "$SERVE_DIR/"
 }
 
 serve() {
