@@ -224,6 +224,7 @@ fn load_zip_capped(
         // keys on filename) works regardless of how the pack was zipped.
         let name = entry
             .name()
+            .with_context(|| format!("reading zip entry {i} name"))?
             .rsplit(['/', '\\'])
             .next()
             .unwrap_or("")
@@ -393,6 +394,12 @@ mod tests {
             w.write_all(&payload).unwrap();
             w.finish().unwrap();
         }
+        // Honest headers: our own cap rejects the oversized entry.
+        let err = load_zip_capped(buf.clone(), 100, MAX_TOTAL_BYTES, MAX_ZIP_ENTRIES)
+            .expect_err("an entry over the cap must be rejected")
+            .to_string();
+        assert!(err.contains("per-file limit"), "got: {err}");
+
         // Local file header (PK\x03\x04): uncompressed size at +22.
         forge_u32(&mut buf, b"PK\x03\x04", 22, real, 10);
         // Central directory header (PK\x01\x02): uncompressed size at +24 —
@@ -400,11 +407,15 @@ mod tests {
         forge_u32(&mut buf, b"PK\x01\x02", 24, real, 10);
 
         // Cap of 100: above the forged 10 (so a declared-size check passes it) but
-        // below the real payload (so an actual-bytes check must reject it).
+        // below the real payload (so an actual-bytes check must reject it). zip 9+
+        // also refuses to read past the declared size, so either error is a pass.
         let err = load_zip_capped(buf, 100, MAX_TOTAL_BYTES, MAX_ZIP_ENTRIES)
             .expect_err("a forged small declaration must not bypass the cap")
             .to_string();
-        assert!(err.contains("per-file limit"), "got: {err}");
+        assert!(
+            err.contains("per-file limit") || err.contains("extracting"),
+            "got: {err}"
+        );
     }
 
     // A small honest zip still loads through the capped path.
