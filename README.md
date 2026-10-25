@@ -25,7 +25,8 @@ etchy old/ new/ --format json         # machine-readable magnitudes (schema v1)
 
 ```sh
 etchy crates/etchy-gui/assets/demo/old crates/etchy-gui/assets/demo/new --html diff.html
-# 10 of 13 layers changed — open diff.html to see every overlay
+# 10 of 13 layers changed; +213.29638 / -448.70036 mm² (967+/863- regions)
+# Open diff.html to see every overlay
 ```
 
 Diff two committed revisions straight from git, no checkout:
