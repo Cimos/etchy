@@ -214,13 +214,17 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         (&new_x2, &old_x2)
     };
     report.labels_available = old_x2.is_some() || new_x2.is_some();
+    // Index each side's labelled objects once per layer, not once per region:
+    // a scan of every object for every region is quadratic on big changes.
+    let added_index = added_x2.as_deref().map(|o| LabelIndex::new(o));
+    let removed_index = removed_x2.as_deref().map(|o| LabelIndex::new(o));
     report.regions = added
         .iter()
-        .map(|r| region_report(r, report::RegionChange::Added, added_x2))
+        .map(|r| region_report(r, report::RegionChange::Added, added_index.as_ref()))
         .chain(
             removed
                 .iter()
-                .map(|r| region_report(r, report::RegionChange::Removed, removed_x2)),
+                .map(|r| region_report(r, report::RegionChange::Removed, removed_index.as_ref())),
         )
         .collect();
     debug_assert_eq!(
@@ -243,29 +247,132 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
 
 const MAX_LABELS_PER_KIND: usize = 20;
 
+/// Cells per grid axis at most; the grid is sized to about one object per cell.
+const LABEL_GRID_MAX: usize = 128;
+/// An object spanning more cells than this (a pour, a long track) is kept in a
+/// short always-checked list instead of being copied into every cell it covers.
+const LABEL_GRID_LARGE: usize = 64;
+
+/// A uniform grid over one side's labelled objects, keyed by outline bounding
+/// box. It only narrows the candidates: every hit is still confirmed by the
+/// bounding-box test and the exact boolean overlap, so labels match a full scan.
+struct LabelIndex<'a> {
+    objects: &'a [gerber::LabeledContour],
+    /// `[min_x, min_y, max_x, max_y]` of each object's outline (first ring).
+    boxes: Vec<[i64; 4]>,
+    origin: [i64; 2],
+    cell: i64,
+    cols: usize,
+    rows: usize,
+    cells: Vec<Vec<u32>>,
+    large: Vec<u32>,
+}
+
+impl<'a> LabelIndex<'a> {
+    fn new(objects: &'a [gerber::LabeledContour]) -> Self {
+        // The outline bounds the object; holes lie inside it.
+        let boxes: Vec<[i64; 4]> = objects
+            .iter()
+            .map(|o| {
+                let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+                for p in o.shape.first().into_iter().flatten() {
+                    b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
+                }
+                b
+            })
+            .collect();
+        let mut ext = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+        for b in boxes.iter().filter(|b| b[0] <= b[2]) {
+            ext = [
+                ext[0].min(b[0]),
+                ext[1].min(b[1]),
+                ext[2].max(b[2]),
+                ext[3].max(b[3]),
+            ];
+        }
+        let mut index = LabelIndex {
+            objects,
+            boxes,
+            origin: [0, 0],
+            cell: 1,
+            cols: 1,
+            rows: 1,
+            cells: vec![Vec::new()],
+            large: Vec::new(),
+        };
+        if ext[0] > ext[2] {
+            return index; // no object has an outline
+        }
+        let side = ((objects.len() as f64).sqrt().ceil() as usize).clamp(1, LABEL_GRID_MAX);
+        let span = (ext[2] - ext[0]).max(ext[3] - ext[1]).max(1);
+        index.origin = [ext[0], ext[1]];
+        index.cell = (span / side as i64 + 1).max(1);
+        index.cols = ((ext[2] - ext[0]) / index.cell) as usize + 1;
+        index.rows = ((ext[3] - ext[1]) / index.cell) as usize + 1;
+        index.cells = vec![Vec::new(); index.cols * index.rows];
+        for (i, b) in index.boxes.iter().enumerate() {
+            if b[0] > b[2] {
+                continue;
+            }
+            let (c0, r0, c1, r1) = index.cell_range(b);
+            if (c1 - c0 + 1) * (r1 - r0 + 1) > LABEL_GRID_LARGE {
+                index.large.push(i as u32);
+                continue;
+            }
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    index.cells[r * index.cols + c].push(i as u32);
+                }
+            }
+        }
+        index
+    }
+
+    /// Inclusive grid cell range covered by a box, clamped to the grid.
+    fn cell_range(&self, b: &[i64; 4]) -> (usize, usize, usize, usize) {
+        let col = |x: i64| ((x - self.origin[0]).max(0) / self.cell).min(self.cols as i64 - 1);
+        let row = |y: i64| ((y - self.origin[1]).max(0) / self.cell).min(self.rows as i64 - 1);
+        (
+            col(b[0]) as usize,
+            row(b[1]) as usize,
+            col(b[2]) as usize,
+            row(b[3]) as usize,
+        )
+    }
+
+    /// Objects whose outline box touches `bb`, in index order (deterministic).
+    fn candidates(&self, bb: &[i64; 4]) -> Vec<u32> {
+        let (c0, r0, c1, r1) = self.cell_range(bb);
+        let mut out = self.large.clone();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                out.extend_from_slice(&self.cells[r * self.cols + c]);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out.retain(|&i| {
+            let b = &self.boxes[i as usize];
+            b[0] <= b[2] && !(b[2] < bb[0] || b[0] > bb[2] || b[3] < bb[1] || b[1] > bb[3])
+        });
+        out
+    }
+}
+
 fn region_report(
     region: &diff::ChangedRegion<'_>,
     direction: report::RegionChange,
-    objects: &Option<Arc<Vec<gerber::LabeledContour>>>,
+    index: Option<&LabelIndex<'_>>,
 ) -> report::RegionReport {
     let mut result = report::RegionReport::from_region(region, direction);
-    let Some(objects) = objects else {
+    let Some(index) = index else {
         return result;
     };
     let mut refs = BTreeSet::new();
     let mut pins = BTreeSet::new();
     let mut nets = BTreeSet::new();
-    for object in objects.iter() {
-        let bb = &region.bbox_nm;
-        // The outline (first ring) bounds the object; holes lie inside it.
-        let outline = &object.shape[0];
-        if outline.iter().all(|p| p.x < bb[0])
-            || outline.iter().all(|p| p.x > bb[2])
-            || outline.iter().all(|p| p.y < bb[1])
-            || outline.iter().all(|p| p.y > bb[3])
-        {
-            continue;
-        }
+    for i in index.candidates(&region.bbox_nm) {
+        let object = &index.objects[i as usize];
         if !boolean::overlaps(region.shape, &object.shape) {
             continue;
         }
@@ -395,21 +502,64 @@ mod tests {
             centroid_nm: [500_000, 500_000],
             shape: &shape,
         };
-        let objects = Arc::new(
-            (0..25)
-                .map(|i| gerber::LabeledContour {
-                    shape: vec![contour.clone()],
-                    labels: gerber::ObjectLabels {
-                        refdes: Some(format!("U{i}")),
-                        ..Default::default()
-                    },
-                })
-                .collect(),
-        );
-        let report = region_report(&region, report::RegionChange::Added, &Some(objects));
+        let objects: Vec<_> = (0..25)
+            .map(|i| gerber::LabeledContour {
+                shape: vec![contour.clone()],
+                labels: gerber::ObjectLabels {
+                    refdes: Some(format!("U{i}")),
+                    ..Default::default()
+                },
+            })
+            .collect();
+        let index = LabelIndex::new(&objects);
+        let report = region_report(&region, report::RegionChange::Added, Some(&index));
         let labels = report.labels.unwrap();
         assert_eq!(labels.refdes.len(), 20);
         assert!(labels.truncated);
+    }
+
+    #[test]
+    fn label_index_finds_the_same_objects_as_a_full_scan() {
+        // A 30x30 grid of 1 mm pads at 2 mm pitch plus one board-wide pour (kept
+        // in the always-checked list). Every query box must get exactly the
+        // objects a plain bounding-box scan finds.
+        let sq = |x: i64, y: i64, s: i64| {
+            vec![
+                Pt::new(x, y),
+                Pt::new(x + s, y),
+                Pt::new(x + s, y + s),
+                Pt::new(x, y + s),
+            ]
+        };
+        let mut objects: Vec<_> = (0..30)
+            .flat_map(|i| (0..30).map(move |j| (i, j)))
+            .map(|(i, j)| gerber::LabeledContour {
+                shape: vec![sq(i * 2_000_000, j * 2_000_000, 1_000_000)],
+                labels: gerber::ObjectLabels::default(),
+            })
+            .collect();
+        objects.push(gerber::LabeledContour {
+            shape: vec![sq(-5_000_000, -5_000_000, 70_000_000)],
+            labels: gerber::ObjectLabels::default(),
+        });
+        let index = LabelIndex::new(&objects);
+        assert_eq!(index.large, [900]);
+        for bb in [
+            [0, 0, 1_000_000, 1_000_000],
+            [1_500_000, 1_500_000, 4_200_000, 2_100_000],
+            [-9_000_000, -9_000_000, -6_000_000, -6_000_000],
+            [10_000_000, 10_000_000, 90_000_000, 90_000_000],
+            [59_000_000, 0, 99_000_000, 1_000],
+        ] {
+            let full: Vec<u32> = index
+                .boxes
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| !(b[2] < bb[0] || b[0] > bb[2] || b[3] < bb[1] || b[1] > bb[3]))
+                .map(|(i, _)| i as u32)
+                .collect();
+            assert_eq!(index.candidates(&bb), full, "query {bb:?}");
+        }
     }
 
     // ---- #240: public-API integration (through compare / compare_detailed) ----

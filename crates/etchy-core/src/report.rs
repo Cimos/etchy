@@ -466,7 +466,12 @@ impl DiffReport {
                 for r in l.top_regions(limit) {
                     let labels = r
                         .labels_text()
-                        .map_or_else(|| "unavailable".to_string(), |t| md_code_span(&t));
+                        // A `|` in a net name would split the table cell, even
+                        // inside a code span.
+                        .map_or_else(
+                            || "unavailable".to_string(),
+                            |t| md_code_span(&t).replace('|', "\\|"),
+                        );
                     s.push_str(&format!(
                         "| {} | {:.4} | {} | {} | {} |\n",
                         r.change_str(),
@@ -716,6 +721,37 @@ mod tests {
             .map(|r| r.area_nm2.as_str())
             .collect();
         assert_eq!(top, ["200", "10"]);
+    }
+
+    #[test]
+    fn region_table_escapes_pipes_in_labels() {
+        let change = LayerChange {
+            added_area_nm2: 1,
+            added_region_count: 1,
+            has_added: true,
+            ..Default::default()
+        };
+        let mut layer = LayerReport::new(
+            LayerKind::TopCopper,
+            None,
+            None,
+            LayerStatus::Changed,
+            &change,
+        );
+        layer.regions.push(RegionReport {
+            change: RegionChange::Added,
+            area_mm2: 0.0,
+            area_nm2: "1".into(),
+            bbox_nm: [0, 0, 1, 1],
+            centroid_nm: [0, 0],
+            labels: Some(RegionLabels {
+                nets: vec!["A|B".into()],
+                ..Default::default()
+            }),
+        });
+        let md = DiffReport::new(vec![layer], vec![]).to_markdown_summary();
+        let row = md.lines().find(|l| l.starts_with("| added")).unwrap();
+        assert!(row.contains("A\\|B"), "{row}");
     }
 
     #[test]
