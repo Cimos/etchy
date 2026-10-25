@@ -90,6 +90,13 @@ web-sys = { version = "0.3", features = [
     "File",
     "Url",
     "HtmlAnchorElement",
+    # The drop listener that refuses a dropped folder out loud (#331).
+    "EventTarget",
+    "DragEvent",
+    "DataTransfer",
+    "DataTransferItemList",
+    "DataTransferItem",
+    "FileSystemEntry",
 ] }
 js-sys = "0.3"
 include_dir = "0.7"

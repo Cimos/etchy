@@ -39,6 +39,10 @@ As of writing, the shell described here lives in **PR #202** (stacked on
 - Labels derive identically on web and native (GUI-7): when a folder's basename
   is a generic rev marker (`old`, `new`, `a`, `b`, a bare version), the parent
   directory name is borrowed — e.g. `boards/Mad_RP2040/old` → "Mad_RP2040 old".
+  A `.zip` drops its extension (`RevB.zip` → "RevB"). Loose layer files take
+  the filename prefix they share (`RevB-F_Cu.gtl` + `RevB-B_Cu.gbl` → "RevB"),
+  else the first file's stem. CLI args, Open, drops and web picks all use this
+  rule (#329).
 
 ## 2. Panels
 

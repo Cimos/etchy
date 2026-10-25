@@ -291,7 +291,8 @@ fn main() -> std::process::ExitCode {
     native::run()
 }
 
-/// The bundled demo board (gitignored, embedded at compile time). A layer that
+/// The bundled demo board (committed and hash-checked by
+/// scripts/check-demo-assets.sh, embedded at compile time). A layer that
 /// fails to parse is skipped rather than crashing the demo.
 #[cfg(target_arch = "wasm32")]
 fn board_from_files(
@@ -383,6 +384,7 @@ fn main() {
                 canvas,
                 web_options,
                 Box::new(|cc| {
+                    install_web_folder_drop_guard(cc.egui_ctx.clone());
                     let (old, new, diff) = demo_seed();
                     let (ol, nl) = (old.label.clone(), new.label.clone());
                     let mut app = ViewApp::from_cc(cc, diff, ol, nl);
@@ -1337,6 +1339,80 @@ enum DroppedSources {
 /// so the user learns the accepted shapes instead of guessing why nothing loaded.
 const DROP_SHAPE_HINT: &str =
     "drop one fab pack per side: either one zip, or two zips for old and new, or loose layer files";
+
+/// Shown when a folder is dropped on the web viewer (#331). A browser can't
+/// hand over a folder's files, so the drop is refused out loud instead of
+/// loading nothing (or only the loose files beside it).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const WEB_FOLDER_DROP_ERROR: &str =
+    "folders can't be dropped in the browser — zip the fab pack or select the files";
+
+/// Set by the web drop listener when a drop held a folder; drained once per
+/// frame into `load_error` (#331).
+#[cfg(target_arch = "wasm32")]
+static WEB_FOLDER_DROPPED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The welcome screen's drag-and-drop hint. The web copy never offers a folder,
+/// since a browser can't deliver one (#331).
+fn welcome_drop_hint(web: bool) -> &'static str {
+    if web {
+        "…or drag a .zip fab pack, a schematic PDF, or Gerber files onto the page."
+    } else {
+        "…or drag a folder, a .zip fab pack, or Gerber files onto the window."
+    }
+}
+
+/// The Open menu's drag-and-drop hint, per surface (#331).
+fn open_menu_drop_hint(web: bool) -> &'static str {
+    if web {
+        "…or drag a .zip or Gerber files onto the page\n\
+         (a folder can't be dropped in the browser)"
+    } else {
+        "…or drag a folder / .zip onto the window\n\
+         (if the file dialog doesn't open)"
+    }
+}
+
+/// Web: watch drops for folders (#331). eframe reads only `DataTransfer.files`,
+/// and a folder there fails to read and is skipped, so a folder drop loaded
+/// nothing with no message. This listener runs in the capture phase, before
+/// eframe's own, and refuses any drop holding a folder: it stops the event so
+/// no partial set of loose files loads either, and flags the error for the
+/// next frame.
+#[cfg(target_arch = "wasm32")]
+fn install_web_folder_drop_guard(ctx: egui::Context) {
+    use eframe::wasm_bindgen::closure::Closure;
+    use eframe::wasm_bindgen::JsCast as _;
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let on_drop = Closure::<dyn FnMut(web_sys::DragEvent)>::new(move |ev: web_sys::DragEvent| {
+        let Some(items) = ev.data_transfer().map(|dt| dt.items()) else {
+            return;
+        };
+        let has_folder = (0..items.length()).any(|i| {
+            items
+                .get(i)
+                .filter(|item| item.kind() == "file")
+                .and_then(|item| item.webkit_get_as_entry().ok().flatten())
+                .is_some_and(|entry| entry.is_directory())
+        });
+        if has_folder {
+            ev.prevent_default();
+            ev.stop_propagation();
+            WEB_FOLDER_DROPPED.store(true, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        }
+    });
+    let _ = win.add_event_listener_with_callback_and_bool(
+        "drop",
+        on_drop.as_ref().unchecked_ref(),
+        true,
+    );
+    // The listener lives as long as the page.
+    on_drop.forget();
+}
 
 /// The computed comparison of two sources: a geometric board diff, or a per-page
 /// PDF pixel diff (#63).
@@ -2774,7 +2850,7 @@ impl ViewApp {
         if let Some(parent) = path.parent() {
             self.last_dir = Some(parent.to_path_buf());
         }
-        match load_source_any(path, path_label(path)) {
+        match load_source_any(path, derive_label(path)) {
             Ok(src) => self.set_side(side, src),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
@@ -2822,14 +2898,21 @@ impl ViewApp {
     fn load_dropped(&mut self, side: RevSide, files: Vec<egui::DroppedFile>) {
         // Web drops carry bytes; the shared classifier routes a `.zip` (or a
         // pair of them, #325), a schematic `.pdf` (#63), or loose Gerber layers.
+        let had_entries = !files.is_empty();
         let byte_files: Vec<(String, Vec<u8>)> = files
             .into_iter()
             .filter_map(|f| f.bytes.map(|b| (basename(&f.name), b.to_vec())))
             .collect();
         if byte_files.is_empty() {
+            // Entries with no bytes are what a browser gives for a folder; say
+            // so rather than doing nothing (#331). The drop listener normally
+            // catches a folder first; this is the fallback.
+            if had_entries {
+                self.load_error = Some(WEB_FOLDER_DROP_ERROR.to_string());
+            }
             return;
         }
-        match files_to_sources(byte_files, "dropped files") {
+        match files_to_sources(byte_files) {
             Ok(src) => self.adopt_sources(side, src),
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
@@ -2886,7 +2969,7 @@ impl ViewApp {
             }
             let result = match oversized {
                 Some(e) => Err(e),
-                None => files_to_sources(byte_files, "uploaded"),
+                None => files_to_sources(byte_files),
             };
             let _ = tx.send(FilePick { side, result });
             ctx.request_repaint();
@@ -2920,11 +3003,9 @@ impl ViewApp {
                 });
                 ui.add_space(12.0);
                 ui.label(
-                    egui::RichText::new(
-                        "…or drag a folder, a .zip fab pack, or Gerber files onto the window.",
-                    )
-                    .weak()
-                    .small(),
+                    egui::RichText::new(welcome_drop_hint(cfg!(target_arch = "wasm32")))
+                        .weak()
+                        .small(),
                 );
                 if let Some(err) = self.load_error.clone() {
                     ui.add_space(16.0);
@@ -3007,12 +3088,14 @@ fn diff_from_sources(old: &LoadedBoard, new: &LoadedBoard) -> anyhow::Result<Boa
 /// version like "v0.0.1" — and carries no board identity; when it is, prefix the
 /// parent directory name (".../Mad_RP2040/old" -> "Mad_RP2040 old",
 /// "Mad_RP2040/v0.0.0" -> "Mad_RP2040 v0.0.0"). Otherwise the basename stands.
+/// A `.zip` fab pack drops its extension first, so "boards/RevB.zip" reads
+/// "RevB" on every surface (#329).
 fn derive_label(path: &std::path::Path) -> String {
     let base = path
         .file_name()
         .map(|s| s.to_string_lossy())
         .unwrap_or_default();
-    let base = base.trim();
+    let base = strip_zip_ext(base.trim());
     if base.is_empty() {
         return "?".to_string();
     }
@@ -3029,6 +3112,57 @@ fn derive_label(path: &std::path::Path) -> String {
         }
     }
     base.to_string()
+}
+
+/// A name without a trailing `.zip` (any case). A bare ".zip" is left alone
+/// rather than becoming an empty label.
+fn strip_zip_ext(name: &str) -> &str {
+    let cut = name.len().saturating_sub(4);
+    match (name.get(..cut), name.get(cut..)) {
+        (Some(stem), Some(ext)) if !stem.trim().is_empty() && ext.eq_ignore_ascii_case(".zip") => {
+            stem.trim_end()
+        }
+        _ => name,
+    }
+}
+
+/// Label for loose layer files, which have no folder or zip name to go on
+/// (#329): the filename prefix they all share ("Mad_RP2040-F_Cu.gtl" +
+/// "Mad_RP2040-B_Cu.gbl" -> "Mad_RP2040"), else the first stem in name order.
+/// Two different packs dropped or picked as loose files get different labels.
+fn loose_files_label<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let mut stems: Vec<&str> = names
+        .into_iter()
+        .map(|n| {
+            let n = n.trim();
+            match n.rsplit_once('.') {
+                Some((stem, _)) if !stem.trim().is_empty() => stem.trim(),
+                _ => n,
+            }
+        })
+        .collect();
+    stems.sort_unstable();
+    let Some(&first) = stems.first() else {
+        return "?".to_string();
+    };
+    let mut prefix = first;
+    for s in &stems[1..] {
+        let common: usize = prefix
+            .chars()
+            .zip(s.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a.len_utf8())
+            .sum();
+        prefix = &prefix[..common];
+    }
+    let prefix = prefix.trim_end_matches(['-', '_', '.', ' ']);
+    if prefix.chars().count() >= 2 {
+        prefix.to_string()
+    } else if first.is_empty() {
+        "?".to_string()
+    } else {
+        first.to_string()
+    }
 }
 
 /// Whether a directory-name segment is a generic revision marker that carries no
@@ -3063,9 +3197,13 @@ fn basename(name: &str) -> String {
 /// mode; one `.zip` → the fab-pack loader; exactly two `.zip`s and nothing else →
 /// a pair, old = first by name; anything else → loose Gerber layers. A PDF mixed
 /// with other files, more than two zips, or a zip beside loose layers is a loud
-/// error — never a guess about which pack the user meant. Shared by the web drop
-/// and web file-pick paths; pure over bytes, so it's unit-tested on native too.
-fn files_to_sources(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<DroppedSources> {
+/// error — never a guess about which pack the user meant. Labels come from the
+/// file names, the same way on every surface (#329): a PDF or zip by
+/// [`derive_label`], loose layers by [`loose_files_label`]. Shared by the web
+/// drop and web file-pick paths and native loose-file drops; pure over bytes,
+/// so it's unit-tested on native too.
+fn files_to_sources(files: Vec<(String, Vec<u8>)>) -> anyhow::Result<DroppedSources> {
+    let name_label = |name: &str| derive_label(std::path::Path::new(name));
     let pdf_count = files
         .iter()
         .filter(|(name, bytes)| {
@@ -3083,7 +3221,7 @@ fn files_to_sources(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Resul
             anyhow::bail!("{name} has a .pdf name but no PDF content (%PDF magic missing)");
         }
         return Ok(DroppedSources::One(LoadedSource::Pdf(LoadedPdf {
-            label: name,
+            label: name_label(&name),
             bytes,
         })));
     }
@@ -3100,20 +3238,17 @@ fn files_to_sources(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Resul
         |board, fmt, label: String| LoadedSource::Board(LoadedBoard { label, board, fmt });
     match (zips.len(), byte_files.is_empty()) {
         (0, _) => {
+            let label = loose_files_label(byte_files.iter().map(|(n, _)| n.as_str()));
             let (board, fmt) = loader::board_from_bytes(byte_files)?;
-            Ok(DroppedSources::One(board_source(
-                board,
-                fmt,
-                label.to_string(),
-            )))
+            Ok(DroppedSources::One(board_source(board, fmt, label)))
         }
         (1, true) => {
-            let (_, bytes) = zips.pop().expect("len checked above");
+            let (name, bytes) = zips.pop().expect("len checked above");
             let (board, fmt) = loader::load_zip(bytes)?;
             Ok(DroppedSources::One(board_source(
                 board,
                 fmt,
-                label.to_string(),
+                name_label(&name),
             )))
         }
         (2, true) => {
@@ -3125,8 +3260,8 @@ fn files_to_sources(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Resul
             let (ob, of) = loader::load_zip(old_bytes)?;
             let (nb, nf) = loader::load_zip(new_bytes)?;
             Ok(DroppedSources::Pair {
-                old: board_source(ob, of, old_name),
-                new: board_source(nb, nf, new_name),
+                old: board_source(ob, of, name_label(&old_name)),
+                new: board_source(nb, nf, name_label(&new_name)),
             })
         }
         (n, true) => anyhow::bail!("{n} zip files dropped together — {DROP_SHAPE_HINT}"),
@@ -3218,15 +3353,16 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSou
     if paths.len() == 1 {
         let p = &paths[0];
         if is_fab_pack(p) || is_pdf_input(p) {
-            return load_source_any(p, path_label(p)).map(DroppedSources::One);
+            return load_source_any(p, derive_label(p)).map(DroppedSources::One);
         }
     }
     if paths.len() == 2 && paths.iter().all(|p| is_fab_pack(p)) {
+        // Order by file name (#325); label the same way Open does (#329).
         let mut pair: Vec<(String, &std::path::PathBuf)> =
             paths.iter().map(|p| (path_label(p), p)).collect();
         pair.sort_by(|a, b| a.0.cmp(&b.0));
-        let old = load_source_any(pair[0].1, pair[0].0.clone())?;
-        let new = load_source_any(pair[1].1, pair[1].0.clone())?;
+        let old = load_source_any(pair[0].1, derive_label(pair[0].1))?;
+        let new = load_source_any(pair[1].1, derive_label(pair[1].1))?;
         return Ok(DroppedSources::Pair { old, new });
     }
     if paths.iter().any(|p| p.is_dir()) {
@@ -3255,7 +3391,7 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSou
         let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
         files.push((path_label(p), bytes));
     }
-    files_to_sources(files, &format!("{} files", paths.len()))
+    files_to_sources(files)
 }
 
 impl ViewApp {
@@ -3325,7 +3461,12 @@ impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Loader (#120): drain any async web file picks, then accept drag-and-drop.
         #[cfg(target_arch = "wasm32")]
-        self.poll_file_picks();
+        {
+            self.poll_file_picks();
+            if WEB_FOLDER_DROPPED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.load_error = Some(WEB_FOLDER_DROP_ERROR.to_string());
+            }
+        }
         self.handle_dropped_files(ui.ctx());
 
         // Startup splash (foreground overlay; skipped once done). Drawn before the
@@ -3723,10 +3864,9 @@ impl eframe::App for ViewApp {
                                 }
                                 ui.separator();
                                 ui.label(
-                                    egui::RichText::new(
-                                        "…or drag a folder / .zip onto the window\n\
-                                         (if the file dialog doesn't open)",
-                                    )
+                                    egui::RichText::new(open_menu_drop_hint(cfg!(
+                                        target_arch = "wasm32"
+                                    )))
                                     .weak()
                                     .small(),
                                 );
@@ -7078,9 +7218,9 @@ mod tests {
     }
 
     /// Classify and expect a single source (the common shape).
-    fn one(files: Vec<(String, Vec<u8>)>, label: &str) -> anyhow::Result<super::LoadedSource> {
+    fn one(files: Vec<(String, Vec<u8>)>) -> anyhow::Result<super::LoadedSource> {
         use super::DroppedSources;
-        match super::files_to_sources(files, label)? {
+        match super::files_to_sources(files)? {
             DroppedSources::One(src) => Ok(src),
             DroppedSources::Pair { .. } => panic!("expected one source, got a pair"),
         }
@@ -7103,7 +7243,7 @@ mod tests {
     #[test]
     fn files_to_source_routes_a_single_pdf_to_pdf_mode() {
         use super::LoadedSource;
-        let src = one(vec![("sch.pdf".into(), b"%PDF-1.7 junk".to_vec())], "up").unwrap();
+        let src = one(vec![("sch.pdf".into(), b"%PDF-1.7 junk".to_vec())]).unwrap();
         match src {
             LoadedSource::Pdf(p) => {
                 assert_eq!(p.label, "sch.pdf", "PDF keeps its file name as label");
@@ -7116,13 +7256,10 @@ mod tests {
     #[test]
     fn files_to_source_rejects_pdf_mixed_with_layers() {
         // Trust: a PDF among Gerber layers is a loud error, never a guess.
-        let err = match one(
-            vec![
-                ("sch.pdf".into(), b"%PDF-1.7".to_vec()),
-                ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
-            ],
-            "up",
-        ) {
+        let err = match one(vec![
+            ("sch.pdf".into(), b"%PDF-1.7".to_vec()),
+            ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
+        ]) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a PDF among layers must fail loud"),
         };
@@ -7131,7 +7268,7 @@ mod tests {
 
     #[test]
     fn files_to_source_rejects_a_pdf_named_file_without_pdf_content() {
-        let err = match one(vec![("sch.pdf".into(), b"not a pdf".to_vec())], "up") {
+        let err = match one(vec![("sch.pdf".into(), b"not a pdf".to_vec())]) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a mislabelled .pdf must fail loud"),
         };
@@ -7141,14 +7278,10 @@ mod tests {
     #[test]
     fn files_to_source_still_loads_gerber_layers() {
         use super::LoadedSource;
-        let src = one(
-            vec![("board-F_Cu.gtl".into(), MIN_GERBER.to_vec())],
-            "uploaded",
-        )
-        .unwrap();
+        let src = one(vec![("board-F_Cu.gtl".into(), MIN_GERBER.to_vec())]).unwrap();
         match src {
             LoadedSource::Board(b) => {
-                assert_eq!(b.label, "uploaded");
+                assert_eq!(b.label, "board-F_Cu", "one loose layer: its stem (#329)");
                 assert_eq!(b.board.layers.len(), 1);
             }
             LoadedSource::Pdf(_) => panic!("gerber layers must stay on the board path"),
@@ -7159,14 +7292,10 @@ mod tests {
     #[test]
     fn files_to_sources_loads_one_zip() {
         use super::LoadedSource;
-        let src = one(
-            vec![("rev-A.zip".into(), zip_pack("a-F_Cu.gtl"))],
-            "dropped files",
-        )
-        .unwrap();
+        let src = one(vec![("rev-A.zip".into(), zip_pack("a-F_Cu.gtl"))]).unwrap();
         match src {
             LoadedSource::Board(b) => {
-                assert_eq!(b.label, "dropped files");
+                assert_eq!(b.label, "rev-A", "a zip is labelled by its name (#329)");
                 assert_eq!(b.board.layers.len(), 1);
             }
             LoadedSource::Pdf(_) => panic!("a zip must stay on the board path"),
@@ -7178,18 +7307,15 @@ mod tests {
     #[test]
     fn files_to_sources_two_zips_become_a_pair_in_name_order() {
         use super::{files_to_sources, DroppedSources};
-        let src = files_to_sources(
-            vec![
-                ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
-                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
-            ],
-            "dropped files",
-        )
+        let src = files_to_sources(vec![
+            ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
+            ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+        ])
         .unwrap();
         match src {
             DroppedSources::Pair { old, new } => {
-                assert_eq!(old.label(), "rev-A.zip");
-                assert_eq!(new.label(), "rev-B.zip");
+                assert_eq!(old.label(), "rev-A");
+                assert_eq!(new.label(), "rev-B");
             }
             DroppedSources::One(_) => panic!("two zips must load both sides, not one"),
         }
@@ -7199,14 +7325,11 @@ mod tests {
     #[test]
     fn files_to_sources_rejects_three_zips() {
         use super::files_to_sources;
-        let err = match files_to_sources(
-            vec![
-                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
-                ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
-                ("rev-C.zip".into(), zip_pack("c-F_Cu.gtl")),
-            ],
-            "dropped files",
-        ) {
+        let err = match files_to_sources(vec![
+            ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+            ("rev-B.zip".into(), zip_pack("b-F_Cu.gtl")),
+            ("rev-C.zip".into(), zip_pack("c-F_Cu.gtl")),
+        ]) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("three zips must fail loud"),
         };
@@ -7218,13 +7341,10 @@ mod tests {
     #[test]
     fn files_to_sources_rejects_zip_mixed_with_loose_layers() {
         use super::files_to_sources;
-        let err = match files_to_sources(
-            vec![
-                ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
-                ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
-            ],
-            "dropped files",
-        ) {
+        let err = match files_to_sources(vec![
+            ("rev-A.zip".into(), zip_pack("a-F_Cu.gtl")),
+            ("board-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
+        ]) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a zip beside loose layers must fail loud"),
         };
@@ -7247,8 +7367,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         match res.unwrap() {
             DroppedSources::Pair { old, new } => {
-                assert_eq!(old.label(), "rev-A.zip");
-                assert_eq!(new.label(), "rev-B.zip");
+                assert_eq!(old.label(), "rev-A");
+                assert_eq!(new.label(), "rev-B");
             }
             DroppedSources::One(_) => panic!("two dropped zips must load both sides"),
         }
@@ -7536,6 +7656,101 @@ mod tests {
         assert_eq!(derive_label(Path::new("new")), "new");
         // Empty path → sentinel, never a panic.
         assert_eq!(derive_label(Path::new("")), "?");
+    }
+
+    #[test]
+    fn derive_label_drops_the_zip_extension() {
+        use std::path::Path;
+        // A zip reads the same as the folder it was made from (#329).
+        assert_eq!(derive_label(Path::new("boards/RevB_fab.zip")), "RevB_fab");
+        assert_eq!(derive_label(Path::new("RevB_fab.ZIP")), "RevB_fab");
+        assert_eq!(
+            derive_label(Path::new("Mad_RP2040/old.zip")),
+            "Mad_RP2040 old"
+        );
+        // Only the zip extension goes; a bare ".zip" is not emptied.
+        assert_eq!(derive_label(Path::new("sch.pdf")), "sch.pdf");
+        assert_eq!(derive_label(Path::new(".zip")), ".zip");
+    }
+
+    #[test]
+    fn loose_files_label_uses_the_shared_prefix_or_first_stem() {
+        use super::loose_files_label;
+        assert_eq!(
+            loose_files_label(["Mad_RP2040-F_Cu.gtl", "Mad_RP2040-B_Cu.gbl"]),
+            "Mad_RP2040"
+        );
+        assert_eq!(loose_files_label(["board.gtl", "board.gbl"]), "board");
+        // No useful shared prefix → the first stem in name order, whatever
+        // order the files arrived in.
+        assert_eq!(loose_files_label(["top.gtl", "bottom.gbl"]), "bottom");
+        assert_eq!(loose_files_label(["F_Cu.gbr"]), "F_Cu");
+        // A multi-byte character (a lossy name) must not split mid-char.
+        assert_eq!(
+            loose_files_label(["b\u{FFFD}rd-F_Cu.gtl", "b\u{FFFD}rd-B_Cu.gbl"]),
+            "b\u{FFFD}rd"
+        );
+        assert_eq!(loose_files_label(std::iter::empty()), "?");
+    }
+
+    // #331: a browser can't take a dropped folder, so the web copy must not
+    // offer one; native keeps the folder hint.
+    #[test]
+    fn web_drop_hints_never_offer_a_folder() {
+        use super::{open_menu_drop_hint, welcome_drop_hint, WEB_FOLDER_DROP_ERROR};
+        for web_hint in [welcome_drop_hint(true), open_menu_drop_hint(true)] {
+            assert!(!web_hint.contains("drag a folder"), "web copy: {web_hint}");
+            assert!(
+                web_hint.contains(".zip"),
+                "web copy names the zip: {web_hint}"
+            );
+        }
+        assert!(welcome_drop_hint(false).contains("drag a folder"));
+        assert!(open_menu_drop_hint(false).contains("drag a folder"));
+        assert!(WEB_FOLDER_DROP_ERROR.contains("zip the fab pack"));
+    }
+
+    // #329: two different web-loaded packs must not share one label.
+    #[test]
+    fn different_web_packs_get_different_labels() {
+        use super::LoadedSource;
+        let label = |files: Vec<(String, Vec<u8>)>| match one(files).unwrap() {
+            LoadedSource::Board(b) => b.label,
+            LoadedSource::Pdf(_) => panic!("gerber layers must stay on the board path"),
+        };
+        let a = label(vec![
+            ("RevA-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
+            ("RevA-B_Cu.gbl".into(), MIN_GERBER.to_vec()),
+        ]);
+        let b = label(vec![
+            ("RevB-F_Cu.gtl".into(), MIN_GERBER.to_vec()),
+            ("RevB-B_Cu.gbl".into(), MIN_GERBER.to_vec()),
+        ]);
+        assert_eq!((a.as_str(), b.as_str()), ("RevA", "RevB"));
+        let za = label(vec![("RevA.zip".into(), zip_pack("a-F_Cu.gtl"))]);
+        let zb = label(vec![("RevB.zip".into(), zip_pack("a-F_Cu.gtl"))]);
+        assert_eq!((za.as_str(), zb.as_str()), ("RevA", "RevB"));
+    }
+
+    // #329 native: a dropped folder is labelled like a CLI argument, so a
+    // generic rev folder borrows its parent name.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropped_folder_label_matches_cli_args() {
+        use super::{load_dropped_paths, DroppedSources};
+        let root = std::env::temp_dir().join(format!("etchy-drop-label-{}", std::process::id()));
+        let dir = root.join("Mad_RP2040").join("old");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("board-F_Cu.gtl"), MIN_GERBER).unwrap();
+        let res = load_dropped_paths(std::slice::from_ref(&dir));
+        std::fs::remove_dir_all(&root).ok();
+        match res.unwrap() {
+            DroppedSources::One(src) => {
+                assert_eq!(src.label(), derive_label(&dir));
+                assert_eq!(src.label(), "Mad_RP2040 old");
+            }
+            DroppedSources::Pair { .. } => panic!("one folder is one source"),
+        }
     }
 
     #[test]

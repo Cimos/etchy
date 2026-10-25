@@ -215,8 +215,15 @@ pub fn pair_layers<'a>(old: &'a Board, new: &'a Board) -> Vec<LayerPairing<'a>> 
 
         // Pass 1: exact-filename matches within the kind — keeps distinct same-kind
         // layers apart, and is simply a no-op when the names differ across revisions.
+        // A label holding U+FFFD came from a lossy non-UTF-8 filename: two
+        // different names (`\xF6` and `\xF7`) collapse to the same text, so equal
+        // labels prove nothing and the layer goes to the overlap-checked pass (#431).
         let mut unmatched_old: Vec<&Layer> = Vec::new();
         for o in olds.iter().copied() {
+            if o.label.contains(char::REPLACEMENT_CHARACTER) {
+                unmatched_old.push(o);
+                continue;
+            }
             match news
                 .iter()
                 .enumerate()
@@ -659,6 +666,37 @@ mod tests {
         };
         let pairs = pair_layers(&a, &b);
         assert_eq!(pairs.len(), 1, "co-located rename must still pair");
+        assert!(matches!(pairs[0], LayerPairing::Both { .. }));
+    }
+
+    #[test]
+    fn lossy_labels_skip_the_exact_name_pass() {
+        // `board-\xF6.gbr` and `board-\xF7.gbr` both read as `board-\u{FFFD}.gbr`
+        // after the lossy conversion. Equal text must not pair two disjoint
+        // layers as one "changed" layer; the overlap check decides (#431).
+        let mm = 1_000_000;
+        let lossy = "board-\u{FFFD}.gbr";
+        let a = Board {
+            layers: vec![labeled(LayerKind::Other, lossy, [0, 0, 40 * mm, 40 * mm])],
+        };
+        let b = Board {
+            layers: vec![labeled(
+                LayerKind::Other,
+                lossy,
+                [60 * mm, 60 * mm, 100 * mm, 100 * mm],
+            )],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(pairs.len(), 2, "lossy equal labels must not force a pair");
+        assert!(pairs.iter().any(|p| matches!(p, LayerPairing::OnlyOld(_))));
+        assert!(pairs.iter().any(|p| matches!(p, LayerPairing::OnlyNew(_))));
+
+        // Co-located layers with the same lossy label still pair, via overlap.
+        let b = Board {
+            layers: vec![labeled(LayerKind::Other, lossy, [0, 0, 40 * mm, 40 * mm])],
+        };
+        let pairs = pair_layers(&a, &b);
+        assert_eq!(pairs.len(), 1);
         assert!(matches!(pairs[0], LayerPairing::Both { .. }));
     }
 
