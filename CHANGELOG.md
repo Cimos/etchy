@@ -10,6 +10,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 ## [Unreleased]
 
 ### Fixed
+- Pick-and-place files: a data row whose position or rotation can't be read
+  (e.g. an unquoted multi-word description or an unexpected column layout) now
+  fails the file with the row count and line numbers, instead of the component
+  silently vanishing from the diff (#320). Centroid CSVs now honour quoted
+  fields, so a comma inside a quoted comment no longer shifts the columns.
 - Drill plating is read from whole filename words instead of substrings
   (#237): an `Unplated` / `Not_Plated` drill file is now non-plated rather
   than plated, and a word that merely contains `PTH` (such as `depth`) no
