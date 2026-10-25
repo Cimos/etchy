@@ -373,6 +373,12 @@ fn parse_csv(text: &str) -> Result<Vec<Placement>> {
         if f.iter().all(|s| s.is_empty()) {
             continue; // a `,,,,` spacer row carries nothing
         }
+        // More filled fields than header columns means the row layout shifted;
+        // a numeric extra column would otherwise read as a wrong position.
+        if f.iter().skip(cols.len()).any(|s| !s.is_empty()) {
+            bad.note(line_no, line);
+            continue;
+        }
         let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
         let (x, y) = (strip_unit(get(x_i)), strip_unit(get(y_i)));
         // A missing/blank rotation cell means 0°; a present but unreadable one
@@ -666,6 +672,22 @@ SW1          FPF1320        BottomLayer FPF1320     29.9516      38.9507      27
                     R3,1k,extra,top,17.0,20.0,0\n\
                     R4,1k,extra,top,18.0,20.0,0\n";
         assert_bad_rows(text, 4, "…");
+    }
+
+    #[test]
+    fn csv_extra_numeric_column_fails_loud() {
+        // An extra numeric column shifts X/Y/rotation but every value still
+        // parses, so only the field count shows the row is wrong.
+        let text = "Designator,Center-X,Center-Y,Rotation
+C1,10.0,20.0,90
+R1,5,10,20,90
+";
+        assert_bad_rows(text, 1, "line 3: `R1");
+        // A trailing empty field is not a shifted row.
+        let text = "Designator,Center-X,Center-Y,Rotation
+C1,10.0,20.0,90,
+";
+        assert_eq!(parse_placements(text).unwrap().len(), 1);
     }
 
     #[test]
