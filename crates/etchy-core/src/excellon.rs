@@ -9,10 +9,14 @@
 //! **Trust bar.** Excellon's Achilles heel is coordinate decoding: zero
 //! suppression (`LZ`/`TZ`) and the integer/decimal split are declared in the
 //! header (or not at all), and getting them wrong silently moves holes. So we
-//! fail loud on an ambiguous header (no units, or suppressed coordinates with no
-//! declared mode) rather than guess — a wrong hole position is exactly the silent
-//! miss etchy exists to prevent. Anything we can't render faithfully (incremental
-//! coordinates, arc routing) is a loud [`EngineError`], never a quiet drop.
+//! fail loud on an ambiguous header (no units, suppressed coordinates with no
+//! declared mode, or `LZ` coordinates with no declared digit split) rather than
+//! guess — a wrong hole position is exactly the silent miss etchy exists to
+//! prevent. (TZ coordinates with no declared split use the conventional decimal
+//! count, 2.4 inch / 3.3 metric: TZ decoding depends only on that count, and
+//! it is what real `INCH,TZ` exporters emit without a format line.) Anything
+//! we can't render faithfully (incremental coordinates, arc routing) is a loud
+//! [`EngineError`], never a quiet drop.
 
 use crate::error::{EngineError, Result};
 use crate::geo::{snap_nm, Contour, PolygonSet};
@@ -53,7 +57,9 @@ impl Units {
             Units::Metric => 1.0e6,
         }
     }
-    /// Conventional integer.decimal split when a file doesn't state one.
+    /// Conventional integer.decimal split when a file doesn't state one. Only
+    /// trusted for TZ / explicit-decimal coordinates; an undeclared split under
+    /// LZ fails loud in [`Format::decode`].
     fn default_format(self) -> (usize, usize) {
         match self {
             Units::Inch => (2, 4),
@@ -69,6 +75,11 @@ struct Format {
     zeros: Option<Zeros>,
     int_digits: usize,
     dec_digits: usize,
+    /// Whether the header declared the digit split (`;FILE_FORMAT=i:d`,
+    /// `;FORMAT={i:d/…}`, `METRIC,LZ,000.000`) rather than it being the per-units
+    /// default. Only `LZ` decoding depends on the integer digit count, so only an
+    /// `LZ` coordinate refuses an undeclared split (#319).
+    declared: bool,
 }
 
 impl Format {
@@ -102,6 +113,18 @@ impl Format {
                         .into(),
                 )
             })?;
+            // LZ keeps leading zeros, so the value hinges on how many integer
+            // digits the field has: a 4.2 file decoded as the 3.3 default puts
+            // every hole at one-tenth the distance. TZ right-aligns against the
+            // decimal count, which the conventional default fixes (2.4 inch / 3.3
+            // metric is what headerless-format TZ exporters emit).
+            if zeros == Zeros::Leading && !self.declared {
+                return Err(EngineError::Parse(format!(
+                    "drill coordinate '{field}' is leading-zero (LZ) with no decimal point, \
+                     but the header declares no digit format (e.g. ;FILE_FORMAT=3:3 or \
+                     METRIC,LZ,000.000) — refusing to guess the integer/decimal split"
+                )));
+            }
             if mag.len() > total {
                 return Err(EngineError::Parse(format!(
                     "drill coordinate '{field}' has more digits than the {}.{} format",
@@ -259,6 +282,7 @@ fn resolve_excellon_inner(bytes: &[u8]) -> Result<PolygonSet> {
         zeros,
         int_digits,
         dec_digits,
+        declared: fmt_digits.is_some(),
     };
     let unit_nm = units.to_nm();
 
@@ -683,6 +707,7 @@ mod tests {
             zeros,
             int_digits: i,
             dec_digits: d,
+            declared: true,
         }
     }
 
@@ -743,7 +768,7 @@ mod tests {
     #[test]
     fn resolves_suppressed_coordinates() {
         // METRIC,LZ format 3.3: "010000" → 10.000 mm (leading kept, pad right).
-        let src = "M48\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nX020000Y010000\nM30\n";
+        let src = "M48\n;FILE_FORMAT=3:3\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nX020000Y010000\nM30\n";
         let ps = resolve_excellon(src.as_bytes()).unwrap();
         assert_eq!(ps.shapes.len(), 2);
         let bb = ps.bbox_nm().unwrap();
@@ -778,7 +803,7 @@ mod tests {
         // No M48 and no %/M95 terminator — a form looks_like_excellon claims via
         // units + tool defs. The body must not be eaten by header scanning
         // (review finding: silently returned an empty set).
-        let src = "INCH,LZ\nT1C0.032\nT1\nX0100Y0100\nM30\n";
+        let src = "INCH,LZ,00.0000\nT1C0.032\nT1\nX0100Y0100\nM30\n";
         let ps = resolve_excellon(src.as_bytes()).unwrap();
         assert_eq!(ps.shapes.len(), 1, "the one drill hit must survive");
         // 2.4 LZ: "0100" right-pads to 010000 → 1.0 in = 25.4 mm.
@@ -788,6 +813,61 @@ mod tests {
             (cx - 25.4).abs() < 0.1,
             "hole at 1.0 in = 25.4 mm, got {cx}"
         );
+    }
+
+    #[test]
+    fn undeclared_split_with_lz_suppressed_coords_fails_loud() {
+        // #319: METRIC,LZ with no format declaration. Decoding "010000" under
+        // a guessed 3.3 is 10 mm; under the file's real 4.2 it is 100 mm.
+        // No way to tell from the file → refuse rather than mis-place holes.
+        for src in [
+            "M48\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nM30\n",
+            "M48\nINCH,LZ\nT1C0.032\n%\nT1\nX0100Y0100\nM30\n",
+            "INCH,LZ\nT1C0.032\nT1\nX0100Y0100\nM30\n",
+        ] {
+            let err = resolve_excellon(src.as_bytes()).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("digit format") && msg.contains("LZ"),
+                "want a loud undeclared-split error, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_split_lz_with_only_decimal_coords_resolves() {
+        // The split only matters for decimal-less LZ fields: explicit decimals
+        // are unambiguous, so a METRIC,LZ file written with them still resolves.
+        let src = "M48\nMETRIC,LZ\nT1C1.000\n%\nT1\nX10.0Y10.0\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!((cx - 10.0).abs() < 0.1, "hole at 10 mm, got {cx}");
+    }
+
+    #[test]
+    fn undeclared_split_tz_uses_conventional_decimal_count() {
+        // INCH,TZ with no format line (the GUI demo's exporter form): TZ
+        // right-aligns against the decimal count, so the 2.4 default decodes
+        // "10000" as 1.0000 in regardless of the integer width.
+        let src = "M48\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!(
+            (cx - 25.4).abs() < 0.1,
+            "hole at 1.0 in = 25.4 mm, got {cx}"
+        );
+    }
+
+    #[test]
+    fn kicad_format_comment_declares_the_lz_split() {
+        // KiCad's suppressed-zero export carries `; FORMAT={3:3/ …}`.
+        let src = "M48\n; FORMAT={3:3/ absolute / metric / suppress trailing zeros}\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!((cx - 10.0).abs() < 0.1, "hole at 10 mm, got {cx}");
     }
 
     #[test]
