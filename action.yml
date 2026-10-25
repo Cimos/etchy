@@ -28,9 +28,9 @@ inputs:
     default: "false"
   version:
     description: >-
-      etchy release to run, as a tag like v0.1.2, or "latest". Empty (the
+      etchy release to run, as a tag like v0.2.0, or "latest". Empty (the
       default) uses the tag the Action itself is pinned to (`uses:
-      Cimos/etchy@v0.1.2` runs v0.1.2), or the latest release when the Action
+      Cimos/etchy@v0.2.0` runs v0.2.0), or the latest release when the Action
       is used at a branch or SHA.
     required: false
     default: ""

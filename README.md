@@ -47,7 +47,7 @@ add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
 
 ```yaml
-      - uses: Cimos/etchy@v0.1.2
+      - uses: Cimos/etchy@v0.2.0
         with:
           old: fab/rev-a
           new: fab/rev-b
@@ -71,8 +71,8 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 - **Container** (headless CLI, distroless, ~11 MB):
 
   ```sh
-  docker pull ghcr.io/cimos/etchy:v0.1.2
-  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.2 --format summary /work/old /work/new
+  docker pull ghcr.io/cimos/etchy:v0.2.0
+  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.2.0 --format summary /work/old /work/new
   ```
 
   Or build it yourself with `docker build -t etchy .`.
@@ -111,7 +111,7 @@ ask once before the first run.
 ODB++ ingestion, and native schematic files. (Pick-and-place is diffed as
 *placement geometry* — where parts sit — not a BOM/component list.)
 
-**Planned:** reading **KiCad `.kicad_pcb`** boards directly (0.2.0), then Altium
+**Planned:** reading **KiCad `.kicad_pcb`** boards directly (0.3.0), then Altium
 `.PcbDoc`, with a list of changed objects alongside the layer diff
 ([#122](../../issues/122), [spec](docs/design/native-cad-ingestion/spec.md)).
 

@@ -37,7 +37,7 @@ and machine-readable magnitudes — on any Gerber/Excellon fab pack.
 DRC/rule-checking, IPC-2581 / ODB++ ingestion, native schematic files
 (`.kicad_sch` / `.SchDoc`). Anything here is "Beyond 1.0", not forgotten — see
 the bottom.
-**Next (0.2.0):** native KiCad `.kicad_pcb` boards, parsed directly, with a
+**Next (0.3.0):** native KiCad `.kicad_pcb` boards, parsed directly, with a
 per-layer diff plus a list of changed objects. Altium `.PcbDoc` follows as an
 experimental feature. Tracked in #122; spec and phased plan in
 [`design/native-cad-ingestion/`](design/native-cad-ingestion/plan.md).
@@ -49,7 +49,7 @@ experimental feature. Tracked in #122; spec and phased plan in
 Time estimates are deliberately omitted (solo, open-source cadence); milestones
 are ordered by dependency and each is independently shippable.
 
-### Where we are — 2026-09-07
+### Where we are — 2026-10-26
 
 Phase 0, M1, M2, and **M3 are all done**, and the **GUI shell redesign has
 merged** (requirements in [`REQUIREMENTS.md`](REQUIREMENTS.md) §6–§9, spec in
@@ -62,7 +62,9 @@ with four archives plus `SHA256SUMS`. **M4 is done: `v0.1.0` was released on
 2026-10-02 with the container on ghcr, and the repository is public.** The remaining tracked
 non-blockers are the WSLg native-click defect (#203, a fractional-scale pointer offset — the Windows
 cross-build sidesteps it) and post-1.0 "accepted future" work (more EDA
-filename schemes, KiCad ingestion, the perf design tasks).
+filename schemes, KiCad ingestion in 0.3.0, the perf design tasks). The 0.2.0
+milestone is ready for release: changed regions with X2 labels (#442), drill
+table diffs (#451), the release-binary Action and GitLab recipe (#450), and fixes.
 
 | Milestone | Status | Notes |
 |---|---|---|
@@ -72,6 +74,7 @@ filename schemes, KiCad ingestion, the perf design tasks).
 | M3 — PDF + dense-board hardening | ✅ done | rayon per-layer diff, per-layer DoS ceilings, robust region counts, **pure-Rust PDF page-diff engine** (`etchy_core::imagediff` + `etchy-pdf`/hayro), and the `.pdf` **CLI + GUI** paths (#63): `etchy old.pdf new.pdf` behind `--features pdf` (summary/JSON/md, `--dpi`, `--out` overlay PNGs, per-page pixel cap); release binaries + container ship `pdf` on |
 | GUI shell redesign | ✅ done | VS Code-style shell (activity rail, Layers + Export tabs, Measure as a plain tool toggle with no panel, Settings rail panel, hotkey editor, trust chips) and the eyes-only **Focus** visibility model (#224) — merged via #167→#175→#182→#202 plus the follow-up polish (#226/#229/#232/#233) |
 | M4 — 1.0 (distribution / docs) | ✅ done | `v0.1.0` released 2026-10-02 (4 archives + `SHA256SUMS`), container on `ghcr.io/cimos/etchy`, landing/docs site live, repository public |
+| 0.2.0 — reports and CI | ✅ done | Changed-region lists with X2 labels (#442), drill table diff (#451), release-binary Action and GitLab recipe (#450), and fixes; release prepared 2026-10-26, tag pending |
 
 ### Phase 0 — Foundations & de-risking ✅
 The big-bang rewrite's main risk is time-to-first-value; Phase 0 buys down the
@@ -152,7 +155,7 @@ and trust the result.
 ## Beyond 1.0 (parked, not forgotten)
 Revisit only if demand appears; each was explicitly deferred in discovery:
 - Native KiCad, the object change list and Altium have moved out of this list:
-  they are the 0.2.0 / 0.3.0 plan above.
+  they are the 0.3.0 / later plan above.
 - IPC-2581 / ODB++ ingestion (carry net + component data).
 - Net/connectivity diff, BOM/component diff. (DRC remains out — different tool.)
 

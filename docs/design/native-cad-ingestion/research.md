@@ -206,7 +206,7 @@ reproducibility and browser parity.
 Resolve variables whose values are in the board itself or intrinsic to the
 object, including reference/value fields. A `${NAME}` requiring a project file,
 environment or worksheet remains literal in object data, is not projected, and
-gets the same visible warning. No `.kicad_pro` input is required in v0.2.0.
+gets the same visible warning. No `.kicad_pro` input is required in v0.3.0.
 
 ## 5. Version spread: KiCad 6–10
 

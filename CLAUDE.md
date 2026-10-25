@@ -13,9 +13,9 @@ ground-up in **Rust**. Successor to the Python tool gerber-diff (frozen at
 `Cimos/Gerber-Diff-Tool` v0.11). `etchy old/ new/` → crisp SVG overlay + change
 heatmap + JSON magnitudes, on any Gerber/Excellon fab pack.
 
-**Status (2026-09):** engine/CLI/CI surfaces shipped through M2; PDF engine
-and CLI wiring are merged; the GUI shell redesign is merged; CI on `main` is
-green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 2026-10-02.
+**Status (2026-10-26):** v0.2.0 is released with changed-region
+lists, X2 labels, drill table diffs and updated CI recipes.
+Native KiCad input is planned for v0.3.0.
 
 ## Decisions that constrain the work (from `docs/PRODUCT_DISCOVERY.md`)
 
@@ -28,7 +28,7 @@ green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 
 - **Trust bar is top-tier: no silent misses.** Golden corpus + property + fuzz
   tests; fail-loud over wrong-but-quiet.
 - **Inputs:** Gerber RS-274X/X2, Excellon, schematic PDF (pixel); native KiCad
-  `.kicad_pcb` (then Altium `.PcbDoc`) parsed directly is the 0.2.0 work — see
+  `.kicad_pcb` (then Altium `.PcbDoc`) parsed directly is planned for 0.3.0 — see
   `docs/design/native-cad-ingestion/`. **Non-goals:** IPC-2581/ODB++, native
   schematics, net/connectivity diff, BOM/component diff, DRC. The native object
   change list shows net names as labels only. Hold this line — don't drift into
@@ -44,7 +44,7 @@ green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 
 | `etchy-cli` | binary `etchy` — primary CLI/CI surface. Exit codes: 0 no diff · 1 diff · 2 error. |
 | `etchy-gui` | native egui viewer (separate binary; never compiled headless). |
 | `etchy-pdf` | schematic-PDF pixel diff (feature-gated; uses pure-Rust `hayro`). |
-| `etchy-kicad` | bounded `.kicad_pcb` S-expression parser (0.2.0 work in progress). |
+| `etchy-kicad` | bounded `.kicad_pcb` S-expression parser (0.3.0 work in progress). |
 
 ## Conventions
 
@@ -59,5 +59,5 @@ green. `v0.1.0-rc1` is published as a pre-release; public `v0.1.0` was released 
 ## Next work
 
 See `docs/ROADMAP.md` "Where we are" and `docs/REQUIREMENTS.md` for statuses.
-Current front: native KiCad parsing (0.2.0 plan in `docs/design/native-cad-ingestion/plan.md`); WSLg clicks (#203).
-v0.1.0 is released, the container is on ghcr, and the repo is public.
+Current front: native KiCad parsing (0.3.0 plan in `docs/design/native-cad-ingestion/plan.md`); WSLg clicks (#203).
+v0.2.0 is released (2026-10-26); the container is on ghcr and the repo is public.

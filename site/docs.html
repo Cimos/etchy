@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>etchy documentation — install, CLI, CI, viewer and trust</title>
-<meta name="description" content="Install etchy v0.1.2, run PCB and schematic diffs, understand CLI and JSON output, configure CI gates, and review viewer and trust details.">
+<meta name="description" content="Install etchy v0.2.0, run PCB and schematic diffs, understand CLI and JSON output, configure CI gates, and review viewer and trust details.">
 <meta property="og:url" content="https://cimos.github.io/etchy/docs.html">
 <meta property="og:title" content="etchy documentation — install, CLI, CI, viewer and trust">
-<meta property="og:description" content="Install etchy v0.1.2 and learn its CLI, JSON reports, CI gates, viewer, and trust model.">
+<meta property="og:description" content="Install etchy v0.2.0 and learn its CLI, JSON reports, CI gates, viewer, and trust model.">
 <meta property="og:image" content="https://cimos.github.io/etchy/assets/brand/etchy-social-1280x640.png">
 <meta property="og:image:width" content="1280">
 <meta property="og:image:height" content="640">
@@ -117,27 +117,28 @@
         <button type="button" id="i-ctr" role="tab" aria-selected="false" aria-controls="p-ctr" tabindex="-1">Container</button>
       </div>
       <div class="i-panel p-win active" id="p-win" role="tabpanel" aria-labelledby="i-win"><pre class="code"><span class="c"># PowerShell — unpack the archive, then add the folder to your PATH</span>
-Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.1.2/etchy-cli-v0.1.2-windows-x86_64.zip -OutFile etchy.zip
+Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.2.0/etchy-cli-v0.2.0-windows-x86_64.zip -OutFile etchy.zip
 Expand-Archive etchy.zip -DestinationPath .
-.\etchy-cli-v0.1.2-windows-x86_64\etchy.exe --version</pre></div>
+.\etchy-cli-v0.2.0-windows-x86_64\etchy.exe --version</pre></div>
       <div class="i-panel p-lin" id="p-lin" role="tabpanel" aria-labelledby="i-lin" hidden><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
-curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.2/etchy-cli-v0.1.2-linux-x86_64.tar.gz
-tar xzf etchy-cli-v0.1.2-linux-x86_64.tar.gz
-sudo mv etchy-cli-v0.1.2-linux-x86_64/etchy /usr/local/bin/</pre></div>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.2.0/etchy-cli-v0.2.0-linux-x86_64.tar.gz
+tar xzf etchy-cli-v0.2.0-linux-x86_64.tar.gz
+sudo mv etchy-cli-v0.2.0-linux-x86_64/etchy /usr/local/bin/</pre></div>
       <div class="i-panel p-mac" id="p-mac" role="tabpanel" aria-labelledby="i-mac" hidden><pre class="code"><span class="c"># Apple Silicon — use …-macos-x86_64.tar.gz on Intel</span>
-curl -LO https://github.com/Cimos/etchy/releases/download/v0.1.2/etchy-cli-v0.1.2-macos-aarch64.tar.gz
-tar xzf etchy-cli-v0.1.2-macos-aarch64.tar.gz
-sudo mv etchy-cli-v0.1.2-macos-aarch64/etchy /usr/local/bin/</pre></div>
+curl -LO https://github.com/Cimos/etchy/releases/download/v0.2.0/etchy-cli-v0.2.0-macos-aarch64.tar.gz
+tar xzf etchy-cli-v0.2.0-macos-aarch64.tar.gz
+sudo mv etchy-cli-v0.2.0-macos-aarch64/etchy /usr/local/bin/</pre></div>
       <div class="i-panel p-cargo" id="p-cargo" role="tabpanel" aria-labelledby="i-cargo" hidden><pre class="code"><span class="c"># from a clone — etchy is not on crates.io yet</span>
 git clone https://github.com/Cimos/etchy &amp;&amp; cd etchy
 cargo install --path crates/etchy-cli --features pdf</pre></div>
       <div class="i-panel p-ctr" id="p-ctr" role="tabpanel" aria-labelledby="i-ctr" hidden><pre class="code"><span class="c"># distroless, no shell or libc inside</span>
-docker pull ghcr.io/cimos/etchy:v0.1.2
-docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.2 --format summary -- /work/old /work/new</pre></div>
+docker pull ghcr.io/cimos/etchy:v0.2.0
+docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.2.0 --format summary -- /work/old /work/new</pre></div>
     </div>
 
+    <p>The v0.2.0 downloads shown here become available when the release tag is published.</p>
     <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS).</p>
-    <p>The <strong>desktop viewer</strong> has its own installers on the <a href="https://github.com/Cimos/etchy/releases">Releases</a> page: <code class="inline">etchy-viewer-v0.1.2-windows-x86_64.msi</code>, <code class="inline">etchy-viewer-v0.1.2-macos-aarch64.dmg</code> (Apple Silicon), <code class="inline">etchy-viewer-v0.1.2-linux-x86_64.AppImage</code>, and <code class="inline">etchy-viewer-v0.1.2-linux-x86_64.deb</code>. The MSI and DEB add the <code class="inline">etchy</code> CLI to PATH; Homebrew links it on macOS with <code class="inline">brew install --cask cimos/etchy/etchy</code>. The AppImage and a DMG opened directly do not put the CLI on PATH. The installers are not code-signed yet: Windows shows a SmartScreen prompt (More info, then Run anyway) and macOS asks you to allow the app once in System Settings, Privacy &amp; Security. A browser build exists, but no hosted viewer is offered yet.</p>
+    <p>The <strong>desktop viewer</strong> has its own installers on the <a href="https://github.com/Cimos/etchy/releases">Releases</a> page: <code class="inline">etchy-viewer-v0.2.0-windows-x86_64.msi</code>, <code class="inline">etchy-viewer-v0.2.0-macos-aarch64.dmg</code> (Apple Silicon), <code class="inline">etchy-viewer-v0.2.0-linux-x86_64.AppImage</code>, and <code class="inline">etchy-viewer-v0.2.0-linux-x86_64.deb</code>. The MSI and DEB add the <code class="inline">etchy</code> CLI to PATH; Homebrew links it on macOS with <code class="inline">brew install --cask cimos/etchy/etchy</code>. The AppImage and a DMG opened directly do not put the CLI on PATH. The installers are not code-signed yet: Windows shows a SmartScreen prompt (More info, then Run anyway) and macOS asks you to allow the app once in System Settings, Privacy &amp; Security. A browser build exists, but no hosted viewer is offered yet.</p>
   </section>
 
   <section id="cli">
@@ -229,10 +230,10 @@ result: differences found</pre>
     <span class="eyebrow">JSON output</span>
     <h2>Machine-readable report</h2>
     <p><code class="inline">--format json</code> emits a versioned report to stdout — totals, a per-layer array, any warnings, and the CI gate's verdict. <code class="inline">schema_version</code> is the integration contract: it only changes when the shape does.</p>
-    <p>The shortened excerpt below is from v0.1.2 running on the bundled Mad_RP2040 revisions. It omits the remaining 12 layer objects; the CLI emits those entries in full.</p>
+    <p>The shortened excerpt below is from v0.2.0 running on the bundled Mad_RP2040 revisions. It omits the remaining 12 layer objects; the CLI emits those entries in full.</p>
     <pre class="code">{
   <span class="k">"schema_version"</span>: 1,
-  <span class="k">"tool_version"</span>: "0.1.2",
+  <span class="k">"tool_version"</span>: "0.2.0",
   <span class="k">"any_changes"</span>: true,
   <span class="k">"totals"</span>: {
     <span class="k">"added_area_mm2"</span>: 213.29638332272705,
@@ -285,7 +286,7 @@ result: differences found</pre>
   run: etchy old/ new/ --gate-layers copper --fail-on-area 0.5</pre>
     <p>The gate names its verdict on stderr — <code class="inline">etchy: gate FAIL — copper: changed 552.6209 mm², 1661 regions</code> — and repeats it in the JSON, so why a build passed or failed is on the record. When a gate is configured and the change comes in under it, etchy exits 0 even though it found differences. That is the point of the gate.</p>
     <p><strong>Or add the Action.</strong> The five-line Action block below needs the trigger and permissions from the <a href="https://github.com/Cimos/etchy/blob/main/docs/ci-recipes/etchy-pr-diff.yml">full pull-request recipe</a>. It posts a layer-by-layer table as a sticky comment for that input pair (edited in place on each push, not re-posted):</p>
-    <pre class="code">- uses: Cimos/etchy@v0.1.2
+    <pre class="code">- uses: Cimos/etchy@v0.2.0
   with:
     old: fab/rev-a
     new: fab/rev-b
@@ -334,7 +335,7 @@ result: differences found</pre>
       <li><strong>Inputs:</strong> Gerber RS-274X/X2, Excellon drill, pick-and-place centroid files (moved, rotated, added and removed parts diff as placement geometry — not as a BOM), and schematic PDFs page by page.</li>
       <li><strong>Nothing is hidden silently.</strong> A real change too small to draw to scale becomes a fixed-size marker dot rather than disappearing, and anything the noise filter suppresses is counted and shown on screen.</li>
       <li><strong>Non-goals:</strong> net/connectivity diff, BOM/component diff, DRC, and Altium / IPC-2581 / ODB++ ingestion. etchy diffs fab output — it isn't an ECAD review tool.</li>
-      <li><strong>Next parser milestone:</strong> native KiCad <code class="inline">.kicad_pcb</code> input is planned for 0.2.0, so KiCad users can skip the Gerber export. KiCad <em>schematic</em> diff stays out — that's connectivity, a different tool.</li>
+      <li><strong>Next parser milestone:</strong> native KiCad <code class="inline">.kicad_pcb</code> input is planned for 0.3.0, so KiCad users can skip the Gerber export. KiCad <em>schematic</em> diff stays out — that's connectivity, a different tool.</li>
     </ul>
   </section>
   </main>

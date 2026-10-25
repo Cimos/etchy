@@ -9,131 +9,41 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-26
+
 ### Added
-- Each changed layer lists its connected changed regions with area, bounding
-  box and centroid: every region in JSON (`regions[]`), the largest ten in the
-  Markdown and HTML reports (`--top-regions N` to change) (#419).
-- Regions carry the reference designators, pins and nets of the Gerber X2
-  objects they touch, as labels only. Layers without X2 object attributes say
-  so (#420).
-- GitHub Action: the PR comment and step summary link the per-layer overlay
-  SVGs and the HTML report, uploaded as a workflow artifact
-  (`upload-report`, on by default). New outputs `report-dir` and
-  `artifact-url` (#421).
-- Drill table diff: each Excellon drill layer lists hole and slot counts per
-  tool size, old vs new, with added, removed and changed sizes and a layer
-  total, e.g. `drill-pth 0.300 mm: 412 -> 418 holes`. In JSON as an optional
-  `drill_table`, and in the summary, Markdown and HTML reports. Sizes compare
-  in whole micrometres, so inch and metric tools of one size match (#422).
+- Changed-region lists include area, bounds and centroid in JSON, Markdown and HTML reports (#419, #442).
+- Gerber X2 reference designators, pins and nets label the changed regions they touch (#420, #442).
+- Drill table diffs report hole and slot counts by tool size and layer in all report formats (#422, #451).
+- The GitHub Action links report artifacts from its PR comment and step summary (#421, #450).
 
 ### Changed
-- GitHub Action: runs the etchy release binary for the runner instead of
-  building from source. It takes the release matching the Action's tag (or the
-  `version` input) and checks it against the release's `SHA256SUMS`.
-  `build-from-source: true` keeps the old build, and `etchy-path` uses a
-  binary already on a self-hosted runner (#421).
-- Minimum supported Rust raised to the versions the locked dependencies actually
-  need: 1.88 for `etchy-core` / `etchy-cli` / `etchy-kicad` (was 1.75) and
-  1.92 for `etchy-gui` / `etchy-pdf` (was 1.85). The old values no longer
-  built. A new CI job checks both, so they can't go stale again (#350).
-
-### Documentation
-- GitLab CI recipe (`docs/ci-recipes/gitlab.md`): download and check the
-  release binary, gate the merge request on the exit code, keep the report as
-  a job artifact, and post the summary as an MR note (#427).
-- Dependency, corpus and web-demo docs now match the tree and `Cargo.lock`
-  (#345).
-- README, landing page and docs page quote the same Mad_RP2040 demo numbers;
-  `scripts/check-landing.py` fails if they drift apart (#342).
+- The GitHub Action downloads and verifies release binaries, with source-build and local-binary options (#421, #450).
+- Minimum supported Rust versions now match locked dependencies: 1.88 for core, CLI and KiCad; 1.92 for GUI and PDF (#350, #414).
 
 ### Fixed
-- GitHub Action: refreshing an existing sticky PR comment replaced its text
-  with `@-` (the `gh api -f` flag sends `@` values literally). It now sends the
-  comment text (#421).
-- Viewer: board labels come from the file names on every surface. A web
-  upload or drop no longer reads `uploaded -> uploaded`; a zip shows its name
-  without `.zip`, loose layer files their shared filename prefix. Native Open
-  now labels a folder the same way as a command-line argument (#329).
-- Web viewer: dropping a folder did nothing, because a browser can't hand
-  over a folder's files. It now shows "folders can't be dropped in the
-  browser — zip the fab pack or select the files", and the web welcome screen
-  and Open menu no longer suggest dragging a folder (#331).
-- Layer pairing: two different non-UTF-8 filenames that read the same after
-  the lossy conversion (`board-\xF6.gbr`, `board-\xF7.gbr`) no longer count as
-  an exact name match. They pair only if their extents overlap, like any
-  renamed layer (#431).
-- Excellon: a body tool change that carries a diameter (`T2C0.040`) now
-  selects that tool. Before, the previous tool stayed active. A body
-  redefinition now applies only to the hits that follow it, not to earlier
-  ones (#310).
-- Drill plating is read from all-caps filename stems with no separator:
-  `BOARDPTH` is plated and `BOARDNPTH` non-plated, where both were generic
-  drill files. Inside a word written in capitals, a `PTH` / `NPTH` prefix or
-  suffix counts (`NPTH` first); `DEPTH` and lower-case words still don't
-  match (#430).
-- Excellon: a tool definition whose diameter can't be read (`T2Cbad`,
-  `T2C`) now fails loud and names the line. Before, it was skipped and the
-  next hit used the previous tool (#428).
-- Excellon: body `G91` (incremental coordinates) now fails loud instead of
-  being ignored. So does any other unrecognised G-code on a coordinate line,
-  such as `G93` or `G32`/`G33`, which used to be drawn as plain hits (#309).
-- Excellon: a leading-zero (`LZ`) drill file with decimal-less coordinates
-  and no declared digit format now fails loud. Before, it was decoded with a
-  guessed 2.4 / 3.3 split, so a 4.2 file put every hole at one-tenth the
-  distance. `TZ` files keep the conventional default, which their decoding
-  depends on only through the decimal count (#319).
-- Excellon: a trailing-zero (`TZ`) drill file with decimal-less coordinates
-  and no declared digit format still uses the conventional 2:4 inch / 3:3
-  metric split (KiCad's minimal-header export relies on it), but now says so
-  with a warning in the summary and JSON naming the file and what to add to
-  the header (`;FILE_FORMAT=2:4` or `INCH,TZ,00.0000`). Before, the guess
-  was silent (#429).
-- Pick-and-place files: a data row whose position or rotation can't be read
-  (e.g. an unquoted multi-word description or an unexpected column layout) now
-  fails the file with the row count and line numbers, instead of the component
-  silently vanishing from the diff (#320). Centroid CSVs now honour quoted
-  fields, so a comma inside a quoted comment no longer shifts the columns.
-- Drill plating is read from whole filename words instead of substrings
-  (#237): an `Unplated` / `Not_Plated` drill file is now non-plated rather
-  than plated, and a word that merely contains `PTH` (such as `depth`) no
-  longer marks a file as plated. Camel-case names such as `BoardNPTH` and
-  `Board-NonPlated` are still recognised, so a plated drill file can't be
-  paired against a non-plated one.
-- Windows release builds now check that `etchy-gui.exe` contains an app icon
-  resource, so an iconless viewer cannot ship unnoticed (#390).
-- The default web viewer shell stays free of feedback collection. The demo now
-  loads one feedback widget script with paste, drop, browse, and keyboard
-  shortcuts; its payload omits User-Agent (#337).
-- **KiCad and Eagle fab packs load (#316):** aperture macros with `$n`
-  parameters, arithmetic and `$n=` assignments now render, so KiCad's stock
-  `RoundRect` pad no longer stops the load. Identity-valued image commands
-  (`%IPPOS`, `%OFA0B0`, `%SFA1B1`, `%MIA0B0`, `%ASAXBY`, `%SRX1Y1I0J0`) and
-  `%LN` layer names are accepted. Non-identity values, undefined macro
-  variables and division by zero still fail loud.
-- **Non-UTF-8 filenames keep their label (#299):** a layer file whose name isn't
-  valid UTF-8 (e.g. a Latin-1 export on Linux) was labelled `""` and classified
-  as Other; the CLI and viewer now use a lossy name, so the label stays readable
-  and the extension still classifies. A non-UTF-8 git-mode `[SUBDIR]` now fails
-  loud instead of silently diffing the whole tree.
-- Viewer: base opacity (`S` / Settings → Diff) now applies to Overlay only.
-  At 0% it no longer blanks Old/New with no message, or empties Split/Swipe
-  under a false "no geometry in this view" hint; those views always draw the
-  board at full visibility (#324).
-- `--gate-layers` group words now match exactly against an explicit table
-  instead of by substring (#304): `pth` gates plated drill only (it used to
-  gate `drill-npth` too), new `npth` gates non-plated drill only, and
-  fragments such as `e` or `top` are a loud exit 2 instead of silently
-  selecting several layer kinds.
-- **A Gerber region left open no longer bypasses the per-layer point ceiling**
-  (#315). Points buffered in a region under construction were only counted at
-  `G37`, so a small file with one never-closed region and thousands of arc
-  commands could build a multi-GB vertex buffer before the limit fired. They now
-  count as they are buffered and the layer fails loud with `ObjectLimit` mid-region.
-- **G74 arc with coincident endpoints now fails loud:** a single-quadrant (`G74`)
-  arc whose end point equals its start point was accepted and tessellated as a
-  full 360° ring of copper, although the mode only allows sweeps of ≤ 90°. It is
-  now rejected as `Unsupported` (stroked and region arcs alike); a `G75` full
-  circle is unaffected (#321).
+- Sticky GitHub Action comments now retain their text when refreshed (#421, #450).
+- Viewer labels use input names consistently, and web folder drops show an explanation (#329, #331, #447).
+- Different non-UTF-8 filenames no longer count as an exact layer-name match (#431, #446).
+- Excellon inline tool definitions select the new tool and apply only to later hits (#310, #400).
+- Drill plating recognizes whole filename words and all-caps PTH/NPTH stems (#237, #430, #404, #446).
+- Unreadable Excellon tool diameters fail with a line number (#428, #446).
+- Unsupported Excellon body G-codes, including incremental coordinates, fail loud (#309, #400).
+- Decimal-less Excellon LZ files without a declared digit format fail loud; TZ defaults show a warning (#319, #429, #406, #446).
+- Unreadable pick-and-place rows fail loud, and quoted CSV fields parse correctly (#320, #401).
+- Windows release builds check that the viewer executable contains an icon (#390, #440).
+- The web demo isolates feedback collection from the default viewer and omits User-Agent (#337, #412, #432).
+- KiCad and Eagle fab packs accept supported aperture macros and identity image commands (#316, #434).
+- Non-UTF-8 layer filenames retain readable labels, while non-UTF-8 git subdirectories fail loud (#299, #407).
+- Viewer base opacity affects Overlay only, leaving Old, New, Split and Swipe visible (#324, #408).
+- Layer gate names use exact matches and reject unknown fragments (#304, #402).
+- Open Gerber regions count toward the point ceiling while they are buffered (#315, #403).
+- Coincident-endpoint single-quadrant Gerber arcs fail loud (#321, #405).
+
+### Documentation
+- Added a GitLab CI recipe for a verified release binary, merge-request gate, report artifact and note (#427, #450).
+- Updated dependency, corpus, web-demo and site examples to match the code and shared demo output (#345, #342, #433).
+- Release preparation now cuts the changelog before the tag and keeps an empty Unreleased section (#269).
 
 ## [0.1.2] — 2026-10-25
 
@@ -441,7 +351,8 @@ production fab packs, with the release pipeline proven across four platforms.
   toolchain; the verified real dependencies (clap, i_overlay, eframe,
   pdfium-render, askama, …) are added per-module starting in Milestone 1.
 
-[Unreleased]: https://github.com/Cimos/etchy/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Cimos/etchy/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Cimos/etchy/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/Cimos/etchy/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Cimos/etchy/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Cimos/etchy/compare/v0.1.0-rc1...v0.1.0
