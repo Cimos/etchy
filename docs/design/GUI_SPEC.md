@@ -104,7 +104,9 @@ Stacked collapsible sections, Display open by default (GUI-6). The panel is
 never re-sizes it (#212):
 - **Display** — theme dark/light · **activity rail left/right**.
 - **Diff** — **base copper opacity** (0–100% slider with typed entry, moved
-  here from the Layers panel by #224; `S` still cycles 0/40/80%, VIEW-5) ·
+  here from the Layers panel by #224; `S` still cycles 0/40/80%, VIEW-5).
+  **Overlay-only** (#324): Old/New/Split/Swipe show the base board itself, so
+  they always draw it at full visibility regardless of this setting ·
   min-area noise filter (suppression always surfaced, TRUST-3) · **PDF
   resolution** (DPI chips 150/200/300, default 200, VIEW-15): changing it
   re-rasterizes a loaded PDF pair from the retained bytes; a DPI over the
@@ -123,7 +125,8 @@ never re-sizes it (#212):
 
 - **Colour semantics** (TRUST-6): green = added, red = removed, reserved for
   diff geometry only. Unchanged base copper renders as the layer colour blended
-  toward canvas at the base-opacity setting. Copper/cream chrome; board-dark
+  toward canvas at the base-opacity setting in Overlay; in Old/New/Split/Swipe
+  the board is the content and draws at full layer colour (#324). Copper/cream chrome; board-dark
   canvas.
 - **Camera** (VIEW-1..4): Fit (`F`/button) frames the whole board — the union
   of every layer's extent; it is the only thing that reframes. Wheel zooms at
@@ -161,7 +164,7 @@ Defaults (KEY-4); all rebindable in Settings › Hotkeys except the fixed aliase
 | Toggle measure | **Ctrl+M** | also the rail ruler toggle |
 | Clear measurements | *preset:* Altium **Shift+C** / KiCad **Esc** | rebind overrides preset |
 | Fit view | F | frames the whole board |
-| Cycle base opacity | S | 0 → 40 → 80% |
+| Cycle base opacity | S | 0 → 40 → 80% (Overlay only) |
 | Cycle measure units | *preset:* Altium **Q** / KiCad **Ctrl+U** | each tool's own units key (#211); rebind overrides preset; cycles mm → inch → mil |
 | Toggle grid | G | |
 | Modes | 1–5 | fixed aliases: O=Overlay, B=Old, A=New (bare key only) |

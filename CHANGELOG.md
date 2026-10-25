@@ -9,6 +9,55 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Fixed
+- Excellon: a body tool change that carries a diameter (`T2C0.040`) now
+  selects that tool. Before, the previous tool stayed active. A body
+  redefinition now applies only to the hits that follow it, not to earlier
+  ones (#310).
+- Excellon: body `G91` (incremental coordinates) now fails loud instead of
+  being ignored. So does any other unrecognised G-code on a coordinate line,
+  such as `G93` or `G32`/`G33`, which used to be drawn as plain hits (#309).
+- Excellon: a leading-zero (`LZ`) drill file with decimal-less coordinates
+  and no declared digit format now fails loud. Before, it was decoded with a
+  guessed 2.4 / 3.3 split, so a 4.2 file put every hole at one-tenth the
+  distance. `TZ` files keep the conventional default, which their decoding
+  depends on only through the decimal count (#319).
+- Pick-and-place files: a data row whose position or rotation can't be read
+  (e.g. an unquoted multi-word description or an unexpected column layout) now
+  fails the file with the row count and line numbers, instead of the component
+  silently vanishing from the diff (#320). Centroid CSVs now honour quoted
+  fields, so a comma inside a quoted comment no longer shifts the columns.
+- Drill plating is read from whole filename words instead of substrings
+  (#237): an `Unplated` / `Not_Plated` drill file is now non-plated rather
+  than plated, and a word that merely contains `PTH` (such as `depth`) no
+  longer marks a file as plated. Camel-case names such as `BoardNPTH` and
+  `Board-NonPlated` are still recognised, so a plated drill file can't be
+  paired against a non-plated one.
+- **Non-UTF-8 filenames keep their label (#299):** a layer file whose name isn't
+  valid UTF-8 (e.g. a Latin-1 export on Linux) was labelled `""` and classified
+  as Other; the CLI and viewer now use a lossy name, so the label stays readable
+  and the extension still classifies. A non-UTF-8 git-mode `[SUBDIR]` now fails
+  loud instead of silently diffing the whole tree.
+- Viewer: base opacity (`S` / Settings → Diff) now applies to Overlay only.
+  At 0% it no longer blanks Old/New with no message, or empties Split/Swipe
+  under a false "no geometry in this view" hint; those views always draw the
+  board at full visibility (#324).
+- `--gate-layers` group words now match exactly against an explicit table
+  instead of by substring (#304): `pth` gates plated drill only (it used to
+  gate `drill-npth` too), new `npth` gates non-plated drill only, and
+  fragments such as `e` or `top` are a loud exit 2 instead of silently
+  selecting several layer kinds.
+- **A Gerber region left open no longer bypasses the per-layer point ceiling**
+  (#315). Points buffered in a region under construction were only counted at
+  `G37`, so a small file with one never-closed region and thousands of arc
+  commands could build a multi-GB vertex buffer before the limit fired. They now
+  count as they are buffered and the layer fails loud with `ObjectLimit` mid-region.
+- **G74 arc with coincident endpoints now fails loud:** a single-quadrant (`G74`)
+  arc whose end point equals its start point was accepted and tessellated as a
+  full 360° ring of copper, although the mode only allows sweeps of ≤ 90°. It is
+  now rejected as `Unsupported` (stroked and region arcs alike); a `G75` full
+  circle is unaffected (#321).
+
 ## [0.1.2] — 2026-10-25
 
 ### Fixed
