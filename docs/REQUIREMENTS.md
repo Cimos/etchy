@@ -95,7 +95,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | GUI-4 | The top bar holds only: brand icon + board label, the **mode segment** (Overlay/Old/New/Split/Swipe), and segmented **Help/Fit/Open**. Everything else lives in the rail. | #6/#200 | ✅ |
 | GUI-5 | Branding uses the real **etchy pad-built E** (`assets/brand/etchy-icon`) — never a hand-drawn substitute. The Windows viewer executable and installer shortcut use the app icon. Rail/panel icons are painter-drawn, never font glyphs. | #191, #16/#30, #390 | ✅ (Windows executable icon checked in release CI) |
 | GUI-6 | **Settings is a rail panel** (not a floating window) with stacked collapsible sections: Display, Diff, Grid, Measure, Input, Colours, Layers, Hotkeys. **Resizable like the other panels, and its width holds steady** when sections open/close. | #199, #212, owner | ✅ |
-| GUI-7 | Web and native present the **same old→new labels**, derived consistently from meaningful path parts. | #177 | ✅ |
+| GUI-7 | Web and native present the **same old→new labels**, derived consistently from meaningful path parts — CLI args, Open, drops and web picks alike. | #177, #329 | ✅ |
 | GUI-8 | Old/new naming everywhere (never A/B or before/after). | #160, owner | ✅ |
 | GUI-9 | Settings rows make the selectable value chips visually distinct from the setting label. | #205, #210 | ✅ |
 | GUI-10 | The build's **git short sha is baked in at compile time** and shown subtly — a `build <sha>` line in the Help menu and the brand icon's hover tooltip — identically on native and wasm, so a user can prove which build a browser tab runs. | #213 | ✅ |
