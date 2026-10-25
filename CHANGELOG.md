@@ -33,6 +33,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   built. A new CI job checks both, so they can't go stale again (#350).
 
 ### Documentation
+- GitLab CI recipe (`docs/ci-recipes/gitlab.md`): download and check the
+  release binary, gate the merge request on the exit code, keep the report as
+  a job artifact, and post the summary as an MR note (#427).
 - Dependency, corpus and web-demo docs now match the tree and `Cargo.lock`
   (#345).
 - README, landing page and docs page quote the same Mad_RP2040 demo numbers;
