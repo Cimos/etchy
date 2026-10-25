@@ -263,7 +263,9 @@ mod native {
             assert_eq!(&WINDOWS_ICON[..4], &[0, 0, 1, 0]);
             let count = u16::from_le_bytes([WINDOWS_ICON[4], WINDOWS_ICON[5]]) as usize;
             let sizes: Vec<_> = WINDOWS_ICON[6..6 + count * 16]
-                .chunks_exact(16)
+                .as_chunks::<16>()
+                .0
+                .iter()
                 .map(|entry| {
                     let width = if entry[0] == 0 { 256 } else { entry[0] as u16 };
                     let height = if entry[1] == 0 { 256 } else { entry[1] as u16 };
