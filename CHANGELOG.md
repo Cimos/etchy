@@ -15,6 +15,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   `G37`, so a small file with one never-closed region and thousands of arc
   commands could build a multi-GB vertex buffer before the limit fired. They now
   count as they are buffered and the layer fails loud with `ObjectLimit` mid-region.
+- **G74 arc with coincident endpoints now fails loud:** a single-quadrant (`G74`)
+  arc whose end point equals its start point was accepted and tessellated as a
+  full 360° ring of copper, although the mode only allows sweeps of ≤ 90°. It is
+  now rejected as `Unsupported` (stroked and region arcs alike); a `G75` full
+  circle is unaffected (#321).
 
 ## [0.1.2] — 2026-10-25
 
