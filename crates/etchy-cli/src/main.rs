@@ -94,8 +94,11 @@ struct Cli {
     #[arg(long, value_name = "N")]
     fail_on_regions: Option<u32>,
     /// Which layers the CI gate considers: `all` (default) or a comma list of
-    /// groups — copper, mask, silk, paste, drill, outline, documentation, other.
-    /// E.g. `--gate-layers copper` fails on copper changes and ignores silkscreen.
+    /// groups — copper, mask, silk, paste, drill, pth, npth, outline,
+    /// documentation (alias docs), placement, other. Group words match exactly
+    /// (`drill` = all drill files, `pth`/`npth` = plated/non-plated only); an
+    /// unknown word is an error. E.g. `--gate-layers copper` fails on copper
+    /// changes and ignores silkscreen.
     #[arg(long, value_name = "SPEC", default_value = "all")]
     gate_layers: String,
 
@@ -128,35 +131,39 @@ enum Format {
 }
 
 /// Which layer kinds the CI gate counts, from `--gate-layers` (#M2). `all`, or a
-/// comma list of group words matched against the kebab-case kind tag — so
-/// `copper` covers top/bottom/inner copper, `silk` covers both silkscreens, etc.
+/// comma list of group words from [`GATE_GROUPS`], each mapping to an explicit
+/// set of kebab-case kind tags — so `copper` covers top/bottom/inner copper,
+/// `silk` covers both silkscreens, `pth` covers plated drill only, etc.
 struct LayerFilter {
     all: bool,
-    tokens: Vec<String>,
+    /// The group words as given (for messages), e.g. `["copper", "pth"]`.
+    groups: Vec<String>,
+    kinds: Vec<&'static str>,
 }
 
-/// Every kind tag a layer report can carry (`LayerKind::kind_str`). A gate token
-/// must match at least one of these — otherwise the filter matches zero layers
-/// and the gate silently passes everything, which is how a typo like `coppr`
-/// would disarm a CI gate.
-const KIND_TAGS: &[&str] = &[
-    "top-copper",
-    "bottom-copper",
-    "inner-copper",
-    "top-mask",
-    "bottom-mask",
-    "top-silk",
-    "bottom-silk",
-    "top-paste",
-    "bottom-paste",
-    "drill",
-    "drill-pth",
-    "drill-npth",
-    "outline",
-    "documentation",
-    "placement",
-    "other",
+/// The documented `--gate-layers` group words and the exact kind tags
+/// (`LayerKind::kind_str`) each one gates. Matching is exact on both sides: a
+/// token is valid only if it is one of these words (#304 — substring matching
+/// let `pth` also gate `drill-npth` and `e` gate nine kinds), and a layer is
+/// gated only if its tag is in a selected group's list. Keep in sync with the
+/// `--gate-layers` help text, README and site/docs.html.
+const GATE_GROUPS: &[(&str, &[&str])] = &[
+    ("copper", &["top-copper", "bottom-copper", "inner-copper"]),
+    ("mask", &["top-mask", "bottom-mask"]),
+    ("silk", &["top-silk", "bottom-silk"]),
+    ("paste", &["top-paste", "bottom-paste"]),
+    ("drill", &["drill", "drill-pth", "drill-npth"]),
+    ("pth", &["drill-pth"]),
+    ("npth", &["drill-npth"]),
+    ("outline", &["outline"]),
+    ("documentation", &["documentation"]),
+    ("docs", &["documentation"]),
+    ("placement", &["placement"]),
+    ("other", &["other"]),
 ];
+
+const GATE_GROUPS_HELP: &str =
+    "copper, mask, silk, paste, drill, pth, npth, outline, documentation/docs, placement, other";
 
 impl LayerFilter {
     fn parse(spec: &str) -> Result<Self> {
@@ -164,7 +171,8 @@ impl LayerFilter {
         if spec.is_empty() || spec == "all" {
             return Ok(Self {
                 all: true,
-                tokens: Vec::new(),
+                groups: Vec::new(),
+                kinds: Vec::new(),
             });
         }
         let tokens: Vec<String> = spec
@@ -176,29 +184,33 @@ impl LayerFilter {
             anyhow::bail!(
                 "--gate-layers has no groups: '{spec}' is only separators (this would \
                  silently disarm the gate). Use 'all' or a comma-separated list of: \
-                 copper, mask, silk, paste, drill, outline, documentation/docs, \
-                 placement, other"
+                 {GATE_GROUPS_HELP}"
             );
         }
+        let mut kinds: Vec<&'static str> = Vec::new();
         for t in &tokens {
-            let known = t == "docs" || KIND_TAGS.iter().any(|k| k.contains(t.as_str()));
-            if !known {
+            let Some((_, tags)) = GATE_GROUPS.iter().find(|(word, _)| *word == t.as_str()) else {
                 anyhow::bail!(
                     "unknown --gate-layers group '{t}' (a typo here would silently disarm \
-                     the gate). Valid: all, copper, mask, silk, paste, drill, outline, \
-                     documentation/docs, placement, other"
+                     the gate). Valid: all, {GATE_GROUPS_HELP}"
                 );
+            };
+            for tag in *tags {
+                if !kinds.contains(tag) {
+                    kinds.push(tag);
+                }
             }
         }
-        Ok(Self { all: false, tokens })
+        Ok(Self {
+            all: false,
+            groups: tokens,
+            kinds,
+        })
     }
 
     /// Does the gate include a layer with this kind tag (e.g. `top-copper`)?
     fn includes(&self, kind: &str) -> bool {
-        self.all
-            || self.tokens.iter().any(|t| {
-                kind.contains(t.as_str()) || (t == "docs" && kind.contains("documentation"))
-            })
+        self.all || self.kinds.contains(&kind)
     }
 }
 
@@ -282,7 +294,7 @@ impl Gate {
     }
 
     fn tokens_desc(&self) -> String {
-        self.filter.tokens.join(",")
+        self.filter.groups.join(",")
     }
 
     /// Resolve this gate against a report into the verdict that drives both the
@@ -487,11 +499,14 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     }
 
     let (old, of, ow, new, nf, nw) = if git_mode {
-        let subdir = cli
-            .subdir
-            .as_deref()
-            .and_then(|p| p.to_str())
-            .unwrap_or(".");
+        // A non-UTF-8 subdir can't be passed to git as a pathspec here; fail loud
+        // rather than silently widening the scan to the whole tree (#299).
+        let subdir = match cli.subdir.as_deref() {
+            None => ".",
+            Some(p) => p
+                .to_str()
+                .with_context(|| format!("[SUBDIR] {} is not valid UTF-8", p.display()))?,
+        };
         if cli.subdir.is_none() {
             // Whole-repo scans flatten every Gerber/Excellon blob at the ref into
             // one board — fine for a single-board repo, garbage when the tree
@@ -745,15 +760,20 @@ fn load_board(dir: &Path) -> Result<(Board, Option<GerberFormat>, Vec<String>)> 
                 path.display()
             );
         }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
+        let name = file_label(&path);
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         files.push((name, bytes));
     }
     board_from_files(files)
+}
+
+/// A file's basename as its layer label. Lossy, never empty-on-failure: a
+/// non-UTF-8 name (a Latin-1 export on Linux) keeps its readable part and its
+/// extension, so it still classifies and stays distinguishable in the report (#299).
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Load a revision straight from a git ref — `etchy <refA> <refB> [subdir]` over a
@@ -894,6 +914,25 @@ mod tests {
         assert_eq!(cli.format, Format::Summary);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_filename_keeps_label_and_classifies() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // "b\xF6rd-F_Cu.gtl" — Latin-1 ö, invalid as UTF-8 (#299).
+        let path = Path::new("/fab").join(OsStr::from_bytes(b"b\xF6rd-F_Cu.gtl"));
+        let label = file_label(&path);
+        assert!(!label.is_empty(), "label must not collapse to empty");
+        assert!(label.ends_with(".gtl"), "extension survives: {label}");
+
+        let gerber = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
+        let (board, _, _) = board_from_files(vec![(label.clone(), gerber.to_vec())]).unwrap();
+        assert_eq!(board.layers.len(), 1);
+        assert_eq!(board.layers[0].kind, etchy_core::LayerKind::TopCopper);
+        assert_eq!(board.layers[0].label, label);
+    }
+
     fn layer(kind: &'static str, area_mm2: f64, regions: u32) -> LayerReport {
         LayerReport {
             kind,
@@ -1023,6 +1062,79 @@ mod tests {
     }
 
     #[test]
+    fn filter_groups_match_exactly_not_by_substring() {
+        // #304: `kind.contains(token)` let `pth` also gate `drill-npth` and any
+        // substring of a tag (`e`, `op`, `top`) pass validation.
+        let pth = LayerFilter::parse("pth").unwrap();
+        assert!(pth.includes("drill-pth"));
+        assert!(!pth.includes("drill-npth"));
+        assert!(!pth.includes("drill"));
+        let npth = LayerFilter::parse("npth").unwrap();
+        assert!(npth.includes("drill-npth"));
+        assert!(!npth.includes("drill-pth"));
+        let drill = LayerFilter::parse("drill").unwrap();
+        for k in ["drill", "drill-pth", "drill-npth"] {
+            assert!(drill.includes(k), "drill should gate {k}");
+        }
+        let docs = LayerFilter::parse("docs").unwrap();
+        assert!(docs.includes("documentation"));
+        assert!(!docs.includes("other"));
+        for bad in [
+            "e",
+            "op",
+            "top",
+            "top-copper",
+            "silkscreen",
+            "drill-pth",
+            "cop",
+        ] {
+            assert!(
+                LayerFilter::parse(bad).is_err(),
+                "'{bad}' should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_groups_cover_exactly_the_real_kind_tags() {
+        use etchy_core::{DrillKind, LayerKind};
+        let all_kinds = [
+            LayerKind::TopCopper,
+            LayerKind::BottomCopper,
+            LayerKind::InnerCopper(1),
+            LayerKind::TopMask,
+            LayerKind::BottomMask,
+            LayerKind::TopSilk,
+            LayerKind::BottomSilk,
+            LayerKind::TopPaste,
+            LayerKind::BottomPaste,
+            LayerKind::Drill(DrillKind::Plated),
+            LayerKind::Drill(DrillKind::NonPlated),
+            LayerKind::Drill(DrillKind::Unspecified),
+            LayerKind::Outline,
+            LayerKind::Documentation,
+            LayerKind::Placement,
+            LayerKind::Other,
+        ];
+        let real: Vec<&str> = all_kinds.iter().map(|k| k.kind_str()).collect();
+        for (word, tags) in GATE_GROUPS {
+            for tag in *tags {
+                assert!(
+                    real.contains(tag),
+                    "group '{word}' names unknown kind {tag}"
+                );
+            }
+            assert!(GATE_GROUPS_HELP.contains(word), "help omits group '{word}'");
+        }
+        for k in &real {
+            assert!(
+                GATE_GROUPS.iter().any(|(_, tags)| tags.contains(k)),
+                "kind {k} is not reachable by any --gate-layers group"
+            );
+        }
+    }
+
+    #[test]
     fn filter_rejects_unknown_tokens() {
         // A typo ('coppr') used to build a filter matching ZERO layers, so the
         // gate passed every diff — a silently disarmed CI gate (review finding).
@@ -1035,6 +1147,8 @@ mod tests {
             "silk",
             "paste",
             "drill",
+            "pth",
+            "npth",
             "outline",
             "docs",
             "documentation",
