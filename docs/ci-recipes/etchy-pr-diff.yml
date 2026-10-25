@@ -2,9 +2,18 @@
 # sticky comment. Copy this into a consuming repo's .github/workflows/.
 #
 # The five lines that add etchy are the `- uses: Cimos/etchy` step and its
-# inputs — everything else is the standard workflow scaffold. GitHub-hosted
-# runners ship Rust, so no toolchain step is needed. (Self-hosted runners:
-# add `- uses: dtolnay/rust-toolchain@stable` before the etchy step.)
+# inputs — everything else is the standard workflow scaffold.
+#
+# The Action downloads the etchy release binary matching its own tag and checks
+# it against the release's SHA256SUMS (Action tags up to v0.1.2 build from
+# source instead, which needs Rust on the runner). The comment links the
+# per-layer overlay SVGs and the HTML report, uploaded as a workflow artifact.
+#
+# Optional inputs: `version: v0.1.2` runs a different release;
+# `build-from-source: true` compiles etchy on the runner; `etchy-path:` uses a
+# binary already on a self-hosted runner without internet access;
+# `upload-report: false` skips the artifact; `fail-on-diff: false` reports
+# without failing the step.
 name: PCB diff
 on:
   pull_request:
