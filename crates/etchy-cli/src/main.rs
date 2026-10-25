@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use etchy_core::{
     compare_detailed, coordinate_mismatch_warning, layer_svg, Board, DiffReport, GerberFormat,
-    Layer, LayerStatus,
+    LayerStatus,
 };
 use serde::Serialize;
 
@@ -652,17 +652,11 @@ fn board_json(report: &DiffReport, verdict: &GateVerdict) -> String {
 /// or junk file is a quick OOM (#82). 100 MiB is far above any real fab layer.
 const MAX_LAYER_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
-/// Walk a directory (one level), read each Gerber file, classify it, and
-/// polygonize it into a [`Layer`]. I/O + path/naming policy live here, not in core.
-/// Build a board from an in-memory set of `(filename, bytes)` — the shared
-/// classify + route (Gerber / Excellon / skip) behind both directory and git-ref
-/// loading (#93). Non-Gerber, non-Excellon files are skipped.
+/// Enforce the CLI byte limit, then hand named inputs to the core builder.
 fn board_from_files(
     files: Vec<(String, Vec<u8>)>,
 ) -> Result<(Board, Option<GerberFormat>, Vec<String>)> {
-    let mut layers = Vec::new();
-    let mut fmt = None;
-    let mut warnings = Vec::new();
+    let mut builder = etchy_core::BoardBuilder::new();
     for (name, bytes) in files {
         if bytes.len() as u64 > MAX_LAYER_FILE_BYTES {
             anyhow::bail!(
@@ -670,76 +664,9 @@ fn board_from_files(
                 bytes.len()
             );
         }
-        let (stem, ext) = match name.rsplit_once('.') {
-            Some((s, e)) => (s, e),
-            None => (name.as_str(), ""),
-        };
-        let mut kind = etchy_core::classify(stem, ext);
-        let mut negative = false;
-        // Gerber layer, Excellon/NC drill, pick-and-place, or neither (job file,
-        // README) — skip the last. Drill (#62) and P&P (#115) route through their
-        // own front-ends so those changes diff instead of being silently dropped.
-        let mut x2_objects = None;
-        let mut drill_tools = None;
-        let geometry = if etchy_core::looks_like_gerber(&bytes) {
-            if fmt.is_none() {
-                fmt = etchy_core::gerber_format(&bytes).ok();
-            }
-            // A negative image (#317): the objects are clearances. The engine swaps
-            // added/removed for such a layer so the report still speaks in copper;
-            // say so, since the overlay draws the objects as exported.
-            if etchy_core::file_polarity(&bytes) == Some(etchy_core::FilePolarity::Negative) {
-                negative = true;
-                warnings.push(format!(
-                    "{name}: negative-polarity image (%TF.FilePolarity,Negative) — \
-                     added/removed are reported as material, not as drawn objects"
-                ));
-            }
-            // Cross-check the filename classification against the file's own X2
-            // `.FileFunction` attribute (#239): adopt it where the filename was
-            // unrecognized, warn on a genuine conflict — never a silent override.
-            let (reconciled, warn) =
-                etchy_core::reconcile_kind(kind, etchy_core::file_function(&bytes), &name);
-            kind = reconciled;
-            if let Some(w) = warn {
-                warnings.push(w);
-            }
-            let (geometry, labels) = etchy_core::resolve_layer_with_labels(&bytes)
-                .with_context(|| format!("processing layer {name}"))?;
-            x2_objects = labels.map(std::sync::Arc::new);
-            std::sync::Arc::new(geometry)
-        } else if etchy_core::looks_like_excellon(&bytes) {
-            // Content wins over the filename: an Excellon file named e.g.
-            // Board.TXT must land on the Drill layer, not "other" — otherwise
-            // `--gate-layers drill` would exclude a real drill change. Plating
-            // (PTH/NPTH) still comes from the filename so a misnamed-but-marked
-            // file (e.g. `board-NPTH.txt`) keeps its plating (#237).
-            kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
-            let drill = etchy_core::resolve_excellon_detailed(&bytes)
-                .with_context(|| format!("processing drill layer {name}"))?;
-            drill_tools = Some(drill.tools);
-            // An assumed digit format (TZ, no format line, #429) is a warning.
-            warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
-            std::sync::Arc::new(drill.geometry)
-        } else if etchy_core::looks_like_placement(&bytes) {
-            kind = etchy_core::LayerKind::Placement;
-            std::sync::Arc::new(
-                etchy_core::resolve_placement(&bytes)
-                    .with_context(|| format!("processing placement file {name}"))?,
-            )
-        } else {
-            continue;
-        };
-        layers.push(Layer {
-            kind,
-            label: name,
-            geometry,
-            negative,
-            x2_objects,
-            drill_tools,
-        });
+        builder.push(name, bytes)?;
     }
-    Ok((Board { layers }, fmt, warnings))
+    Ok(builder.finish())
 }
 
 /// Walk a directory (one level) and load it as a revision.

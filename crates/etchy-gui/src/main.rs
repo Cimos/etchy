@@ -306,59 +306,22 @@ fn board_from_files(
 ) {
     let mut files: Vec<_> = dir.files().collect();
     files.sort_by_key(|f| f.path().to_path_buf());
-    let mut layers = Vec::new();
-    let mut fmt = None;
-    let mut warnings = Vec::new();
+    let mut builder = etchy_core::BoardBuilder::new();
+    let mut skipped = Vec::new();
     for f in files {
-        let bytes = f.contents();
         let name = f
             .path()
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let (stem, ext) = name.rsplit_once('.').unwrap_or((name.as_str(), ""));
-        let mut kind = etchy_core::classify(stem, ext);
-        // Gerber, Excellon/NC drill (#62), or pick-and-place (#115); anything else
-        // is skipped. A layer that fails to parse is dropped with a warning
-        // rather than crashing the demo.
-        let mut negative = false;
-        let geometry = if etchy_core::looks_like_gerber(bytes) {
-            if fmt.is_none() {
-                fmt = etchy_core::gerber_format(bytes).ok();
-            }
-            negative = etchy_core::file_polarity(bytes) == Some(etchy_core::FilePolarity::Negative);
-            etchy_core::resolve_layer_with_labels(bytes).map(Some)
-        } else if etchy_core::looks_like_excellon(bytes) {
-            kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
-            etchy_core::resolve_excellon_detailed(bytes).map(|drill| {
-                warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
-                Some((drill.geometry, None))
-            })
-        } else if etchy_core::looks_like_placement(bytes) {
-            kind = etchy_core::LayerKind::Placement;
-            etchy_core::resolve_placement(bytes).map(|geometry| Some((geometry, None)))
-        } else {
-            Ok(None)
-        };
-        let geometry = match geometry {
-            Ok(g) => g,
-            Err(e) => {
-                warnings.push(format!("{name}: layer skipped, it could not be read: {e}"));
-                None
-            }
-        };
-        if let Some((geometry, x2_objects)) = geometry {
-            layers.push(etchy_core::Layer {
-                kind,
-                label: name.clone(),
-                geometry: std::sync::Arc::new(geometry),
-                negative,
-                x2_objects: x2_objects.map(std::sync::Arc::new),
-                drill_tools: None,
-            });
+        if let Err(e) = builder.push(name.clone(), f.contents().to_vec()) {
+            // The error already names the file and its layer kind.
+            skipped.push(format!("layer skipped, it could not be read: {e}"));
         }
     }
-    (etchy_core::Board { layers }, fmt, warnings)
+    let (board, fmt, mut warnings) = builder.finish();
+    warnings.append(&mut skipped);
+    (board, fmt, warnings)
 }
 
 #[cfg(target_arch = "wasm32")]
