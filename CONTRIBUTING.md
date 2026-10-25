@@ -62,6 +62,11 @@ cargo clippy --workspace --all-targets   # tighten to -D warnings once deps land
 cargo test  --workspace
 ```
 
+`committed_corpus_matches_ground_truth` skips unless the gitignored golden
+corpus is generated; CI generates it and sets `ETCHY_REQUIRE_CORPUS=1` so it
+fails instead. To run it locally the same way, see
+[`corpus/README.md`](corpus/README.md#harness-status-phase-0--built).
+
 ## Cutting a release
 
 A release *is* a pushed tag: `.github/workflows/release.yml` fires on `v*`, builds

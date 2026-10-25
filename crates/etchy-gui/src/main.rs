@@ -927,6 +927,18 @@ fn cycle_base_opacity(t: f32) -> f32 {
     }
 }
 
+/// The base opacity actually applied in `mode` (#324). Base opacity is an
+/// Overlay-only control: it dims the unchanged copper behind the diff. In
+/// Old/New/Split/Swipe the base board IS the content, so it always draws at full
+/// visibility — otherwise `S` → 0% would blank those views with no message (or
+/// claim "no geometry in this view" over a board that has geometry).
+fn effective_base_opacity(mode: Mode, base_opacity: f32) -> f32 {
+    match mode {
+        Mode::Overlay => base_opacity,
+        Mode::Old | Mode::New | Mode::Split | Mode::Swipe => 1.0,
+    }
+}
+
 /// The inputs that change WHICH geometry is triangulated (G6 cache key). Colours,
 /// the base alpha, the noise threshold, and the camera are deliberately NOT here —
 /// they're applied cheaply at transform time, so they never force a re-triangulation.
@@ -955,7 +967,7 @@ fn build_geom_key(
     GeomKey {
         visible: visible.to_vec(),
         mode,
-        base_on: base_opacity > 0.0,
+        base_on: effective_base_opacity(mode, base_opacity) > 0.0,
         // The faint outline reference draws whenever the outline layer is visible and
         // exists (#157: its normal `visible_layers` eye now gates it). It's drawn on
         // every layer, so there's no single "selected" layer to suppress it for.
@@ -1541,6 +1553,11 @@ struct ViewApp {
     /// frame, which is what makes the GPU path O(1) in triangle count.
     #[cfg(feature = "gpu-transform")]
     gpu_hash: Option<u64>,
+    /// Whether the uploaded GPU base mesh has any triangles, so an empty upload
+    /// (e.g. Overlay at 0% base opacity) doesn't suppress the "no geometry in this
+    /// view" hint (#324).
+    #[cfg(feature = "gpu-transform")]
+    gpu_has_tris: bool,
     /// Transient status line from the last export (#60), shown by the Export
     /// control. Not persisted.
     export_msg: Option<String>,
@@ -1652,6 +1669,8 @@ impl ViewApp {
             use_gpu: true,
             #[cfg(feature = "gpu-transform")]
             gpu_hash: None,
+            #[cfg(feature = "gpu-transform")]
+            gpu_has_tris: false,
             export_msg: None,
             // The Layers panel is open by default, matching the old always-visible
             // left panel; the rail can collapse it.
@@ -2419,7 +2438,11 @@ impl ViewApp {
                             self.theme,
                         )
                     };
-                    base_display_color(base, canvas, self.base_opacity)
+                    base_display_color(
+                        base,
+                        canvas,
+                        effective_base_opacity(self.mode, self.base_opacity),
+                    )
                 }
                 Role::Outline => C_OUTLINE_FAINT,
                 Role::Added => self.col_added,
@@ -2587,6 +2610,7 @@ impl ViewApp {
         #[cfg(feature = "gpu-transform")]
         {
             self.gpu_hash = None;
+            self.gpu_has_tris = false;
         }
     }
 
@@ -4444,7 +4468,8 @@ impl ViewApp {
                 }),
         )
         .on_hover_text(format!(
-            "Opacity of the unchanged base copper behind the diff (0 hides it); \
+            "Opacity of the unchanged base copper behind the diff in Overlay (0 hides \
+             it; Old/New/Split/Swipe always show the board in full); \
              {} cycles off/faint/strong.",
             format_binding(self.keymap.cycle_base)
         ));
@@ -4931,6 +4956,7 @@ impl ViewApp {
                     g.upload(&tris);
                 }
                 self.gpu_hash = Some(hash);
+                self.gpu_has_tris = !tris.is_empty();
             }
         }
         let min_area_nm2 =
@@ -4976,15 +5002,14 @@ impl ViewApp {
             // matching the smooth non-split path instead of a painter per item.
             let mut lmesh = egui::epaint::Mesh::default();
             let mut rmesh = egui::epaint::Mesh::default();
-            // Base boards honour the base-level (faint/strong dimming) — #44; the
+            // Base boards ARE the content here, so they draw at full visibility —
+            // base opacity is Overlay-only (#324, superseding #44's dimming); the
             // board outline (Side::Full) is drawn into BOTH halves for orientation — #45.
             // Split shows the active layer only, so its base colour is per-item.
+            let base_t = effective_base_opacity(self.mode, self.base_opacity);
             for item in &cache.items {
-                let base_col = base_display_color(
-                    base_of(item.layer_index),
-                    self.canvas_color(),
-                    self.base_opacity,
-                );
+                let base_col =
+                    base_display_color(base_of(item.layer_index), self.canvas_color(), base_t);
                 match item.side {
                     Side::Left => append_tris(&mut lmesh, &item.tris, &self.cam, ltarget, base_col),
                     Side::Right => {
@@ -5035,7 +5060,7 @@ impl ViewApp {
                 cache,
                 &self.cam,
                 rect,
-                self.base_opacity,
+                effective_base_opacity(self.mode, self.base_opacity),
                 self.selected,
                 base_of,
                 self.canvas_color(),
@@ -5046,9 +5071,14 @@ impl ViewApp {
                 self.focus,
             );
             self.last_hidden = hidden;
+            #[cfg(feature = "gpu-transform")]
+            let gpu_drew = gpu_active && self.gpu_has_tris;
+            #[cfg(not(feature = "gpu-transform"))]
+            let gpu_drew = false;
             // Count the GPU-drawn base as present so the "no geometry" hint doesn't
-            // fire when only the diff mesh is empty.
-            n = shapes.len() + usize::from(gpu_active);
+            // fire when only the diff mesh is empty — but only if the upload had
+            // triangles, so an empty base mesh can't mask a blank canvas (#324).
+            n = shapes.len() + usize::from(gpu_drew);
             painter.extend(shapes);
         }
 
@@ -9606,5 +9636,70 @@ mod tests {
             .collect();
         assert_eq!(bases, vec![0, 1]);
         assert_eq!(diffs, vec![0, 0, 1, 1]);
+    }
+
+    /// #324: base opacity is Overlay-only. At 0% (`S` twice) Old/New/Split/Swipe
+    /// must still triangulate and draw the base board at full colour — otherwise
+    /// the canvas goes blank silently (Old/New) or the "no geometry in this view"
+    /// hint fires over a board that has geometry (Split/Swipe).
+    #[test]
+    fn base_opacity_zero_only_hides_base_in_overlay() {
+        use std::sync::Arc;
+        assert_eq!(super::effective_base_opacity(Mode::Overlay, 0.0), 0.0);
+        assert_eq!(
+            super::effective_base_opacity(Mode::Overlay, BASE_OPACITY_FAINT),
+            BASE_OPACITY_FAINT
+        );
+        let sq = vec![vec![
+            super::Pt::new(0, 0),
+            super::Pt::new(1_000_000, 0),
+            super::Pt::new(1_000_000, 1_000_000),
+            super::Pt::new(0, 1_000_000),
+        ]];
+        let set = || super::PolygonSet::new(vec![sq.clone()]);
+        let diff = super::BoardDiff {
+            report: etchy_core::DiffReport::new(Vec::new(), Vec::new()),
+            layers: vec![super::LayerView {
+                kind: etchy_core::LayerKind::TopCopper,
+                label_old: None,
+                label_new: None,
+                status: super::LayerStatus::Unchanged,
+                old: Arc::new(set()),
+                new: Arc::new(set()),
+                added: super::PolygonSet::new(Vec::new()),
+                removed: super::PolygonSet::new(Vec::new()),
+                change: etchy_core::LayerChange::default(),
+            }],
+        };
+        for mode in [Mode::Old, Mode::New, Mode::Split, Mode::Swipe] {
+            for t in [0.0, BASE_OPACITY_FAINT, BASE_OPACITY_STRONG] {
+                assert_eq!(
+                    super::effective_base_opacity(mode, t),
+                    1.0,
+                    "{mode:?} @ {t}"
+                );
+                // Full visibility → the layer colour itself, never the canvas.
+                assert_eq!(
+                    base_display_color(
+                        super::C_COPPER,
+                        super::C_CANVAS,
+                        super::effective_base_opacity(mode, t)
+                    ),
+                    super::C_COPPER
+                );
+            }
+            let key = build_geom_key(&[0], mode, 0.0, false, None);
+            assert!(key.base_on, "{mode:?}: base must stay on at 0% opacity");
+            let cache = super::build_cache(&diff, &key, None);
+            assert!(
+                cache.items.iter().any(|it| it.role == super::Role::Base),
+                "{mode:?}: base geometry dropped at 0% opacity"
+            );
+        }
+        // Overlay at 0% genuinely hides the base: an unchanged layer has nothing
+        // to draw, so "no geometry in this view" is the honest message there.
+        let key = build_geom_key(&[0], Mode::Overlay, 0.0, false, None);
+        assert!(!key.base_on);
+        assert!(super::build_cache(&diff, &key, None).items.is_empty());
     }
 }

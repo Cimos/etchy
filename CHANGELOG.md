@@ -15,6 +15,25 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   as Other; the CLI and viewer now use a lossy name, so the label stays readable
   and the extension still classifies. A non-UTF-8 git-mode `[SUBDIR]` now fails
   loud instead of silently diffing the whole tree.
+- Viewer: base opacity (`S` / Settings → Diff) now applies to Overlay only.
+  At 0% it no longer blanks Old/New with no message, or empties Split/Swipe
+  under a false "no geometry in this view" hint; those views always draw the
+  board at full visibility (#324).
+- `--gate-layers` group words now match exactly against an explicit table
+  instead of by substring (#304): `pth` gates plated drill only (it used to
+  gate `drill-npth` too), new `npth` gates non-plated drill only, and
+  fragments such as `e` or `top` are a loud exit 2 instead of silently
+  selecting several layer kinds.
+- **A Gerber region left open no longer bypasses the per-layer point ceiling**
+  (#315). Points buffered in a region under construction were only counted at
+  `G37`, so a small file with one never-closed region and thousands of arc
+  commands could build a multi-GB vertex buffer before the limit fired. They now
+  count as they are buffered and the layer fails loud with `ObjectLimit` mid-region.
+- **G74 arc with coincident endpoints now fails loud:** a single-quadrant (`G74`)
+  arc whose end point equals its start point was accepted and tessellated as a
+  full 360° ring of copper, although the mode only allows sweeps of ≤ 90°. It is
+  now rejected as `Unsupported` (stroked and region arcs alike); a `G75` full
+  circle is unaffected (#321).
 
 ## [0.1.2] — 2026-10-25
 
