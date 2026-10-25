@@ -13,7 +13,6 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    "NCSA",
     # Permissive licenses present in the real dependency tree (all OSI/FSF
     # permissive — no copyleft): Boost, public-domain, and the fonts eframe ships.
     "BSL-1.0",
