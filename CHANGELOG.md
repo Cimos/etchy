@@ -66,6 +66,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   selects that tool. Before, the previous tool stayed active. A body
   redefinition now applies only to the hits that follow it, not to earlier
   ones (#310).
+- Drill plating is read from all-caps filename stems with no separator:
+  `BOARDPTH` is plated and `BOARDNPTH` non-plated, where both were generic
+  drill files. Inside a word written in capitals, a `PTH` / `NPTH` prefix or
+  suffix counts (`NPTH` first); `DEPTH` and lower-case words still don't
+  match (#430).
 - Excellon: a tool definition whose diameter can't be read (`T2Cbad`,
   `T2C`) now fails loud and names the line. Before, it was skipped and the
   next hit used the previous tool (#428).
