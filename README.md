@@ -119,6 +119,7 @@ ODB++ ingestion, and native schematic files. (Pick-and-place is diffed as
 
 - [`docs/TRUST.md`](docs/TRUST.md) — the trust model + limitations: what etchy guarantees, and what it deliberately doesn't do.
 - [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml) — drop-in GitHub Action recipe for gating a PR on a board diff.
+- [`docs/ci-recipes/gitlab.md`](docs/ci-recipes/gitlab.md) — the same for GitLab CI: a `.gitlab-ci.yml` job that gates a merge request and posts the summary as an MR note.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — phased plan to 1.0.
 - [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md) — architecture + the verified Rust crate stack.
 - [`docs/PRODUCT_DISCOVERY.md`](docs/PRODUCT_DISCOVERY.md) — the requirements interview behind every decision.

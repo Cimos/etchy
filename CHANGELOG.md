@@ -16,20 +16,35 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - Regions carry the reference designators, pins and nets of the Gerber X2
   objects they touch, as labels only. Layers without X2 object attributes say
   so (#420).
+- GitHub Action: the PR comment and step summary link the per-layer overlay
+  SVGs and the HTML report, uploaded as a workflow artifact
+  (`upload-report`, on by default). New outputs `report-dir` and
+  `artifact-url` (#421).
 
 ### Changed
+- GitHub Action: runs the etchy release binary for the runner instead of
+  building from source. It takes the release matching the Action's tag (or the
+  `version` input) and checks it against the release's `SHA256SUMS`.
+  `build-from-source: true` keeps the old build, and `etchy-path` uses a
+  binary already on a self-hosted runner (#421).
 - Minimum supported Rust raised to the versions the locked dependencies actually
   need: 1.88 for `etchy-core` / `etchy-cli` / `etchy-kicad` (was 1.75) and
   1.92 for `etchy-gui` / `etchy-pdf` (was 1.85). The old values no longer
   built. A new CI job checks both, so they can't go stale again (#350).
 
 ### Documentation
+- GitLab CI recipe (`docs/ci-recipes/gitlab.md`): download and check the
+  release binary, gate the merge request on the exit code, keep the report as
+  a job artifact, and post the summary as an MR note (#427).
 - Dependency, corpus and web-demo docs now match the tree and `Cargo.lock`
   (#345).
 - README, landing page and docs page quote the same Mad_RP2040 demo numbers;
   `scripts/check-landing.py` fails if they drift apart (#342).
 
 ### Fixed
+- GitHub Action: refreshing an existing sticky PR comment replaced its text
+  with `@-` (the `gh api -f` flag sends `@` values literally). It now sends the
+  comment text (#421).
 - Excellon: a body tool change that carries a diameter (`T2C0.040`) now
   selects that tool. Before, the previous tool stayed active. A body
   redefinition now applies only to the hits that follow it, not to earlier

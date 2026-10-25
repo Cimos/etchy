@@ -1,10 +1,11 @@
 name: etchy PCB diff
 description: >-
   Diff two revisions of a board's fab output and gate the pipeline on the result.
-  Writes a Markdown summary to the job step-summary and (optionally) a sticky PR
-  comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error. Any other
-  code (a panic, an OOM kill, a missing binary) is treated as an error, never
-  as "no change".
+  Writes a Markdown summary to the job step-summary, uploads the per-layer
+  overlay images and HTML report as a workflow artifact, and (optionally) posts
+  a sticky PR comment. Exit-code contract: 0 = no diff, 1 = diff, 2 = error.
+  Any other code (a panic, an OOM kill, a missing binary) is treated as an
+  error, never as "no change".
 author: Cimos
 branding:
   icon: layers
@@ -25,78 +26,131 @@ inputs:
     description: Post the layer-by-layer diff as a sticky PR comment for this input pair. Only needs the consumer's job to grant pull-requests:write — the token is supplied automatically.
     required: false
     default: "false"
+  version:
+    description: >-
+      etchy release to run, as a tag like v0.1.2, or "latest". Empty (the
+      default) uses the tag the Action itself is pinned to (`uses:
+      Cimos/etchy@v0.1.2` runs v0.1.2), or the latest release when the Action
+      is used at a branch or SHA.
+    required: false
+    default: ""
+  build-from-source:
+    description: Build etchy from the Action's own source with cargo instead of downloading a release binary. Needs a Rust toolchain on the runner.
+    required: false
+    default: "false"
+  etchy-path:
+    description: Path to an etchy binary already on the runner. Skips the download and the build; for self-hosted runners without internet access.
+    required: false
+    default: ""
+  upload-report:
+    description: Upload the per-layer overlay SVGs and the HTML report as a workflow artifact when anything changed. The PR comment links to it.
+    required: false
+    default: "true"
 
 outputs:
   changed:
     description: "true if any layer changed, else false."
     value: ${{ steps.run.outputs.changed }}
+  report-dir:
+    description: Directory holding summary.md, report.html and svg/<layer>.svg for this run.
+    value: ${{ steps.run.outputs.report-dir }}
+  artifact-url:
+    description: Link to the uploaded report artifact, empty when nothing was uploaded.
+    value: ${{ steps.upload.outputs.artifact-url }}
 
 runs:
   using: composite
   steps:
-    # Building etchy from source is the current design. Downloading a release
-    # asset with checksum verification is a later option. Cargo's own cache +
-    # the toolchain are the consumer workflow's responsibility. Use the
-    # runner-provided $GITHUB_ACTION_PATH env var, not a ${{ }} template, so no
-    # value is expanded into the script.
-    - shell: bash
-      run: cargo build --locked --release --quiet -p etchy-cli --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+    # Get an etchy binary: a path the consumer supplied, a source build, or
+    # (the default) the release binary for this runner, checked against the
+    # release's SHA256SUMS. Inputs go in via env, not ${{ }} templates in the
+    # script, so no value is expanded as shell.
+    - id: install
+      shell: bash
+      env:
+        ETCHY_PATH: ${{ inputs.etchy-path }}
+        BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
+        ETCHY_VERSION: ${{ inputs.version }}
+        ETCHY_REF: ${{ github.action_ref }}
+      run: |
+        set -euo pipefail
+        if [ -n "$ETCHY_PATH" ]; then
+          etchy="$ETCHY_PATH"
+        elif [ "$BUILD_FROM_SOURCE" = "true" ]; then
+          # Cargo's cache and the toolchain are the consumer workflow's job.
+          cargo build --locked --release --quiet -p etchy-cli --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+          etchy="$GITHUB_ACTION_PATH/target/release/etchy"
+        else
+          etchy="$(bash "$GITHUB_ACTION_PATH/scripts/action/install-etchy.sh")"
+        fi
+        "$etchy" --version
+        echo "etchy=$etchy" >> "$GITHUB_OUTPUT"
+
     - id: run
       shell: bash
-      # Inputs are passed via env (NOT ${{ }} into the script) so a crafted value
-      # can't be expanded as shell — avoids GitHub Actions script injection.
       env:
+        ETCHY: ${{ steps.install.outputs.etchy }}
         OLD_DIR: ${{ inputs.old }}
         NEW_DIR: ${{ inputs.new }}
-        DO_COMMENT: ${{ inputs.comment }}
-        FAIL_ON_DIFF: ${{ inputs.fail-on-diff }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        # The workflow's own token, supplied by the action so the consumer wires
-        # nothing but `permissions: pull-requests: write`. github.token is not
-        # user-controlled, so it's safe to expand here.
-        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         # Reject dash-leading paths so a value can't be smuggled in as an etchy flag.
         case "$OLD_DIR" in -*) echo "invalid old dir: $OLD_DIR" >&2; exit 2;; esac
         case "$NEW_DIR" in -*) echo "invalid new dir: $NEW_DIR" >&2; exit 2;; esac
-        etchy="${GITHUB_ACTION_PATH}/target/release/etchy"
+        # One key per input pair: it names the report folder, the artifact and
+        # the sticky comment marker, so two etchy steps in one job don't collide.
+        if command -v sha256sum >/dev/null 2>&1; then hash=sha256sum; else hash="shasum -a 256"; fi
+        key="$(printf '%s' "$OLD_DIR|$NEW_DIR" | $hash | cut -c1-16)"
+        out="$RUNNER_TEMP/etchy-report-$key"
+        rm -rf "$out"
+        mkdir -p "$out"
         set +e
-        md="$("$etchy" --format md -- "$OLD_DIR" "$NEW_DIR")"
+        "$ETCHY" --format md --svg "$out/svg" --html "$out/report.html" -- "$OLD_DIR" "$NEW_DIR" > "$out/summary.md"
         code=$?
         set -e
         case "$code" in 0|1) ;; *) echo "etchy exited $code" >&2; exit 2;; esac
-        printf '%s\n' "$md" >> "$GITHUB_STEP_SUMMARY"
-        echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-        # Post/refresh the sticky PR comment with the layer-by-layer table. A
-        # comment failure (missing permission, not a PR event) is a warning, not
-        # a pipeline failure — never let reporting break the gate.
-        if [ "$DO_COMMENT" = "true" ] && [ -n "$PR_NUMBER" ]; then
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::comment:true but no token available — skipping PR comment"
-          else
-            marker_key="$(printf '%s' "$OLD_DIR|$NEW_DIR" | sha256sum | cut -c1-16)"
-            marker="<!-- etchy-diff:${marker_key} -->"
-            if comment_id="$(
-              gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-                --paginate \
-                --jq ".[] | select(.body | startswith(\"$marker\")) | .id" \
-                | sed -n '1p'
-            )"; then
-              if [ -n "$comment_id" ]; then
-                printf '%s\n%s\n' "$marker" "$md" \
-                  | gh api -X PATCH \
-                    "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
-                    -f body=@- >/dev/null \
-                  || echo "::warning::could not update PR comment — grant the job pull-requests:write"
-              else
-                printf '%s\n%s\n' "$marker" "$md" \
-                  | gh pr comment "$PR_NUMBER" --body-file - \
-                  || echo "::warning::could not post PR comment — grant the job pull-requests:write"
-              fi
-            else
-              echo "::warning::could not find existing PR comment — grant the job pull-requests:write"
-            fi
-          fi
+        cat "$out/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "changed=$([ "$code" -eq 1 ] && echo true || echo false)"
+          echo "key=$key"
+          echo "report-dir=$out"
+        } >> "$GITHUB_OUTPUT"
+
+    # The layer images can't go inline in a bot comment: GitHub drops data:
+    # URIs and inline SVG from comment Markdown, and files in an artifact have
+    # no direct image URL. So they go up as one artifact and the comment links
+    # to it. A failed upload is a warning, never a gate failure.
+    - id: upload
+      if: steps.run.outputs.changed == 'true' && inputs.upload-report == 'true'
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: etchy-diff-${{ steps.run.outputs.key }}
+        path: ${{ steps.run.outputs.report-dir }}
+        if-no-files-found: warn
+        overwrite: true
+
+    - id: report
+      shell: bash
+      env:
+        REPORT_DIR: ${{ steps.run.outputs.report-dir }}
+        KEY: ${{ steps.run.outputs.key }}
+        CHANGED: ${{ steps.run.outputs.changed }}
+        ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        DO_COMMENT: ${{ inputs.comment }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        # The workflow's own token, supplied by the action so the consumer wires
+        # nothing but `permissions: pull-requests: write`. github.token is not
+        # user-controlled, so it's safe to expand here.
+        GH_TOKEN: ${{ github.token }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/report.sh"
+
+    - shell: bash
+      env:
+        CHANGED: ${{ steps.run.outputs.changed }}
+        FAIL_ON_DIFF: ${{ inputs.fail-on-diff }}
+      run: |
+        if [ "$FAIL_ON_DIFF" = "true" ] && [ "$CHANGED" = "true" ]; then
+          echo "etchy: the boards differ" >&2
+          exit 1
         fi
-        [ "$FAIL_ON_DIFF" = "true" ] && [ "$code" -eq 1 ] && exit 1 || true
