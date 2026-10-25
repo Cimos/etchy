@@ -327,16 +327,16 @@ fn board_from_files(
                 fmt = etchy_core::gerber_format(bytes).ok();
             }
             negative = etchy_core::file_polarity(bytes) == Some(etchy_core::FilePolarity::Negative);
-            etchy_core::polygonize_gerber(bytes).map(Some)
+            etchy_core::resolve_layer_with_labels(bytes).map(Some)
         } else if etchy_core::looks_like_excellon(bytes) {
             kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
             etchy_core::resolve_excellon_detailed(bytes).map(|drill| {
                 warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
-                Some(drill.geometry)
+                Some((drill.geometry, None))
             })
         } else if etchy_core::looks_like_placement(bytes) {
             kind = etchy_core::LayerKind::Placement;
-            etchy_core::resolve_placement(bytes).map(Some)
+            etchy_core::resolve_placement(bytes).map(|geometry| Some((geometry, None)))
         } else {
             Ok(None)
         };
@@ -347,13 +347,13 @@ fn board_from_files(
                 None
             }
         };
-        if let Some(geometry) = geometry {
+        if let Some((geometry, x2_objects)) = geometry {
             layers.push(etchy_core::Layer {
                 kind,
                 label: name.clone(),
                 geometry: std::sync::Arc::new(geometry),
                 negative,
-                x2_objects: None,
+                x2_objects: x2_objects.map(std::sync::Arc::new),
                 drill_tools: None,
             });
         }
@@ -746,6 +746,8 @@ enum HotkeyAction {
     ToggleMeasure,
     ClearMeasurements,
     FitView,
+    NextChange,
+    PrevChange,
     CycleBase,
     CycleUnit,
     ToggleGrid,
@@ -758,10 +760,12 @@ enum HotkeyAction {
 
 impl HotkeyAction {
     /// (action, editor label), in the order the Hotkeys section lists them.
-    const ALL: [(HotkeyAction, &'static str); 11] = [
+    const ALL: [(HotkeyAction, &'static str); 13] = [
         (HotkeyAction::ToggleMeasure, "Toggle measure"),
         (HotkeyAction::ClearMeasurements, "Clear measurements"),
         (HotkeyAction::FitView, "Fit view"),
+        (HotkeyAction::NextChange, "Next change"),
+        (HotkeyAction::PrevChange, "Previous change"),
         (HotkeyAction::CycleBase, "Cycle base opacity"),
         (HotkeyAction::CycleUnit, "Cycle measure units"),
         (HotkeyAction::ToggleGrid, "Toggle grid"),
@@ -785,6 +789,8 @@ struct Keymap {
     /// `measure_key_action`'s `custom_clear`).
     clear_measure: Option<KeyBinding>,
     fit_view: KeyBinding,
+    next_change: KeyBinding,
+    prev_change: KeyBinding,
     cycle_base: KeyBinding,
     /// `None` = the preset defaults stand: Altium **Q**, KiCad **Ctrl+U** —
     /// each tool's own units toggle (#211). An explicit rebind overrides them,
@@ -814,6 +820,8 @@ impl Default for Keymap {
             },
             clear_measure: None,
             fit_view: KeyBinding::plain(Key::F),
+            next_change: KeyBinding::plain(Key::N),
+            prev_change: KeyBinding::plain(Key::P),
             cycle_base: KeyBinding::plain(Key::S),
             cycle_unit: None,
             toggle_grid: KeyBinding::plain(Key::G),
@@ -835,6 +843,8 @@ impl Keymap {
             HotkeyAction::ToggleMeasure => Some(self.toggle_measure),
             HotkeyAction::ClearMeasurements => self.clear_measure,
             HotkeyAction::FitView => Some(self.fit_view),
+            HotkeyAction::NextChange => Some(self.next_change),
+            HotkeyAction::PrevChange => Some(self.prev_change),
             HotkeyAction::CycleBase => Some(self.cycle_base),
             HotkeyAction::CycleUnit => self.cycle_unit,
             HotkeyAction::ToggleGrid => Some(self.toggle_grid),
@@ -852,6 +862,8 @@ impl Keymap {
             HotkeyAction::ToggleMeasure => self.toggle_measure = b,
             HotkeyAction::ClearMeasurements => self.clear_measure = Some(b),
             HotkeyAction::FitView => self.fit_view = b,
+            HotkeyAction::NextChange => self.next_change = b,
+            HotkeyAction::PrevChange => self.prev_change = b,
             HotkeyAction::CycleBase => self.cycle_base = b,
             HotkeyAction::CycleUnit => self.cycle_unit = Some(b),
             HotkeyAction::ToggleGrid => self.toggle_grid = b,
@@ -1593,6 +1605,9 @@ struct ViewApp {
     /// Regions hidden by the threshold last frame, for the caption.
     last_hidden: usize,
     cam: Camera,
+    change_cursor: usize,
+    navigating_change: bool,
+    pending_change_frame: bool,
     /// Current theme (dark/light) and the one last applied to egui, so a change
     /// re-applies the visuals (the old code applied once and never updated).
     theme: Theme,
@@ -1754,6 +1769,9 @@ impl ViewApp {
             min_area_mm2: MIN_AREA_MM2,
             last_hidden: 0,
             cam: Camera::default(),
+            change_cursor: 0,
+            navigating_change: false,
+            pending_change_frame: false,
             theme: Theme::Dark,
             applied_theme: None,
             warning_expanded: false,
@@ -1954,9 +1972,37 @@ impl ViewApp {
         // name highlights it but does NOT tick it on — the per-row checkbox is the
         // only thing that toggles visibility. Split/Swipe force the selected layer
         // visible regardless, so a highlight is never blank there. Selecting a layer
-        // does NOT move the camera (#4) — the view stays where the user left it;
-        // only Fit reframes.
+        // does NOT move the camera (#4) — the view stays where the user left it.
+        // Fit and explicit change navigation reframe.
+        if self.selected != idx {
+            self.change_cursor = 0;
+            self.navigating_change = false;
+            self.pending_change_frame = false;
+        }
         self.selected = idx;
+    }
+
+    fn navigate_change(&mut self, idx: usize) {
+        self.change_cursor = idx;
+        self.navigating_change = true;
+        self.pending_change_frame = true;
+    }
+
+    fn step_change(&mut self, delta: i32) {
+        if self.pdf.is_some() {
+            return;
+        }
+        let count = self
+            .diff
+            .report
+            .layers
+            .get(self.selected)
+            .map_or(0, |l| l.regions.len());
+        if let Some(next) =
+            step_change_cursor(self.change_cursor, count, delta, self.navigating_change)
+        {
+            self.navigate_change(next);
+        }
     }
 
     /// Move the selection `delta` steps through the displayed (changed-first)
@@ -2719,6 +2765,9 @@ impl ViewApp {
         self.new_label = new_label;
         self.order = order;
         self.selected = selected;
+        self.change_cursor = 0;
+        self.navigating_change = false;
+        self.pending_change_frame = false;
         self.outline = outline;
         self.visible_layers = visible_layers;
         self.new_area_mm2 = layer_new_areas(&self.diff);
@@ -3578,6 +3627,8 @@ impl eframe::App for ViewApp {
         let (
             toggle_base,
             fit,
+            next_change,
+            prev_change,
             mode_overlay,
             mode_before,
             mode_after,
@@ -3596,7 +3647,7 @@ impl eframe::App for ViewApp {
             if suppressed {
                 return (
                     false, false, false, false, false, false, false, false, false, false, false,
-                    false, false, false, false,
+                    false, false, false, false, false, false,
                 );
             }
             // A rebindable action fires on its keymap binding (#201) — the key
@@ -3611,6 +3662,8 @@ impl eframe::App for ViewApp {
             (
                 b(km.cycle_base),
                 b(km.fit_view),
+                b(km.next_change),
+                b(km.prev_change),
                 // Mode hotkeys (#55, #61): 1=Overlay 2=Old 3=New 4=Split 5=Swipe
                 // via the keymap, + fixed aliases O/B/A (B/A kept as legacy
                 // Old/New mnemonics). Aliases require a BARE key press — like
@@ -3697,6 +3750,12 @@ impl eframe::App for ViewApp {
         }
         if fit {
             self.cam.fitted = false;
+        }
+        if next_change {
+            self.step_change(1);
+        }
+        if prev_change {
+            self.step_change(-1);
         }
         if mode_overlay {
             self.mode = Mode::Overlay;
@@ -4158,6 +4217,7 @@ impl ViewApp {
         let mut toggle: Option<(usize, bool)> = None; // (layer, show)
         let mut group_set: Option<(Vec<usize>, bool)> = None; // (idxs, show)
         let mut set_color: Option<(usize, Color32)> = None; // (layer, colour) (#3)
+        let mut choose_change = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             // The board outline is a normal layer row now (#157) — it lives under
             // Mechanical > outline with an ordinary eye toggle, no separate "board
@@ -4310,6 +4370,45 @@ impl ViewApp {
                         }
                     });
             }
+            if let Some(layer) = self.diff.report.layers.get(self.selected) {
+                ui.separator();
+                let total = layer.regions.len();
+                egui::CollapsingHeader::new(format!("Changes ({total})"))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if total > 0 && !layer.labels_available {
+                            ui.label(egui::RichText::new("X2 labels unavailable").weak().small());
+                        }
+                        for (i, region) in layer.top_regions(200).into_iter().enumerate() {
+                            let marker = match region.change {
+                                etchy_core::report::RegionChange::Added => ("+", self.col_added),
+                                etchy_core::report::RegionChange::Removed => {
+                                    ("−", self.col_removed)
+                                }
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(marker.0).color(marker.1));
+                                let mut title = format!("{:.4} mm²", region.area_mm2);
+                                if let Some(labels) = region.labels_text() {
+                                    title.push_str(" · ");
+                                    title.push_str(&labels);
+                                }
+                                if ui
+                                    .selectable_label(
+                                        self.navigating_change && self.change_cursor == i,
+                                        title,
+                                    )
+                                    .clicked()
+                                {
+                                    choose_change = Some(i);
+                                }
+                            });
+                        }
+                        if total > 200 {
+                            ui.label(format!("+{} more (use N/P to navigate)", total - 200));
+                        }
+                    });
+            }
         });
         // Apply deferred actions.
         if let Some((idxs, show)) = group_set {
@@ -4322,6 +4421,9 @@ impl ViewApp {
         }
         if let Some(idx) = select {
             self.select(idx);
+        }
+        if let Some(idx) = choose_change {
+            self.navigate_change(idx);
         }
         // Per-layer colour override from the inline swatch picker (#3).
         if let Some((idx, c)) = set_color {
@@ -5071,14 +5173,30 @@ impl ViewApp {
         // defaulting to the brand board-dark.
         painter.rect_filled(rect, 0.0, self.canvas_color());
 
-        // Fit on first show / explicit Fit only. Fit frames the WHOLE board (#8),
-        // not the selected layer, so the view is stable no matter which layer is
-        // active — and selecting a layer never moves it (#4).
+        // Fit on first show / explicit Fit. Fit frames the WHOLE board (#8),
+        // not the selected layer, so selection alone never moves the camera.
         if !self.cam.fitted {
             if let Some(bb) = board_bbox(&self.diff.layers) {
                 fit(&mut self.cam, bb, rect);
             }
             self.cam.fitted = true;
+        }
+        if self.pending_change_frame {
+            if let Some(region) = self
+                .diff
+                .report
+                .layers
+                .get(self.selected)
+                .and_then(|l| l.top_regions(self.change_cursor + 1).last().copied())
+            {
+                let frame_rect = if self.mode == Mode::Split {
+                    split_rects(rect, 0.5, 6.0).0
+                } else {
+                    rect
+                };
+                frame_change(&mut self.cam, region.bbox_nm, frame_rect);
+            }
+            self.pending_change_frame = false;
         }
 
         // Camera + tool input (swipe divider, measure clicks, panning, wheel
@@ -5361,6 +5479,46 @@ impl ViewApp {
             .unwrap_or(false);
         if let Some(note) = focus_note(self.focus, shown, selected_visible) {
             extra_chips.push(note);
+        }
+        if self.navigating_change {
+            if let Some(region) = self
+                .diff
+                .report
+                .layers
+                .get(self.selected)
+                .and_then(|l| l.top_regions(self.change_cursor + 1).last().copied())
+            {
+                let visible = self
+                    .visible_layers
+                    .get(self.selected)
+                    .copied()
+                    .unwrap_or(false)
+                    || matches!(self.mode, Mode::Split | Mode::Swipe);
+                if visible {
+                    if self.mode == Mode::Split {
+                        let (left, right, _) = split_rects(rect, 0.5, 6.0);
+                        draw_change_outline(
+                            &painter.with_clip_rect(left),
+                            &self.cam,
+                            left,
+                            region.bbox_nm,
+                        );
+                        draw_change_outline(
+                            &painter.with_clip_rect(right),
+                            &self.cam,
+                            right,
+                            region.bbox_nm,
+                        );
+                    } else {
+                        draw_change_outline(&painter, &self.cam, rect, region.bbox_nm);
+                    }
+                }
+                extra_chips.push(format!(
+                    "change {} / {}",
+                    self.change_cursor + 1,
+                    self.diff.report.layers[self.selected].regions.len()
+                ));
+            }
         }
         self.canvas_trailing(&painter, &response, rect, extra_chips);
     }
@@ -7165,6 +7323,39 @@ fn fit(cam: &mut Camera, bb: [i64; 4], rect: Rect) {
     cam.fit_scale = cam.scale; // "100%" reference for the zoom readout
 }
 
+fn step_change_cursor(cursor: usize, count: usize, delta: i32, active: bool) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    if !active {
+        return Some(if delta < 0 { count - 1 } else { 0 });
+    }
+    Some((cursor as i64 + delta as i64).rem_euclid(count as i64) as usize)
+}
+
+fn frame_change(cam: &mut Camera, bb: [i64; 4], rect: Rect) {
+    let w = (bb[2] as f64 - bb[0] as f64).max(1.0);
+    let h = (bb[3] as f64 - bb[1] as f64).max(1.0);
+    cam.center = [
+        (bb[0] as f64 + bb[2] as f64) / 2.0,
+        (bb[1] as f64 + bb[3] as f64) / 2.0,
+    ];
+    cam.scale = clamp_scale(0.7 * (rect.width() as f64 / w).min(rect.height() as f64 / h));
+    cam.fitted = true;
+}
+
+fn draw_change_outline(painter: &egui::Painter, cam: &Camera, rect: Rect, bb: [i64; 4]) {
+    let a = world_to_screen(cam, Pt { x: bb[0], y: bb[3] }, rect);
+    let b = world_to_screen(cam, Pt { x: bb[2], y: bb[1] }, rect);
+    let box_rect = Rect::from_two_pos(a, b).expand(3.0);
+    painter.rect_stroke(
+        box_rect,
+        2.0,
+        Stroke::new(2.0_f32, C_COPPER),
+        StrokeKind::Outside,
+    );
+}
+
 /// Publish the current view (selected layer, mode, zoom %) to JS so the web
 /// feedback widget can attach "what the user was looking at" to a submission.
 /// `window.__etchyState = { layer, mode, zoomPct }`. No-op off the web.
@@ -7214,6 +7405,59 @@ fn board_bbox(layers: &[LayerView]) -> Option<[i64; 4]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn change_cursor_starts_and_wraps() {
+        use super::step_change_cursor;
+        assert_eq!(step_change_cursor(0, 0, 1, false), None);
+        assert_eq!(step_change_cursor(0, 3, 1, false), Some(0));
+        assert_eq!(step_change_cursor(0, 3, -1, false), Some(2));
+        assert_eq!(step_change_cursor(2, 3, 1, true), Some(0));
+        assert_eq!(step_change_cursor(0, 3, -1, true), Some(2));
+    }
+
+    #[test]
+    fn change_frame_centers_pads_and_clamps() {
+        use super::{frame_change, Camera, SCALE_MAX};
+        use egui::{pos2, Rect};
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 500.0));
+        let mut cam = Camera::default();
+        frame_change(&mut cam, [0, 0, 100, 100], rect);
+        assert_eq!(cam.center, [50.0, 50.0]);
+        assert_eq!(cam.scale, 3.5);
+        frame_change(&mut cam, [10, 20, 10, 20], rect);
+        assert_eq!(cam.center, [10.0, 20.0]);
+        let huge = Rect::from_min_max(pos2(0.0, 0.0), pos2(10000.0, 5000.0));
+        frame_change(&mut cam, [10, 20, 10, 20], huge);
+        assert_eq!(cam.scale, SCALE_MAX);
+    }
+
+    #[test]
+    fn change_defaults_are_unique_in_both_presets() {
+        use super::{binding_conflict, preset_unit_binding, HotkeyAction, InputPreset, Keymap};
+        let km = Keymap::default();
+        assert_ne!(km.next_change, km.prev_change);
+        for preset in [InputPreset::Altium, InputPreset::KiCad] {
+            let units = preset_unit_binding(preset);
+            assert_ne!(km.next_change, units);
+            assert_ne!(km.prev_change, units);
+        }
+        assert_eq!(
+            binding_conflict(&km, HotkeyAction::NextChange, km.next_change),
+            None
+        );
+        assert_eq!(
+            binding_conflict(&km, HotkeyAction::PrevChange, km.prev_change),
+            None
+        );
+        assert_eq!(
+            binding_conflict(&km, HotkeyAction::FitView, km.next_change),
+            Some("Next change")
+        );
+        assert_eq!(
+            binding_conflict(&km, HotkeyAction::FitView, km.prev_change),
+            Some("Previous change")
+        );
+    }
     use super::{
         base_display_color, build_geom_key, cycle_base_opacity, derive_label, display_grid_pitch,
         distance_mm, export_file_names, finish_measurement, format_coord_mm, geom_cache_dirty,
