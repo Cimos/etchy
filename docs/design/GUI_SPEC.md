@@ -71,6 +71,13 @@ As of writing, the shell described here lives in **PR #202** (stacked on
   eye toggle, on by default. No special row anywhere, no legend entry. In
   Split/Swipe the outline still draws into both halves for orientation.
 - Selecting a row highlights it and **never moves the camera** (VIEW-1).
+- A collapsible **Changes (N)** section below the layer rows lists the selected
+  layer's regions largest first (VIEW-17). Each row has an added/removed colour
+  marker, area in mm² and any X2 labels. When attributes are absent it says
+  "X2 labels unavailable" once. The first 200 rows are shown, followed by a
+  `+N more` note; N/P can navigate all regions. A row click frames the region.
+  Selection resets the change cursor without moving the camera. PDF pages have
+  no Changes section.
 
 ### Measure (a tool, not a panel — #211)
 - The rail ruler icon is a **plain tool toggle**: click arms measure mode
@@ -132,8 +139,10 @@ never re-sizes it (#212):
   toward canvas at the base-opacity setting in Overlay; in Old/New/Split/Swipe
   the board is the content and draws at full layer colour (#324). Copper/cream chrome; board-dark
   canvas.
-- **Camera** (VIEW-1..4): Fit (`F`/button) frames the whole board — the union
-  of every layer's extent; it is the only thing that reframes. Wheel zooms at
+- **Camera** (VIEW-1..4, VIEW-17): Fit (`F`/button) frames the whole board — the union
+  of every layer's extent. Clicking a change row or pressing N/P frames its
+  padded bounds, clamped to the camera scale limit. The active region has a
+  copper-coloured outline and a `change k / N` bottom-left chip. Wheel zooms at
   the cursor; Ctrl+wheel pans Y, Shift+wheel pans X. Drag-to-pan: left in every
   preset, plus middle/right per preset (Altium: right; KiCad: middle or right).
 - **Swipe** (VIEW-4): a curtain over one board. Both halves project through the
@@ -149,7 +158,7 @@ never re-sizes it (#212):
   cursor cross with a live coordinate chip; the readout appends "· grid" while
   snapping so displayed precision is honest.
 - **Bottom-left chip stack** (VIEW-10), bottom-up: coordinate readout → hidden
-  count → layer hint → measure hint. Chips appear only when meaningful:
+  count → layer hint → change position → measure hint. Chips appear only when meaningful:
   - `N hidden < X mm²` — the noise filter's suppression count (Overlay mode;
     TRUST-3). Nothing hidden → no chip.
   - `1 / N layers` — only when exactly one of several layers is visible (the
@@ -168,6 +177,7 @@ Defaults (KEY-4); all rebindable in Settings › Hotkeys except the fixed aliase
 | Toggle measure | **Ctrl+M** | also the rail ruler toggle |
 | Clear measurements | *preset:* Altium **Shift+C** / KiCad **Esc** | rebind overrides preset |
 | Fit view | F | frames the whole board |
+| Next / previous change | N / P | wraps through the selected layer, largest first |
 | Cycle base opacity | S | 0 → 40 → 80% (Overlay only) |
 | Cycle measure units | *preset:* Altium **Q** / KiCad **Ctrl+U** | each tool's own units key (#211); rebind overrides preset; cycles mm → inch → mil |
 | Toggle grid | G | |

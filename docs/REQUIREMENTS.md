@@ -106,7 +106,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 
 | ID | Requirement | Source | Status |
 |---|---|---|---|
-| VIEW-1 | **Selecting a layer never moves the camera.** Only Fit reframes. | #169 | ✅ |
+| VIEW-1 | **Selecting a layer never moves the camera.** Fit, a change-row click, and Next/Previous Change (N/P by default) explicitly reframe. | #169, #419 | ✅ |
 | VIEW-2 | **Fit frames the whole board** (union of every layer's extent), not the changed region or one layer. | #170 | ✅ |
 | VIEW-3 | **Left-drag pans** in every input preset (right/middle per preset still work). | #172/#18 | ✅ |
 | VIEW-4 | **Swipe is a curtain over one board**: the divider bisects a single board (left = old, right = new), travels the full canvas width, and dragging it never pans the board. | #171/#183, owner | ✅ |
@@ -122,6 +122,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | VIEW-14 | Warnings are named, concise, auto-fade to an icon, and never shift the layout on hover. | 2026-06-21 feedback | ✅ |
 | VIEW-15 | **PDF rasterization DPI is user-settable** in Settings › Diff (chips 150/200/300, default **200** — deliberately higher than the CLI's 150 default, which keeps its `--dpi` flag). Changing it **re-rasterizes the loaded pair** from the retained source bytes; a DPI that breaches the raster caps (50 MP/page, 8192 px/side, 250 MP/doc) fails loud and the setting reverts. Persisted. | #223 | ✅ |
 | VIEW-16 | **Export always produces findable output**: native writes `etchy-export/` next to the last opened input (absolute path in the toast); web downloads a single file directly and bundles a multi-file set into one zip (browsers block the 2nd+ automatic download). PDF mode exports the changed pages' overlay PNGs. | #222 | ✅ |
+| VIEW-17 | The Layers panel has a collapsible **Changes** list for the selected layer, largest first, with added/removed marker, area and available X2 labels. It shows the total count, caps visible rows at 200 with a `+N more` note, and says when X2 labels are unavailable. Clicking a row or using rebindable N/P frames and outlines the region; navigation wraps, and a bottom-left `change k / N` chip shows the position. Layer selection resets the cursor without moving the camera. PDF mode has no region list. | #419 | ✅ |
 
 ## 8. Measure system
 
@@ -141,7 +142,7 @@ below is owner-locked; the shell merged to `main` 2026-07-07 (PR chain
 | KEY-1 | A **Settings › Hotkeys editor** lists every rebindable action with its binding; rebinding is press-to-capture, Esc cancels, with **reset to defaults**. Bindings persist. | #201, owner | ✅ |
 | KEY-2 | A capture **refuses a key another action owns** (including fixed aliases and the preset clear/units keys) — one press must never dispatch two actions. Bindings match their **exact modifier set**. | #201 review | ✅ |
 | KEY-3 | A capture armed while its editor is hidden cancels; a focused text field keeps its keystrokes. | #201 review | ✅ |
-| KEY-4 | Defaults: Ctrl+M measure · F fit · S base cycle · preset units per MEAS-3 (Altium Q / KiCad Ctrl+U) · G grid · 1–5 modes (O/B/A legacy aliases) · J/K/arrows step layers · preset clear per MEAS-4. | as built, #211 | ✅ |
+| KEY-4 | Defaults: Ctrl+M measure · F fit · N/P next/previous change · S base cycle · preset units per MEAS-3 (Altium Q / KiCad Ctrl+U) · G grid · 1–5 modes (O/B/A legacy aliases) · J/K/arrows step layers · preset clear per MEAS-4. | as built, #211, #419 | ✅ |
 
 ## 10. Rendering & performance
 

@@ -81,7 +81,7 @@ pub fn board_from_bytes(
         // Gerber layer, Excellon/NC drill, pick-and-place, or neither (skip). Drill
         // (#62) and P&P (#115) route through their own front-ends so those changes
         // diff instead of being silently dropped.
-        let geometry = if etchy_core::looks_like_gerber(&bytes) {
+        let (geometry, x2_objects) = if etchy_core::looks_like_gerber(&bytes) {
             if fmt.is_none() {
                 fmt = etchy_core::gerber_format(&bytes).ok();
             }
@@ -89,10 +89,9 @@ pub fn board_from_bytes(
             // added/removed for such a layer so the diff speaks in material.
             negative =
                 etchy_core::file_polarity(&bytes) == Some(etchy_core::FilePolarity::Negative);
-            std::sync::Arc::new(
-                etchy_core::polygonize_gerber(&bytes)
-                    .with_context(|| format!("processing layer {name}"))?,
-            )
+            let (geometry, labels) = etchy_core::resolve_layer_with_labels(&bytes)
+                .with_context(|| format!("processing layer {name}"))?;
+            (std::sync::Arc::new(geometry), labels)
         } else if etchy_core::looks_like_excellon(&bytes) {
             // Content wins over the filename: an Excellon file named e.g.
             // Board.TXT must land on the Drill layer, not "other". Plating
@@ -101,12 +100,15 @@ pub fn board_from_bytes(
             let drill = etchy_core::resolve_excellon_detailed(&bytes)
                 .with_context(|| format!("processing drill layer {name}"))?;
             warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
-            std::sync::Arc::new(drill.geometry)
+            (std::sync::Arc::new(drill.geometry), None)
         } else if etchy_core::looks_like_placement(&bytes) {
             kind = etchy_core::LayerKind::Placement;
-            std::sync::Arc::new(
-                etchy_core::resolve_placement(&bytes)
-                    .with_context(|| format!("processing placement file {name}"))?,
+            (
+                std::sync::Arc::new(
+                    etchy_core::resolve_placement(&bytes)
+                        .with_context(|| format!("processing placement file {name}"))?,
+                ),
+                None,
             )
         } else {
             continue;
@@ -116,7 +118,7 @@ pub fn board_from_bytes(
             label: name,
             geometry,
             negative,
-            x2_objects: None,
+            x2_objects: x2_objects.map(std::sync::Arc::new),
             drill_tools: None,
         });
     }
@@ -342,6 +344,14 @@ mod tests {
         assert_eq!(board.layers[0].kind, LayerKind::TopCopper);
         assert_eq!(board.layers[0].label, "board-F_Cu.gtl");
         assert!(fmt.is_some(), "format sniffed from the one Gerber");
+    }
+
+    #[test]
+    fn board_from_bytes_retains_x2_labels() {
+        let gerber = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n%TO.C,U7*%\nX10000000Y10000000D03*\nM02*\n";
+        let (board, _, _) = board_from_bytes(vec![("board.gtl".into(), gerber.to_vec())]).unwrap();
+        let objects = board.layers[0].x2_objects.as_ref().unwrap();
+        assert_eq!(objects[0].labels.refdes.as_deref(), Some("U7"));
     }
 
     #[test]

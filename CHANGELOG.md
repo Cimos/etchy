@@ -9,6 +9,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ## [Unreleased]
 
+### Added
+- Viewer change navigator with per-layer region lists, X2 labels, framing, highlight, and rebindable N/P keys (#419).
+
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
   "gerber parse failed". The message now reads "parse failed", after the
