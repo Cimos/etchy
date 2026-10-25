@@ -26,7 +26,7 @@ etchy/
 │   ├── etchy-cli/      # binary `etchy`: arg parsing, command flow, exit codes, terminal + file output.
 │   ├── etchy-gui/      # binary `etchy-gui`: egui viewer, using the core and optional PDF path.
 │   ├── etchy-pdf/      # schematic-PDF pixel-diff; feature-gated pure-Rust hayro path.
-│   └── etchy-kicad/    # bounded .kicad_pcb parser (0.2.0 work in progress).
+│   └── etchy-kicad/    # bounded .kicad_pcb parser (0.3.0 work in progress).
 ├── corpus/             # golden test corpus (synthesized + real board pairs) + expected outputs.
 ├── fuzz/               # cargo-fuzz targets for the parsers.
 └── .github/workflows/  # CI: build/test/fmt/clippy/deny/wasm; hand-built release matrix.

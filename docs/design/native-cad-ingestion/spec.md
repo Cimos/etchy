@@ -50,7 +50,7 @@ etchy old.kicad_pcb new.kicad_pcb --html --fail-on-objects 0
 ```
 
 No CLI option accepts a KiCad executable, Altium executable, Python interpreter,
-font search path, plot profile or export directory in v0.2.0.
+font search path, plot profile or export directory in v0.3.0.
 
 ## 3. Parser and record accounting
 
@@ -267,7 +267,7 @@ represents a warning only as free text.
 
 ## 15. Owner decisions (2026-10-03)
 
-1. Object changes ship with KiCad geometry in one 0.2.0 release.
+1. Object changes ship with KiCad geometry in one 0.3.0 release.
 2. A zone with no saved fill is an error by default; `--allow-unfilled-zones`
    continues with a high-severity warning and lists the zone as unprojected.
 3. Undrawn TrueType or project-variable text warns only and does not change

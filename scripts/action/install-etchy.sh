@@ -9,7 +9,7 @@
 #   ETCHY_VERSION  release tag (vX.Y.Z), "latest", or empty
 #   ETCHY_REF      the ref the Action was used at (github.action_ref). When
 #                  ETCHY_VERSION is empty and this is a release tag it is used,
-#                  so `uses: Cimos/etchy@v0.1.2` runs the v0.1.2 binary.
+#                  so `uses: Cimos/etchy@v0.2.0` runs the v0.2.0 binary.
 #                  Otherwise (a branch or SHA) the latest release is used.
 #   RUNNER_OS, RUNNER_ARCH, RUNNER_TEMP   set by the runner
 #   ETCHY_RELEASES optional releases base URL (default: the GitHub repo). Point
@@ -32,7 +32,7 @@ if [ -z "$tag" ] || [ "$tag" = "latest" ]; then
     || fail "could not look up the latest release at $base/latest"
   tag="${url##*/}"
 fi
-[[ "$tag" =~ $tag_re ]] || fail "version '$tag' is not a release tag like v0.1.2"
+[[ "$tag" =~ $tag_re ]] || fail "version '$tag' is not a release tag like v0.2.0"
 
 case "${RUNNER_OS:-}/${RUNNER_ARCH:-}" in
   Linux/X64)   plat=linux-x86_64;   ext=tar.gz; exe=etchy ;;

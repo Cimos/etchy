@@ -21,7 +21,7 @@ etchy-diff:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       changes: ["fab/**/*"]
   variables:
-    ETCHY_VERSION: v0.1.2
+    ETCHY_VERSION: v0.2.0
     OLD_DIR: fab/rev-a
     NEW_DIR: fab/rev-b
   script:
