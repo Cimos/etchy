@@ -7,7 +7,10 @@
 //!  2. `committed_corpus_*` — if `corpus/synthetic/{revA,revB}` + `ground_truth.json`
 //!     are present on disk, validate against them too (the files verified against
 //!     the frozen v0.11 tool). Skipped with a notice when absent (they're
-//!     gitignored — regenerate via `corpus/tools/gen_synth_board.py`).
+//!     gitignored — regenerate via `corpus/tools/gen_synth_board.py`), unless
+//!     `ETCHY_REQUIRE_CORPUS=1` is set, in which case absence is a failure. CI's
+//!     ubuntu job generates the corpus and sets it, so this test cannot
+//!     silently stop running there.
 //!
 //! The contract (from `gen_synth_board.py` / `ground_truth.json`): `F_Cu` gains a
 //! 10×10 pad block (added), `In1_Cu` loses one (removed), every other layer is
@@ -118,6 +121,16 @@ fn committed_corpus_matches_ground_truth() {
         root.join("ground_truth.json"),
     );
     if !(rev_a.is_dir() && rev_b.is_dir() && gt.is_file()) {
+        // CI generates the corpus and sets this so a broken generator fails the
+        // job instead of silently skipping the deep cross-check.
+        if std::env::var_os("ETCHY_REQUIRE_CORPUS").is_some_and(|v| v == "1") {
+            panic!(
+                "ETCHY_REQUIRE_CORPUS=1 but {} is not populated \
+                 (expected revA/, revB/, ground_truth.json — run \
+                 corpus/tools/gen_synth_board.py)",
+                root.display()
+            );
+        }
         eprintln!(
             "SKIP committed_corpus_matches_ground_truth: {} not populated \
              (gitignored — run corpus/tools/gen_synth_board.py to enable)",
@@ -161,6 +174,19 @@ fn committed_corpus_matches_ground_truth() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
+
+    // Every layer the ground truth names must be on disk in both revs, or a
+    // partially generated corpus would pass while checking nothing.
+    let expected: std::collections::BTreeSet<&str> = changed
+        .keys()
+        .map(String::as_str)
+        .chain(unchanged.iter().copied())
+        .collect();
+    assert!(!expected.is_empty(), "ground_truth.json names no layers");
+    for name in &expected {
+        assert!(a.contains_key(*name), "revA missing layer {name}");
+        assert!(b.contains_key(*name), "revB missing layer {name}");
+    }
 
     for (name, ca) in &a {
         let cb = &b[name];
