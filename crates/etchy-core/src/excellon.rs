@@ -9,10 +9,14 @@
 //! **Trust bar.** Excellon's Achilles heel is coordinate decoding: zero
 //! suppression (`LZ`/`TZ`) and the integer/decimal split are declared in the
 //! header (or not at all), and getting them wrong silently moves holes. So we
-//! fail loud on an ambiguous header (no units, or suppressed coordinates with no
-//! declared mode) rather than guess — a wrong hole position is exactly the silent
-//! miss etchy exists to prevent. Anything we can't render faithfully (incremental
-//! coordinates, arc routing) is a loud [`EngineError`], never a quiet drop.
+//! fail loud on an ambiguous header (no units, suppressed coordinates with no
+//! declared mode, or `LZ` coordinates with no declared digit split) rather than
+//! guess — a wrong hole position is exactly the silent miss etchy exists to
+//! prevent. (TZ coordinates with no declared split use the conventional decimal
+//! count, 2.4 inch / 3.3 metric: TZ decoding depends only on that count, and
+//! it is what real `INCH,TZ` exporters emit without a format line.) Anything
+//! we can't render faithfully (incremental coordinates, arc routing) is a loud
+//! [`EngineError`], never a quiet drop.
 
 use crate::error::{EngineError, Result};
 use crate::geo::{snap_nm, Contour, PolygonSet};
@@ -53,7 +57,9 @@ impl Units {
             Units::Metric => 1.0e6,
         }
     }
-    /// Conventional integer.decimal split when a file doesn't state one.
+    /// Conventional integer.decimal split when a file doesn't state one. Only
+    /// trusted for TZ / explicit-decimal coordinates; an undeclared split under
+    /// LZ fails loud in [`Format::decode`].
     fn default_format(self) -> (usize, usize) {
         match self {
             Units::Inch => (2, 4),
@@ -69,6 +75,11 @@ struct Format {
     zeros: Option<Zeros>,
     int_digits: usize,
     dec_digits: usize,
+    /// Whether the header declared the digit split (`;FILE_FORMAT=i:d`,
+    /// `;FORMAT={i:d/…}`, `METRIC,LZ,000.000`) rather than it being the per-units
+    /// default. Only `LZ` decoding depends on the integer digit count, so only an
+    /// `LZ` coordinate refuses an undeclared split (#319).
+    declared: bool,
 }
 
 impl Format {
@@ -102,6 +113,18 @@ impl Format {
                         .into(),
                 )
             })?;
+            // LZ keeps leading zeros, so the value hinges on how many integer
+            // digits the field has: a 4.2 file decoded as the 3.3 default puts
+            // every hole at one-tenth the distance. TZ right-aligns against the
+            // decimal count, which the conventional default fixes (2.4 inch / 3.3
+            // metric is what headerless-format TZ exporters emit).
+            if zeros == Zeros::Leading && !self.declared {
+                return Err(EngineError::Parse(format!(
+                    "drill coordinate '{field}' is leading-zero (LZ) with no decimal point, \
+                     but the header declares no digit format (e.g. ;FILE_FORMAT=3:3 or \
+                     METRIC,LZ,000.000) — refusing to guess the integer/decimal split"
+                )));
+            }
             if mag.len() > total {
                 return Err(EngineError::Parse(format!(
                     "drill coordinate '{field}' has more digits than the {}.{} format",
@@ -219,13 +242,30 @@ fn resolve_excellon_inner(bytes: &[u8]) -> Result<PolygonSet> {
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
 
+    let body_start = if lines.contains(&"M48") {
+        lines
+            .iter()
+            .position(|l| *l == "%" || *l == "M95")
+            .map(|i| i + 1)
+            .ok_or_else(|| {
+                EngineError::Parse("M48 header never terminated (missing % or M95)".into())
+            })?
+    } else {
+        0
+    };
+
     // ---- Pass 1: header facts, from all lines ----
+    // Tool diameters are seeded only from the M48 header. Body definitions
+    // (and every definition in a headerless file) are applied in file order by
+    // `Body::step`, so a definition never reaches back to hits or selects that
+    // precede it (#310).
     let mut units: Option<Units> = None;
     let mut zeros: Option<Zeros> = None;
     let mut fmt_digits: Option<(usize, usize)> = None;
     let mut tools: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
-    for line in &lines {
-        parse_header_line(line, &mut units, &mut zeros, &mut fmt_digits, &mut tools)?;
+    for (i, line) in lines.iter().enumerate() {
+        let tools = (i < body_start).then_some(&mut tools);
+        parse_header_line(line, &mut units, &mut zeros, &mut fmt_digits, tools)?;
     }
 
     let units = units.ok_or_else(|| {
@@ -242,21 +282,11 @@ fn resolve_excellon_inner(bytes: &[u8]) -> Result<PolygonSet> {
         zeros,
         int_digits,
         dec_digits,
+        declared: fmt_digits.is_some(),
     };
     let unit_nm = units.to_nm();
 
     // ---- Pass 2: body ----
-    let body_start = if lines.contains(&"M48") {
-        lines
-            .iter()
-            .position(|l| *l == "%" || *l == "M95")
-            .map(|i| i + 1)
-            .ok_or_else(|| {
-                EngineError::Parse("M48 header never terminated (missing % or M95)".into())
-            })?
-    } else {
-        0
-    };
     let mut m = Body::new(fmt, unit_nm, tools);
     for line in &lines[body_start..] {
         m.step(line)?;
@@ -272,7 +302,7 @@ fn parse_header_line(
     units: &mut Option<Units>,
     zeros: &mut Option<Zeros>,
     fmt_digits: &mut Option<(usize, usize)>,
-    tools: &mut std::collections::HashMap<u32, f64>,
+    tools: Option<&mut std::collections::HashMap<u32, f64>>,
 ) -> Result<()> {
     if line.is_empty() || line.starts_with(';') {
         // KiCad-style `;FILE_FORMAT=3:3` comment can still carry the digit split.
@@ -299,22 +329,29 @@ fn parse_header_line(
         return Ok(());
     }
     if let Some((num, dia)) = is_tool_def(line) {
-        let d: f64 = dia
-            .parse()
-            .map_err(|_| EngineError::Parse(format!("bad tool diameter in '{line}'")))?;
-        // A digit run long enough to overflow f64 parses as `inf`; it would reach
-        // the geometry builders and saturate the nm cast (#308). Units aren't
-        // known yet here, so the range check happens at select time.
-        if !d.is_finite() {
-            return Err(EngineError::Parse(format!(
-                "tool diameter in '{line}' is not a finite number"
-            )));
+        if let Some(tools) = tools {
+            tools.insert(num, parse_tool_dia(line, dia)?);
         }
-        tools.insert(num, d);
         return Ok(());
     }
     // FMAT,2 / VER,1 / M-codes etc. — ignored.
     Ok(())
+}
+
+/// Parse a tool-definition diameter (in file units). A digit run long enough to
+/// overflow f64 parses as `inf`; it would reach the geometry builders and
+/// saturate the nm cast (#308). Units may not be known yet, so the range check
+/// happens at select time.
+fn parse_tool_dia(line: &str, dia: &str) -> Result<f64> {
+    let d: f64 = dia
+        .parse()
+        .map_err(|_| EngineError::Parse(format!("bad tool diameter in '{line}'")))?;
+    if !d.is_finite() {
+        return Err(EngineError::Parse(format!(
+            "tool diameter in '{line}' is not a finite number"
+        )));
+    }
+    Ok(d)
 }
 
 /// `,LZ` / `,TZ` suffix on an `INCH`/`METRIC` line.
@@ -412,6 +449,12 @@ impl Body {
                 return Ok(());
             }
             "M30" | "M00" | "M95" | "G05" | "G90" | "T0" => return Ok(()),
+            // Incremental coordinates would silently move every later hole (#309).
+            "G91" => {
+                return Err(EngineError::Unsupported {
+                    feature: "Excellon incremental coordinates (G91)".into(),
+                })
+            }
             _ => {}
         }
         // Rout arcs aren't rendered faithfully yet — fail loud rather than drop.
@@ -419,6 +462,16 @@ impl Body {
             return Err(EngineError::Unsupported {
                 feature: "Excellon arc routing (G02/G03)".into(),
             });
+        }
+        // Body tool change with an inline diameter (`T2C0.040`, or Altium's
+        // `T2F00S00C0.040`): (re)define the tool for subsequent hits only, then
+        // select it (#310). Checked before the bare select, which would otherwise
+        // take a feed-led definition as a plain select.
+        if let Some((t, dia)) = is_tool_def(line) {
+            let d = parse_tool_dia(line, dia)?;
+            self.tools.insert(t, d);
+            self.select_tool(t)?;
+            return Ok(());
         }
         // Bare tool select.
         if let Some(t) = tool_select(line) {
@@ -506,6 +559,8 @@ impl Body {
         // G85 canned slot: "X..Y..G85X..Y.." — from the first coord to the second.
         if let Some(gpos) = line.find("G85") {
             let (from, to) = line.split_at(gpos);
+            reject_g_words(from, line)?;
+            reject_g_words(&to[3..], line)?;
             let (x1, y1) = self.read_xy(from, self.x, self.y)?;
             let (x2, y2) = self.read_xy(&to[3..], x1, y1)?;
             self.emit_slot(x1, y1, x2, y2)?;
@@ -524,6 +579,7 @@ impl Body {
         } else {
             (line, false)
         };
+        reject_g_words(coord, line)?;
         let (nx, ny) = self.read_xy(coord, self.x, self.y)?;
         if self.routing {
             // Tool down: any move cuts a slot segment from here to there.
@@ -611,6 +667,23 @@ impl Body {
     }
 }
 
+/// Fail loud on any G-word left in a coordinate fragment once the handled one
+/// (`G00`/`G01` prefix, `G85`) is stripped. G91/G93 zero-set, G32/G33 canned
+/// circles, … change what the coordinates mean; `extract_axis` would otherwise
+/// stop at the `G` and draw a plain hit, a silent miss (#309).
+fn reject_g_words(frag: &str, line: &str) -> Result<()> {
+    let Some(gpos) = frag.find('G') else {
+        return Ok(());
+    };
+    let digits: String = frag[gpos + 1..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    Err(EngineError::Unsupported {
+        feature: format!("Excellon G{digits} on a coordinate line ('{line}')"),
+    })
+}
+
 /// Extract the numeric field following `axis` (`X`/`Y`) up to the next axis
 /// letter or a `G`/`M` word.
 fn extract_axis(frag: &str, axis: char) -> Option<&str> {
@@ -634,6 +707,7 @@ mod tests {
             zeros,
             int_digits: i,
             dec_digits: d,
+            declared: true,
         }
     }
 
@@ -694,7 +768,7 @@ mod tests {
     #[test]
     fn resolves_suppressed_coordinates() {
         // METRIC,LZ format 3.3: "010000" → 10.000 mm (leading kept, pad right).
-        let src = "M48\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nX020000Y010000\nM30\n";
+        let src = "M48\n;FILE_FORMAT=3:3\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nX020000Y010000\nM30\n";
         let ps = resolve_excellon(src.as_bytes()).unwrap();
         assert_eq!(ps.shapes.len(), 2);
         let bb = ps.bbox_nm().unwrap();
@@ -729,7 +803,7 @@ mod tests {
         // No M48 and no %/M95 terminator — a form looks_like_excellon claims via
         // units + tool defs. The body must not be eaten by header scanning
         // (review finding: silently returned an empty set).
-        let src = "INCH,LZ\nT1C0.032\nT1\nX0100Y0100\nM30\n";
+        let src = "INCH,LZ,00.0000\nT1C0.032\nT1\nX0100Y0100\nM30\n";
         let ps = resolve_excellon(src.as_bytes()).unwrap();
         assert_eq!(ps.shapes.len(), 1, "the one drill hit must survive");
         // 2.4 LZ: "0100" right-pads to 010000 → 1.0 in = 25.4 mm.
@@ -739,6 +813,61 @@ mod tests {
             (cx - 25.4).abs() < 0.1,
             "hole at 1.0 in = 25.4 mm, got {cx}"
         );
+    }
+
+    #[test]
+    fn undeclared_split_with_lz_suppressed_coords_fails_loud() {
+        // #319: METRIC,LZ with no format declaration. Decoding "010000" under
+        // a guessed 3.3 is 10 mm; under the file's real 4.2 it is 100 mm.
+        // No way to tell from the file → refuse rather than mis-place holes.
+        for src in [
+            "M48\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nM30\n",
+            "M48\nINCH,LZ\nT1C0.032\n%\nT1\nX0100Y0100\nM30\n",
+            "INCH,LZ\nT1C0.032\nT1\nX0100Y0100\nM30\n",
+        ] {
+            let err = resolve_excellon(src.as_bytes()).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("digit format") && msg.contains("LZ"),
+                "want a loud undeclared-split error, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_split_lz_with_only_decimal_coords_resolves() {
+        // The split only matters for decimal-less LZ fields: explicit decimals
+        // are unambiguous, so a METRIC,LZ file written with them still resolves.
+        let src = "M48\nMETRIC,LZ\nT1C1.000\n%\nT1\nX10.0Y10.0\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!((cx - 10.0).abs() < 0.1, "hole at 10 mm, got {cx}");
+    }
+
+    #[test]
+    fn undeclared_split_tz_uses_conventional_decimal_count() {
+        // INCH,TZ with no format line (the GUI demo's exporter form): TZ
+        // right-aligns against the decimal count, so the 2.4 default decodes
+        // "10000" as 1.0000 in regardless of the integer width.
+        let src = "M48\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!(
+            (cx - 25.4).abs() < 0.1,
+            "hole at 1.0 in = 25.4 mm, got {cx}"
+        );
+    }
+
+    #[test]
+    fn kicad_format_comment_declares_the_lz_split() {
+        // KiCad's suppressed-zero export carries `; FORMAT={3:3/ …}`.
+        let src = "M48\n; FORMAT={3:3/ absolute / metric / suppress trailing zeros}\nMETRIC,LZ\nT1C1.000\n%\nT1\nX010000Y010000\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        let bb = ps.bbox_nm().unwrap();
+        let cx = (bb[0] + bb[2]) as f64 / 2.0 / 1e6;
+        assert!((cx - 10.0).abs() < 0.1, "hole at 10 mm, got {cx}");
     }
 
     #[test]
@@ -973,6 +1102,90 @@ mod tests {
         ];
         for inp in inputs {
             let _ = resolve_excellon(inp); // Ok or Err — must not panic.
+        }
+    }
+
+    fn area(src: &str) -> f64 {
+        resolve_excellon(src.as_bytes()).unwrap().area_mm2()
+    }
+
+    fn one_hole(d: f64) -> f64 {
+        area(&format!("M48\nMETRIC,TZ\nT1C{d}\n%\nT1\nX1.0Y1.0\nM30\n"))
+    }
+
+    #[test]
+    fn body_tool_def_selects_and_redefines_forward_only() {
+        // #310: header T1=0.2, T2=0.3; body `T2C0.4` must select T2 at 0.4 for the
+        // third hole, and must not retroactively resize the earlier T2 hole.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\nT2C0.300\n%\n\
+                   T1\nX1.0Y1.0\nT2\nX5.0Y1.0\nT2C0.400\nX10.0Y1.0\nM30\n";
+        let ps = resolve_excellon(src.as_bytes()).unwrap();
+        assert_eq!(ps.shapes.len(), 3);
+        let want = one_hole(0.2) + one_hole(0.3) + one_hole(0.4);
+        assert!(
+            (ps.area_mm2() - want).abs() < 1e-6,
+            "got {} want {want}",
+            ps.area_mm2()
+        );
+    }
+
+    #[test]
+    fn body_tool_def_switches_from_previous_tool() {
+        // The exact #310 scenario: `T2C0.040` after T1 must not keep T1 active.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\nT2C0.300\n%\nT1\nT2C0.400\nX1.0Y1.0\nM30\n";
+        assert!((area(src) - one_hole(0.4)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn body_tool_def_does_not_reach_back_to_earlier_select() {
+        // Review on #400: a later body-only `T2C…` must not make an earlier bare
+        // `T2` valid — the select precedes any definition, so fail loud.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\n%\nT2\nX1.0Y1.0\nT2C0.400\nX2.0Y1.0\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Parse(_))
+        ));
+        // Headerless: definitions apply in file order too.
+        let src = "METRIC,TZ\nT1\nX1.0Y1.0\nT1C0.400\nM30\n";
+        assert!(resolve_excellon(src.as_bytes()).is_err());
+        let src = "METRIC,TZ\nT1C0.400\nT1\nX1.0Y1.0\nM30\n";
+        assert!((area(src) - one_hole(0.4)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn body_feed_led_tool_def_is_a_definition() {
+        // Altium-style feed-before-diameter in the body still (re)defines.
+        let src = "M48\nMETRIC,TZ\nT1C0.200\n%\nT1F00S00C0.400\nX1.0Y1.0\nM30\n";
+        assert!((area(src) - one_hole(0.4)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn incremental_g91_fails_loud() {
+        // #309: G91 used to be ignored and later coordinates decoded as absolute.
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nG91\nX10.0Y10.0\nX5.0Y0\nM30\n";
+        assert!(matches!(
+            resolve_excellon(src.as_bytes()),
+            Err(EngineError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_g_word_on_coordinate_line_fails_loud() {
+        for line in [
+            "G93X0Y0",
+            "G91X1.0Y1.0",
+            "G33X0.5Y0.0",
+            "X1.0Y1.0G85X2.0Y2.0G91",
+            "G91X1.0Y1.0G85X2.0Y2.0",
+        ] {
+            let src = format!("M48\nMETRIC,TZ\nT1C0.500\n%\nT1\n{line}\nM30\n");
+            assert!(
+                matches!(
+                    resolve_excellon(src.as_bytes()),
+                    Err(EngineError::Unsupported { .. })
+                ),
+                "{line} must fail loud"
+            );
         }
     }
 }

@@ -153,11 +153,7 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
                 path.display()
             );
         }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
+        let name = file_label(&path);
         // Aggregate guard, also pre-read (#326).
         total += len;
         check_total(total, MAX_TOTAL_BYTES, &name)?;
@@ -165,6 +161,16 @@ pub fn load_board(dir: &Path) -> Result<(Board, Option<etchy_core::GerberFormat>
         files.push((name, bytes));
     }
     board_from_bytes(files)
+}
+
+/// A file's basename as its layer label. Lossy, never empty-on-failure: a
+/// non-UTF-8 name (a Latin-1 export on Linux) keeps its readable part and its
+/// extension, so it still classifies and stays distinguishable (#299).
+#[cfg(not(target_arch = "wasm32"))]
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Read a `.zip` fab pack (its raw bytes) into a [`Board`]. Entries are flattened
@@ -284,6 +290,24 @@ mod tests {
 
     // Minimal valid RS-274X: one 1mm circular flash at the origin.
     const MIN_GERBER: &[u8] = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_filename_keeps_label_and_classifies() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // "b\xF6rd-F_Cu.gtl" — Latin-1 ö, invalid as UTF-8 (#299).
+        let path = Path::new("/fab").join(OsStr::from_bytes(b"b\xF6rd-F_Cu.gtl"));
+        let label = file_label(&path);
+        assert!(!label.is_empty(), "label must not collapse to empty");
+        assert!(label.ends_with(".gtl"), "extension survives: {label}");
+
+        let (board, _) = board_from_bytes(vec![(label.clone(), MIN_GERBER.to_vec())]).unwrap();
+        assert_eq!(board.layers.len(), 1);
+        assert_eq!(board.layers[0].kind, LayerKind::TopCopper);
+        assert_eq!(board.layers[0].label, label);
+    }
 
     #[test]
     fn board_from_bytes_classifies_and_skips_non_gerber() {
