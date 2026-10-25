@@ -13,10 +13,14 @@ committed at `crates/etchy-gui/assets/demo/` and checked against `scripts/demo-a
 
 - `demo/index.html` — the curated page served to users. Loads the WASM with a
   **streaming progress bar** (download → indeterminate "starting engine" during
-  compile), and overlays the in-app **feedback widget** (sentiment love/issue/idea,
+  compile), and includes the feedback overlay markup and styles. The default
+  `crates/etchy-gui/index.html` shell has no feedback controls.
+- `demo/feedback-widget.js` — the only widget script, loaded by the demo page:
+  sentiment love/issue/idea,
   category, severity, optional name, auto-context incl. `window.__etchyState` =
-  layer/mode/zoom from the Rust hook). References `/etchy-gui.js` +
-  `/etchy-gui_bg.wasm` with a `?v=` cache-bust.
+  layer/mode/zoom from the Rust hook, screenshot paste/drop/browse, and
+  Ctrl/Cmd+Enter submission. It sends no User-Agent or client IP in the payload.
+  The page references `/etchy-gui.js` + `/etchy-gui_bg.wasm` with a `?v=` cache-bust.
 - `demo/etchy-server.py` — static file server **+ `POST /feedback`** → appends one
   JSON line per submission to `feedback.jsonl` (server ts + unique `id` +
   payload; the client IP and User-Agent are not recorded, #287). Bodies over
@@ -33,7 +37,8 @@ committed at `crates/etchy-gui/assets/demo/` and checked against `scripts/demo-a
 trunk build --release --filehash false --locked   # in crates/etchy-gui  -> dist/
 
 # 2. Copy artifacts + this folder's files next to each other in the serve dir:
-#    dist/etchy-gui.js, dist/etchy-gui_bg.wasm, deploy/demo/index.html, deploy/demo/etchy-server.py
+#    dist/etchy-gui.js, dist/etchy-gui_bg.wasm, deploy/demo/index.html,
+#    deploy/demo/feedback-widget.js, deploy/demo/etchy-server.py
 #    (bump the ?v= in index.html when the bundle changes, to bust browser caches)
 ```
 
