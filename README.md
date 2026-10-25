@@ -46,7 +46,7 @@ add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
 
 ```yaml
-      - uses: Cimos/etchy@v0.1.1
+      - uses: Cimos/etchy@v0.1.2
         with:
           old: fab/rev-a
           new: fab/rev-b
@@ -70,8 +70,8 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 - **Container** (headless CLI, distroless, ~11 MB):
 
   ```sh
-  docker pull ghcr.io/cimos/etchy:v0.1.1
-  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.1 --format summary /work/old /work/new
+  docker pull ghcr.io/cimos/etchy:v0.1.2
+  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.1.2 --format summary /work/old /work/new
   ```
 
   Or build it yourself with `docker build -t etchy .`.
