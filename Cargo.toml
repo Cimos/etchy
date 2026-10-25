@@ -23,6 +23,7 @@ authors = ["Cimos"]
 [workspace.dependencies]
 # engine
 i_overlay = "7"
+i_triangle = "0.45.0"
 gerber_parser = "0.5"
 gerber-types = "0.7"
 thiserror = "2"

@@ -15,7 +15,7 @@ gerber-types.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-i_triangle = "0.45.0"
+i_triangle.workspace = true
 
 # Per-layer parallelism for the diff (perf: large multi-layer boards). Native only —
 # wasm has no threads without COOP/COEP + a worker pool, so the web build stays serial
