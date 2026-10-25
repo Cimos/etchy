@@ -21,8 +21,9 @@ pub enum GeoError {
 /// `model`, and `lib`.
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum EngineError {
-    /// `gerber_parser::parse` returned its hard-error arm.
-    #[error("gerber parse failed: {0}")]
+    /// A Gerber, Excellon or placement file could not be parsed. The caller adds
+    /// the file name and kind, so the text itself stays format-neutral (#448).
+    #[error("parse failed: {0}")]
     Parse(String),
 
     /// `GerberDoc` carried per-command parse errors (we fail loud rather than

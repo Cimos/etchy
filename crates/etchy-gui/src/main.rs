@@ -1473,6 +1473,7 @@ const PDF_DPI_DEFAULT: f32 = 200.0;
 /// Fallback for the CLI-args seed (#223 review): the raster caps scale with
 /// DPI, so a pair that fit at the old 150 default must still open — it seeds at
 /// 150 when 200 breaches a cap, and the Settings chip reflects the DPI used.
+#[cfg(not(target_arch = "wasm32"))]
 const PDF_DPI_FALLBACK: f32 = 150.0;
 
 /// The Settings > Diff DPI chips (#223). Bounded choices, not a free slider —
