@@ -89,6 +89,22 @@ jobs:
         working-directory: crates/etchy-gui
         run: cargo packager --release -f wix
 
+      - name: Check the viewer executable has an icon
+        shell: pwsh
+        run: |
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class WinIcon {
+              [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "ExtractIconExW")]
+              public static extern uint Count(string file, int index, IntPtr large, IntPtr small, uint icons);
+          }
+          '@
+          $exe = (Resolve-Path 'target/release/etchy-gui.exe').Path
+          if ([WinIcon]::Count($exe, -1, [IntPtr]::Zero, [IntPtr]::Zero, 0) -lt 1) {
+            throw 'etchy-gui.exe has no icon resource'
+          }
+
       # A clean Windows install has no VC++ runtime, so .cargo/config.toml links
       # it statically. Fail here if either binary still needs the DLL (#415).
       - name: Check the binaries need no VC++ runtime
