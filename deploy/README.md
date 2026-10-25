@@ -18,8 +18,9 @@ committed at `crates/etchy-gui/assets/demo/` and checked against `scripts/demo-a
   layer/mode/zoom from the Rust hook). References `/etchy-gui.js` +
   `/etchy-gui_bg.wasm` with a `?v=` cache-bust.
 - `demo/etchy-server.py` — static file server **+ `POST /feedback`** → appends one
-  JSON line per submission to `feedback.jsonl` (server ts + IP + UA + unique
-  `id` + payload). Bodies over 16 MiB, more than 8 screenshots or a screenshot
+  JSON line per submission to `feedback.jsonl` (server ts + unique `id` +
+  payload; the client IP and User-Agent are not recorded, #287). Bodies over
+  16 MiB, more than 8 screenshots or a screenshot
   over 8 MiB decoded are refused with 413 and nothing is written (#250).
   Refuses to serve the feedback file, the `screenshots/` dir beside it, itself,
   or any directory listing (#334). Tests: `python3 -m unittest

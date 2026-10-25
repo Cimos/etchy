@@ -242,6 +242,25 @@ class PostLimitTests(unittest.TestCase):
         self.assertNotEqual(b["id"], "mine")
         self.assertNotEqual(a["id"], b["id"])
 
+    def test_ip_and_user_agent_are_not_recorded(self):
+        import json
+        body = json.dumps({"text": "hi", "ip": "1.2.3.4", "ua": "spoof",
+                           "ctx": {"ua": "Mozilla/5.0", "screen": "1x1"},
+                           "screenshots": [self.png(10)]}).encode()
+        status = self.post(body, {"Content-Length": str(len(body)),
+                                  "User-Agent": "TestAgent/1.0"})
+        self.assertEqual(status, 200)
+        (rec,) = self.records()
+        self.assertNotIn("ip", rec)
+        self.assertNotIn("ua", rec)
+        self.assertEqual(rec["ctx"], {"screen": "1x1"})
+        with open(self.feedback, encoding="utf-8") as f:
+            raw = f.read()
+        for leak in ("127.0.0.1", "TestAgent", "Mozilla", "1.2.3.4", "spoof"):
+            self.assertNotIn(leak, raw)
+        (shot,) = self.shot_files()
+        self.assertNotIn("127.0.0.1", shot)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -58,6 +58,35 @@ class DedupeTests(unittest.TestCase):
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0]["text"], "looks good")
 
+    def test_legacy_ip_and_user_agent_are_dropped(self):
+        legacy = dict(BASE, ua="Mozilla/5.0", ctx={"ua": "Mozilla/5.0", "lang": "en"})
+        (r,) = self.load({"h.jsonl": [legacy]})
+        self.assertNotIn("ip", r)
+        self.assertNotIn("ua", r)
+        self.assertEqual(r["ctx"], {"lang": "en"})
+        self.assertEqual(r["text"], "looks good")
+
+    def test_merged_output_has_no_ip_or_user_agent(self):
+        import contextlib
+        import io
+        import sys
+        legacy = dict(BASE, ua="Mozilla/5.0", ctx={"ua": "Mozilla/5.0"})
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "h.jsonl"), "w", encoding="utf-8") as f:
+                f.write(json.dumps(legacy) + "\n")
+            old_dir, old_argv = cf.FEEDBACK_DIR, sys.argv
+            cf.FEEDBACK_DIR, sys.argv = d, ["collect-feedback.py", "--merged"]
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(cf.main(), 0)
+            finally:
+                cf.FEEDBACK_DIR, sys.argv = old_dir, old_argv
+        text = out.getvalue()
+        for leak in ("10.0.0.5", "Mozilla", '"ip"', '"ua"', "_src"):
+            self.assertNotIn(leak, text)
+        self.assertEqual(json.loads(text)["text"], "looks good")
+
 
 if __name__ == "__main__":
     unittest.main()
