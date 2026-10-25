@@ -291,7 +291,8 @@ fn main() -> std::process::ExitCode {
     native::run()
 }
 
-/// The bundled demo board (gitignored, embedded at compile time). A layer that
+/// The bundled demo board (committed and hash-checked by
+/// scripts/check-demo-assets.sh, embedded at compile time). A layer that
 /// fails to parse is skipped rather than crashing the demo.
 #[cfg(target_arch = "wasm32")]
 fn board_from_files(
