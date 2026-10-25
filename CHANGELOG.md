@@ -10,6 +10,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 ## [Unreleased]
 
 ### Fixed
+- Drill plating is read from whole filename words instead of substrings
+  (#237): an `Unplated` / `Not_Plated` drill file is now non-plated rather
+  than plated, and a word that merely contains `PTH` (such as `depth`) no
+  longer marks a file as plated. Camel-case names such as `BoardNPTH` and
+  `Board-NonPlated` are still recognised, so a plated drill file can't be
+  paired against a non-plated one.
 - **Non-UTF-8 filenames keep their label (#299):** a layer file whose name isn't
   valid UTF-8 (e.g. a Latin-1 export on Linux) was labelled `""` and classified
   as Other; the CLI and viewer now use a lossy name, so the label stays readable

@@ -228,25 +228,65 @@ pub fn reconcile_kind(
 }
 
 /// Detect drill plating from a filename stem (#237). Fab tools mark plated vs
-/// non-plated holes with `PTH` / `NPTH` (KiCad `*-PTH.drl` / `*-NPTH.drl`, Altium
-/// split drills) or the spelled-out `PLATED` / `NON-PLATED`. NPTH is checked
-/// first because `NPTH` and `NON-PLATED` both contain the plated marker. A stem
-/// with no marker (a combined `.drl`, or Altium's `Board.TXT`) is `Unspecified`.
+/// non-plated holes with `PTH` / `NPTH` (KiCad `*-PTH.drl` / `*-NPTH.drl`,
+/// EasyEDA `Drill_PTH_Through` / `Drill_NPTH_Through`) or spelled out (Altium
+/// `*-Plated.TXT` / `*-NonPlated.TXT`, `NON_PLATED`, `Unplated`). A stem with no
+/// marker (KiCad's combined `Board.drl`, Altium's `Board.TXT`, Eagle `.drd`/
+/// `.xln`) is `Unspecified`.
+///
+/// Matching is on whole **tokens** — split at `-`/`_`/space/`.` and at
+/// lower→upper camel-case humps — not substrings: a substring test read
+/// `UNPLATED` as plated (it contains `PLATED`) and any word containing `PTH`
+/// (`DEPTH`) as a plated drill, which would bucket the file with the wrong kind
+/// and let it pair against an unrelated drill file across revisions.
 pub fn drill_kind(stem: &str) -> DrillKind {
-    // Uppercase and fold `_`/space to `-` so `NON_PLATED`/`NON PLATED` read the
-    // same as `NON-PLATED`.
-    let s: String = stem
-        .to_ascii_uppercase()
-        .chars()
-        .map(|c| if c == '_' || c == ' ' { '-' } else { c })
-        .collect();
-    if s.contains("NPTH") || s.contains("NON-PLATED") || s.contains("NONPLATED") {
+    let tokens = name_tokens(stem);
+    let negator = |t: &str| matches!(t, "NON" | "NOT" | "UN" | "NO");
+    let non_plated = tokens.iter().enumerate().any(|(i, t)| {
+        matches!(t.as_str(), "NPTH" | "NONPLATED" | "UNPLATED" | "NOTPLATED")
+            || (t == "PLATED" && i > 0 && negator(&tokens[i - 1]))
+    });
+    if non_plated {
         DrillKind::NonPlated
-    } else if s.contains("PTH") || s.contains("PLATED") {
+    } else if tokens.iter().any(|t| t == "PTH" || t == "PLATED") {
         DrillKind::Plated
     } else {
         DrillKind::Unspecified
     }
+}
+
+/// Split a filename stem into uppercase word tokens: at any non-alphanumeric
+/// character, at a lower→upper case hump (`NonPlated` → `NON`, `PLATED`), at
+/// the end of an acronym that runs into a capitalised word (`PTHDrill` → `PTH`,
+/// `DRILL`), and at a letter↔digit boundary (`NPTH2` → `NPTH`, `2`). An
+/// all-caps run with no such boundary stays one token.
+fn name_tokens(stem: &str) -> Vec<String> {
+    let chars: Vec<char> = stem.chars().collect();
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        if let Some(&p) = i.checked_sub(1).and_then(|j| chars.get(j)) {
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_ascii_lowercase());
+            let boundary = (p.is_ascii_lowercase() && c.is_ascii_uppercase())
+                || (p.is_ascii_uppercase() && c.is_ascii_uppercase() && next_lower)
+                || (p.is_ascii_alphabetic() && c.is_ascii_digit())
+                || (p.is_ascii_digit() && c.is_ascii_alphabetic());
+            if boundary && !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(c.to_ascii_uppercase());
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 /// Extract the inner-copper index from an uppercased stem: `IN<digits>` followed
@@ -385,6 +425,45 @@ mod tests {
         assert_eq!(drill_kind("board Non Plated"), DrillKind::NonPlated);
         assert_eq!(drill_kind("board-plated"), DrillKind::Plated);
         assert_eq!(drill_kind("Board.TXT-ish"), DrillKind::Unspecified);
+    }
+
+    #[test]
+    fn drill_kind_covers_vendor_naming() {
+        use DrillKind::*;
+        let cases = [
+            // KiCad split + combined.
+            ("Mad_RP2040-PTH", Plated),
+            ("Mad_RP2040-NPTH", NonPlated),
+            ("Mad_RP2040", Unspecified),
+            // Altium split drills (`.TXT`, routed here by the Excellon sniff).
+            ("Board-Plated", Plated),
+            ("Board-NonPlated", NonPlated),
+            ("Board-RoundHoles", Unspecified),
+            ("Board", Unspecified),
+            // EasyEDA.
+            ("Drill_PTH_Through", Plated),
+            ("Drill_PTH_Through_Via", Plated),
+            ("Drill_NPTH_Through", NonPlated),
+            // Eagle CAM (no plating marker).
+            ("board.drills", Unspecified),
+            // Camel-case and other negations.
+            ("BoardNPTH", NonPlated),
+            ("PTHDrill", Plated),
+            ("NPTHDrill", NonPlated),
+            ("board-PTH2", Plated),
+            ("board_NPTH2", NonPlated),
+            ("RP2040", Unspecified),
+            ("board-Unplated", NonPlated),
+            ("board_not_plated", NonPlated),
+            ("board-non-plated", NonPlated),
+            // Substring false positives a token match must not take.
+            ("board-depth", Unspecified),
+            ("board-unplated-holes", NonPlated),
+            ("platedness", Unspecified),
+        ];
+        for (stem, want) in cases {
+            assert_eq!(drill_kind(stem), want, "{stem}");
+        }
     }
 
     // ---- #239: X2 .FileFunction attribute cross-check ----
