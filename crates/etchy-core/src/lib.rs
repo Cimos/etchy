@@ -32,7 +32,8 @@ pub mod view;
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
 pub use error::{EngineError, GeoError, Result};
 pub use excellon::{
-    looks_like_excellon, resolve_excellon, resolve_excellon_with_tools, DrillTools, ToolCount,
+    looks_like_excellon, resolve_excellon, resolve_excellon_detailed, resolve_excellon_with_tools,
+    DrillTools, ResolvedDrill, ToolCount,
 };
 pub use export::{
     board_areas_csv, board_report_html, board_report_html_with_limit, layer_svg,

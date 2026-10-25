@@ -715,10 +715,12 @@ fn board_from_files(
             // (PTH/NPTH) still comes from the filename so a misnamed-but-marked
             // file (e.g. `board-NPTH.txt`) keeps its plating (#237).
             kind = etchy_core::LayerKind::Drill(etchy_core::drill_kind(stem));
-            let (geometry, tools) = etchy_core::resolve_excellon_with_tools(&bytes)
+            let drill = etchy_core::resolve_excellon_detailed(&bytes)
                 .with_context(|| format!("processing drill layer {name}"))?;
-            drill_tools = Some(tools);
-            std::sync::Arc::new(geometry)
+            drill_tools = Some(drill.tools);
+            // An assumed digit format (TZ, no format line, #429) is a warning.
+            warnings.extend(drill.warnings.into_iter().map(|w| format!("{name}: {w}")));
+            std::sync::Arc::new(drill.geometry)
         } else if etchy_core::looks_like_placement(&bytes) {
             kind = etchy_core::LayerKind::Placement;
             std::sync::Arc::new(
@@ -1035,6 +1037,25 @@ mod tests {
             board.layers[0].kind,
             etchy_core::LayerKind::Drill(etchy_core::DrillKind::Unspecified)
         );
+    }
+
+    #[test]
+    fn assumed_tz_drill_format_is_a_named_warning() {
+        // #429: a TZ drill with no format line still loads, and the assumed
+        // split reaches the warnings list (and so the summary and JSON).
+        let drl = b"M48\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n".to_vec();
+        let (board, _, warnings) =
+            board_from_files(vec![("board-PTH.drl".to_string(), drl)]).unwrap();
+        assert_eq!(board.layers.len(), 1);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("board-PTH.drl: no digit format declared; assuming 2:4"),
+            "{warnings:?}"
+        );
+        // A declared format is silent.
+        let drl = b"M48\n;FILE_FORMAT=2:4\nINCH,TZ\nT1C0.032\n%\nT1\nX10000Y10000\nM30\n".to_vec();
+        let (_, _, warnings) = board_from_files(vec![("board-PTH.drl".to_string(), drl)]).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

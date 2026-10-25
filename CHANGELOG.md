@@ -66,6 +66,14 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   selects that tool. Before, the previous tool stayed active. A body
   redefinition now applies only to the hits that follow it, not to earlier
   ones (#310).
+- Drill plating is read from all-caps filename stems with no separator:
+  `BOARDPTH` is plated and `BOARDNPTH` non-plated, where both were generic
+  drill files. Inside a word written in capitals, a `PTH` / `NPTH` prefix or
+  suffix counts (`NPTH` first); `DEPTH` and lower-case words still don't
+  match (#430).
+- Excellon: a tool definition whose diameter can't be read (`T2Cbad`,
+  `T2C`) now fails loud and names the line. Before, it was skipped and the
+  next hit used the previous tool (#428).
 - Excellon: body `G91` (incremental coordinates) now fails loud instead of
   being ignored. So does any other unrecognised G-code on a coordinate line,
   such as `G93` or `G32`/`G33`, which used to be drawn as plain hits (#309).
@@ -74,6 +82,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   guessed 2.4 / 3.3 split, so a 4.2 file put every hole at one-tenth the
   distance. `TZ` files keep the conventional default, which their decoding
   depends on only through the decimal count (#319).
+- Excellon: a trailing-zero (`TZ`) drill file with decimal-less coordinates
+  and no declared digit format still uses the conventional 2:4 inch / 3:3
+  metric split (KiCad's minimal-header export relies on it), but now says so
+  with a warning in the summary and JSON naming the file and what to add to
+  the header (`;FILE_FORMAT=2:4` or `INCH,TZ,00.0000`). Before, the guess
+  was silent (#429).
 - Pick-and-place files: a data row whose position or rotation can't be read
   (e.g. an unquoted multi-word description or an unexpected column layout) now
   fails the file with the row count and line numbers, instead of the component

@@ -239,16 +239,30 @@ pub fn reconcile_kind(
 /// `UNPLATED` as plated (it contains `PLATED`) and any word containing `PTH`
 /// (`DEPTH`) as a plated drill, which would bucket the file with the wrong kind
 /// and let it pair against an unrelated drill file across revisions.
+///
+/// One exception to whole tokens: an all-caps run has no hump to split at, so
+/// `BOARDPTH` / `BOARDNPTH` would be one token and lose their plating (#430).
+/// Inside a token written in capitals, a `PTH` / `NPTH` prefix or suffix
+/// counts. `NPTH` is checked first, since every `NPTH` also ends in `PTH`; the
+/// cost is that a name ending in N before a plated suffix (`MAINPTH`) reads as
+/// non-plated. A suffix that is the end of `DEPTH` doesn't count, and a token
+/// with any lower-case letter (`Boardpth`, `depth`) never takes the affix rule.
 pub fn drill_kind(stem: &str) -> DrillKind {
     let tokens = name_tokens(stem);
     let negator = |t: &str| matches!(t, "NON" | "NOT" | "UN" | "NO");
-    let non_plated = tokens.iter().enumerate().any(|(i, t)| {
+    let non_plated = tokens.iter().enumerate().any(|(i, (t, caps))| {
         matches!(t.as_str(), "NPTH" | "NONPLATED" | "UNPLATED" | "NOTPLATED")
-            || (t == "PLATED" && i > 0 && negator(&tokens[i - 1]))
+            || (t == "PLATED" && i > 0 && negator(&tokens[i - 1].0))
+            || (*caps && (t.starts_with("NPTH") || t.ends_with("NPTH")))
+    });
+    let plated = tokens.iter().any(|(t, caps)| {
+        t == "PTH"
+            || t == "PLATED"
+            || (*caps && (t.starts_with("PTH") || (t.ends_with("PTH") && !t.ends_with("DEPTH"))))
     });
     if non_plated {
         DrillKind::NonPlated
-    } else if tokens.iter().any(|t| t == "PTH" || t == "PLATED") {
+    } else if plated {
         DrillKind::Plated
     } else {
         DrillKind::Unspecified
@@ -259,16 +273,22 @@ pub fn drill_kind(stem: &str) -> DrillKind {
 /// character, at a lower→upper case hump (`NonPlated` → `NON`, `PLATED`), at
 /// the end of an acronym that runs into a capitalised word (`PTHDrill` → `PTH`,
 /// `DRILL`), and at a letter↔digit boundary (`NPTH2` → `NPTH`, `2`). An
-/// all-caps run with no such boundary stays one token.
-fn name_tokens(stem: &str) -> Vec<String> {
+/// all-caps run with no such boundary stays one token. Each token carries
+/// whether it was written entirely in capitals.
+fn name_tokens(stem: &str) -> Vec<(String, bool)> {
     let chars: Vec<char> = stem.chars().collect();
     let mut tokens = Vec::new();
     let mut cur = String::new();
+    let mut caps = true;
+    let mut flush = |cur: &mut String, caps: &mut bool| {
+        if !cur.is_empty() {
+            tokens.push((std::mem::take(cur), *caps));
+        }
+        *caps = true;
+    };
     for (i, &c) in chars.iter().enumerate() {
         if !c.is_ascii_alphanumeric() {
-            if !cur.is_empty() {
-                tokens.push(std::mem::take(&mut cur));
-            }
+            flush(&mut cur, &mut caps);
             continue;
         }
         if let Some(&p) = i.checked_sub(1).and_then(|j| chars.get(j)) {
@@ -277,15 +297,14 @@ fn name_tokens(stem: &str) -> Vec<String> {
                 || (p.is_ascii_uppercase() && c.is_ascii_uppercase() && next_lower)
                 || (p.is_ascii_alphabetic() && c.is_ascii_digit())
                 || (p.is_ascii_digit() && c.is_ascii_alphabetic());
-            if boundary && !cur.is_empty() {
-                tokens.push(std::mem::take(&mut cur));
+            if boundary {
+                flush(&mut cur, &mut caps);
             }
         }
+        caps &= !c.is_ascii_lowercase();
         cur.push(c.to_ascii_uppercase());
     }
-    if !cur.is_empty() {
-        tokens.push(cur);
-    }
+    flush(&mut cur, &mut caps);
     tokens
 }
 
@@ -463,6 +482,50 @@ mod tests {
         ];
         for (stem, want) in cases {
             assert_eq!(drill_kind(stem), want, "{stem}");
+        }
+    }
+
+    #[test]
+    fn drill_kind_reads_pth_affix_in_all_caps_stems() {
+        // #430: an all-caps run has no hump to split at, so the marker is read
+        // as a prefix or suffix of the capitalised token. NPTH wins over PTH.
+        use DrillKind::*;
+        let cases = [
+            ("BOARDPTH", Plated),
+            ("BOARDNPTH", NonPlated),
+            ("PTHBOARD", Plated),
+            ("NPTHBOARD", NonPlated),
+            ("REV_A_BOARDPTH", Plated),
+            ("REV_A_BOARDNPTH", NonPlated),
+            ("MYBOARDNPTH2", NonPlated),
+            ("myBOARDPTH", Plated),
+            // Known limit of NPTH-first: a name ending in N before a plated
+            // suffix reads as non-plated (MAIN + PTH vs MAI + NPTH).
+            ("MAINPTH", NonPlated),
+        ];
+        for (stem, want) in cases {
+            assert_eq!(drill_kind(stem), want, "{stem}");
+        }
+    }
+
+    #[test]
+    fn drill_kind_pth_affix_does_not_match_inside_words() {
+        // The affix rule must not bring back the substring false positives of
+        // #237 / #304: `DEPTH` ends in PTH, and lower-case or mixed-case words
+        // never take the affix rule.
+        let cases = [
+            "BOARD-DEPTH",
+            "BOARDDEPTH",
+            "DEPTH",
+            "board-depth",
+            "Boardpth",
+            "boardnpth",
+            "Board_Depth_Map",
+            "BOARD",
+            "TOPTHERMAL",
+        ];
+        for stem in cases {
+            assert_eq!(drill_kind(stem), DrillKind::Unspecified, "{stem}");
         }
     }
 

@@ -44,12 +44,12 @@ numbered requirements with their source and current status.
 | ID | Requirement | Source | Status |
 |---|---|---|---|
 | IN-1 | Gerber RS-274X and X2 parse on real fab output (Altium + KiCad exports validated; real-board fixes in the corpus). | Spike 2, #145 | ✅ |
-| IN-2 | Excellon drill parse, including headerless files, inline formats, R codes; phantom-hole and tool-line traps covered by tests. | #62, #144 | ✅ |
+| IN-2 | Excellon drill parse, including headerless files, inline formats, R codes; phantom-hole and tool-line traps covered by tests; a tool definition with an unreadable diameter fails loud; decimal-less `LZ` coordinates with no declared digit format fail loud, and `TZ` ones use the 2:4 / 3:3 default with a warning. | #62, #144, #319, #428, #429 | ✅ |
 | IN-3 | Pick-and-place centroid diff: moved/rotated/added/removed parts as geometry (`LayerKind::Placement`). | #115/#141 | ✅ |
 | IN-4 | Filename classification types every copper layer as **Copper** — including KiCad `.gl<n>` inner copper, mapped **ordinally** (`.gl2`→Inner 1) so cross-scheme pairing (`.gl2` ≡ `In1_Cu` ≡ `.g1`) works. Genuinely unknown files fall to Other. | #176 | ✅ |
 | IN-5 | Loaders accept folders, zips, and drag-and-drop (GUI); the same classification path serves CLI and GUI. On the web a dropped folder is refused with a message, since a browser can't deliver its files. | #120/#93, #331 | ✅ |
 | IN-6 | Gerber dialect coverage spans **X1 (legacy RS-274X) and X2 (attributes)**, and filename/naming schemes from the major EDA tools. Altium + KiCad shipped; additional EDA-tool schemes (Eagle, OrCAD, …) are accepted — each lands with corpus samples + classification tests. | owner 2026-07-07 | ✅ X1/X2 · 🔜 more EDA schemes |
-| IN-7 | Drill files are classified by plating — `drill-pth` / `drill-npth` / generic `drill` — from whole filename tokens (`PTH`, `NPTH`, `Plated`, `NonPlated`, `Unplated`; KiCad, Altium, EasyEDA naming), so pairing only matches like with like and a PTH file never pairs against an NPTH file. | #237 | ✅ |
+| IN-7 | Drill files are classified by plating — `drill-pth` / `drill-npth` / generic `drill` — from whole filename tokens (`PTH`, `NPTH`, `Plated`, `NonPlated`, `Unplated`; KiCad, Altium, EasyEDA naming), plus a `PTH` / `NPTH` prefix or suffix inside an all-caps word (`BOARDNPTH`), so pairing only matches like with like and a PTH file never pairs against an NPTH file. | #237, #430 | ✅ |
 | IN-8 | Gerber identity-valued deprecated image commands and layer names are accepted; parameterised aperture macros evaluate arithmetic and assignments for supported primitives. Non-identity transforms and unknown primitives fail loud. | #316 | ✅ |
 
 ## 4. Trust (top-tier requirement — gates everything)
