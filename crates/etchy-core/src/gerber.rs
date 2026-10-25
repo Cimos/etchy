@@ -359,6 +359,11 @@ struct Machine<'a> {
     /// Running sum of vertices across all pushed contours, checked against
     /// `MAX_POINTS_PER_LAYER` once per command (#83).
     total_points: usize,
+    /// Vertices buffered in the open region (`region_loops` + `cur_loop`), not yet
+    /// pushed. Charged to the point ceiling alongside `total_points` every command,
+    /// so a region that never reaches `G37` can't grow without bound (#315). Reset
+    /// when the region closes: the filled contours are then counted by `push`.
+    region_points: usize,
     /// Boolean passes spent resolving mixed-exposure macro images (#306). Each is
     /// the same kind of pass as a polarity span, so they share `MAX_SPANS_PER_LAYER`.
     macro_passes: usize,
@@ -389,6 +394,7 @@ impl<'a> Machine<'a> {
             cur_loop: Vec::new(),
             emitted: 0,
             total_points: 0,
+            region_points: 0,
             macro_passes: 0,
         }
     }
@@ -425,10 +431,12 @@ impl<'a> Machine<'a> {
         }
         // …and the total vertex count (a few huge contours) and polarity-span count
         // (O(N²) boolean passes), which the contour count alone doesn't bound (#83).
-        if self.total_points > MAX_POINTS_PER_LAYER {
+        // Points still buffered in an open region count too (#315).
+        let points = self.total_points + self.region_points;
+        if points > MAX_POINTS_PER_LAYER {
             return Err(EngineError::ObjectLimit {
                 what: "points",
-                count: self.total_points,
+                count: points,
                 limit: MAX_POINTS_PER_LAYER,
             });
         }
@@ -483,6 +491,7 @@ impl<'a> Machine<'a> {
                 }
                 if self.in_region {
                     self.cur_loop.push(to);
+                    self.region_points += 1;
                 }
                 self.cur = to;
             }
@@ -515,6 +524,7 @@ impl<'a> Machine<'a> {
         self.in_region = true;
         self.region_loops.clear();
         self.cur_loop.clear();
+        self.region_points = 0;
         Ok(())
     }
 
@@ -535,6 +545,8 @@ impl<'a> Machine<'a> {
             }
             self.region_loops.clear();
         }
+        // The buffered loops are gone; what survived the fill was charged by `push`.
+        self.region_points = 0;
         self.in_region = false;
         Ok(())
     }
@@ -547,6 +559,7 @@ impl<'a> Machine<'a> {
         // path below relies on this too — it skips the first arc point as `cur`.
         if self.cur_loop.is_empty() {
             self.cur_loop.push(self.cur);
+            self.region_points += 1;
         }
         if self.is_arc(offset) {
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
@@ -560,9 +573,12 @@ impl<'a> Machine<'a> {
                 center.1,
                 ccw,
             );
+            let before = self.cur_loop.len();
             self.cur_loop.extend(pts.into_iter().skip(1)); // first == cur (already present)
+            self.region_points += self.cur_loop.len() - before;
         } else {
             self.cur_loop.push(to);
+            self.region_points += 1;
         }
         Ok(())
     }
@@ -651,6 +667,12 @@ impl<'a> Machine<'a> {
             Some(QuadrantMode::Multi) => Ok((fx + i, fy + j)),
             // Single-quadrant (G74): I/J are magnitudes; pick the valid <=90° corner
             // or fail loud on an inconsistent arc rather than render a wrong centre.
+            // A coincident start/end is a 0° or 360° sweep — neither fits the ≤90°
+            // mode, and `arc_points` would turn it into a full ring (#321).
+            Some(QuadrantMode::Single) if to == self.cur => Err(unsupported(
+                "G74 single-quadrant arc with coincident start and end points \
+                 (ambiguous zero-length vs full circle; use G75 for a full circle)",
+            )),
             Some(QuadrantMode::Single) => geom::single_quadrant_center(
                 fx,
                 fy,
@@ -1109,6 +1131,73 @@ mod tests {
             }
             other => panic!("expected ObjectLimit(points), got {other:?}"),
         }
+    }
+
+    fn expect_point_limit(g: &str) {
+        match resolve_layer(g.as_bytes()) {
+            Err(EngineError::ObjectLimit { what, limit, count }) => {
+                assert_eq!(what, "points");
+                assert_eq!(limit, MAX_POINTS_PER_LAYER);
+                assert!(count > limit, "count {count} should exceed limit {limit}");
+            }
+            other => panic!("expected ObjectLimit(points), got {other:?}"),
+        }
+    }
+
+    /// A region whose top edge zigzags through `n` vertices (none collinear, so
+    /// the even-odd fill keeps them all), with its base at `y0` nm.
+    fn zigzag_loop(g: &mut String, y0: usize, n: usize) {
+        g.push_str(&format!("X0Y{y0}D02*\n"));
+        for i in 0..n {
+            let y = y0 + if i % 2 == 0 { 1_000_000 } else { 1_100_000 };
+            g.push_str(&format!("X{}Y{y}D01*\n", i * 1000));
+        }
+        g.push_str(&format!("X{}Y{y0}D01*\nX0Y{y0}D01*\n", (n - 1) * 1000));
+    }
+
+    #[test]
+    fn open_region_arcs_hit_point_cap_without_g37() {
+        // #315: arc points buffered in a region that never closes used to bypass
+        // the point ceiling (only `push` at `G37` counted them). Repeated full
+        // circles (>= CIRCLE_SEGMENTS points each) must trip it mid-region.
+        let n = MAX_POINTS_PER_LAYER / crate::geom::CIRCLE_SEGMENTS + 10;
+        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\nG75*\nG36*\nX1000000Y0D02*\nG03*\n");
+        for _ in 0..n {
+            g.push_str("X1000000Y0I-1000000J0D01*\n");
+        }
+        g.push_str("M02*\n"); // never closed
+        expect_point_limit(&g);
+    }
+
+    #[test]
+    fn open_region_loops_across_d02_restarts_hit_point_cap() {
+        // #315: loops already moved into `region_loops` by a `D02` restart still
+        // count, not just the loop under construction.
+        let per = MAX_POINTS_PER_LAYER / 3;
+        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\nG01*\nG36*\n");
+        for k in 0..4 {
+            zigzag_loop(&mut g, k * 2_000_000, per);
+        }
+        g.push_str("M02*\n"); // never closed: only buffered points can trip the cap
+        expect_point_limit(&g);
+    }
+
+    #[test]
+    fn closed_region_points_are_not_double_counted() {
+        // #315: buffered region points are released at `G37` and the filled result
+        // is charged by `push` instead. Two disjoint loops totalling ~60% of the
+        // ceiling must resolve: double-counting would put the layer at ~120%.
+        let per = MAX_POINTS_PER_LAYER * 3 / 10;
+        let mut g = String::from("%FSLAX46Y46*%\n%MOMM*%\nG01*\nG36*\n");
+        zigzag_loop(&mut g, 0, per);
+        zigzag_loop(&mut g, 2_000_000, per);
+        g.push_str("G37*\nM02*\n");
+        let set = resolve_layer(g.as_bytes()).expect("region under the ceiling resolves");
+        let pts: usize = set.shapes.iter().flatten().map(|c| c.len()).sum();
+        assert!(
+            pts > 2 * per,
+            "fill should keep the zigzag vertices ({pts})"
+        );
     }
 
     #[test]
@@ -1671,6 +1760,63 @@ mod tests {
         assert!(
             (a74 - a75).abs() > 0.1,
             "G74 area {a74} and G75 area {a75} must differ (mode was ignored?)"
+        );
+    }
+
+    #[test]
+    fn g74_coincident_arc_fails_loud() {
+        // #321: a G74 arc whose end equals its start is a 0° or 360° sweep — neither
+        // fits the ≤90° mode. Pre-fix it was accepted (sweep 0 ≤ max) and then
+        // `arc_points` turned 0 into 2π, silently adding a full ring of copper.
+        let r = 1_000_000;
+        let stroked = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG74*\n\
+             X{r}Y0D02*\nG03*\nX{r}Y0I{r}J0D01*\nM02*\n"
+        );
+        match resolve_layer(stroked.as_bytes()) {
+            Err(EngineError::Unsupported { feature }) => assert!(
+                feature.contains("coincident start and end"),
+                "message must name the coincident endpoints: {feature}"
+            ),
+            other => panic!("coincident G74 stroked arc must fail loud, got {other:?}"),
+        }
+        // The same inside a region (G36/G37) takes the region path and must too.
+        let region = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG74*\nG36*\n\
+             X{r}Y0D02*\nG02*\nX{r}Y0I{r}J0D01*\nG37*\nM02*\n"
+        );
+        assert!(
+            matches!(
+                resolve_layer(region.as_bytes()),
+                Err(EngineError::Unsupported { feature }) if feature.contains("coincident")
+            ),
+            "coincident G74 region arc must fail loud"
+        );
+    }
+
+    #[test]
+    fn g75_coincident_arc_is_full_circle() {
+        // #321 guard: under G75 a coincident start/end is a legitimate 360° arc.
+        let r = 1_000_000;
+        let region = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG75*\nG36*\n\
+             X{r}Y0D02*\nG03*\nX{r}Y0I-{r}J0D01*\nG37*\nM02*\n"
+        );
+        let a = area_mm2(&region);
+        let disk = std::f64::consts::PI;
+        assert!(
+            (a - disk).abs() < 0.02,
+            "G75 full-circle region {a} vs {disk}"
+        );
+        let stroked = format!(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nG75*\n\
+             X{r}Y0D02*\nG03*\nX{r}Y0I-{r}J0D01*\nM02*\n"
+        );
+        // 0.1 mm wide ring of mean radius 1 mm: 2π·1·0.1 ≈ 0.628 mm².
+        let ring = area_mm2(&stroked);
+        assert!(
+            (ring - 0.2 * disk).abs() < 0.02,
+            "G75 full-circle ring {ring}"
         );
     }
 
