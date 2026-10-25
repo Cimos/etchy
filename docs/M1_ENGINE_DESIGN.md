@@ -85,6 +85,22 @@ same area floor as the reported region counts. Labels are stored X2 object
 attributes only; they do not imply connectivity. Top-level `warnings[]` is forward-compatible;
 metadata-only parse issues can land there in a later increment.
 
+Excellon drill layers carry an optional `drill_table` (#422), omitted when
+neither side used a tool and when one side of a pair has no tool table (a
+Gerber-format drill file): `rows[]` by diameter ascending, each with
+`diameter_mm`, `diameter_um` (the exact compared value: the unit-normalised
+diameter rounded to whole micrometres, so 0.8 mm and 0.0315 in = 800.1 µm are
+one size), `change` (`added`/`removed`/`changed`/`unchanged`), `old_holes`,
+`new_holes`, `old_slots`, `new_slots`; plus `total{old_holes,new_holes,
+old_slots,new_slots}`. Holes count each drill hit (repeat codes included);
+slots count each `G85` canned slot and each routed `M15`…`M16` run. Two tool
+numbers of one size share a row; a changed diameter is one size removed and
+another added. Markdown and HTML show the whole table for a changed drill
+layer, and for an unchanged one whose counts differ (a hole drilled twice at
+one spot); the terminal summary lists only the sizes that differ, plus the
+layer total. Counts do not change the layer status or the exit
+code; the geometry diff still decides those.
+
 Markdown and HTML show the largest 10 regions per changed layer by default;
 `--top-regions N` selects 1–100. JSON contains every reported region, independently
 of that display limit. Each label kind is capped at 20 sorted unique values per

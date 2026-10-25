@@ -112,6 +112,88 @@ fn x2_region_labels_reach_json_markdown_and_html() {
 }
 
 #[test]
+fn drill_table_reaches_json_markdown_html_and_summary() {
+    let root = scratch("drill-table");
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    // Old is metric; new is inch, adds one 0.8 mm (0.0315 in) hole and a
+    // 1.0 mm slot. The 0.3 mm holes at the corners keep the board extent.
+    fs::write(
+        old.join("board-PTH.drl"),
+        "M48\nMETRIC,TZ\nT1C0.300\nT2C0.800\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\nM30\n",
+    )
+    .unwrap();
+    fs::write(
+        new.join("board-PTH.drl"),
+        "M48\nINCH,TZ\nT1C0.0118\nT2C0.0315\nT3C0.0394\n%\nT1\nX0.19685Y0.19685\nX1.9685Y1.9685\n\
+         T2\nX0.7874Y0.7874\nX1.1811Y0.7874\nT3\nX0.7874Y1.1811G85X1.1811Y1.1811\nM30\n",
+    )
+    .unwrap();
+    let html = root.join("report.html");
+    let run = |format: &str| {
+        let out = etchy()
+            .arg("--format")
+            .arg(format)
+            .arg("--html")
+            .arg(&html)
+            .arg(&old)
+            .arg(&new)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let json = run("json");
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let table = &value["layers"][0]["drill_table"];
+    let rows = table["rows"].as_array().unwrap();
+    let summary: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["diameter_um"].as_i64().unwrap(),
+                r["change"].as_str().unwrap(),
+                r["old_holes"].as_u64().unwrap(),
+                r["new_holes"].as_u64().unwrap(),
+                r["new_slots"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    // 0.0118 in = 299.7 µm rounds to 300 and pairs with the metric 0.3 mm tool.
+    assert_eq!(
+        summary,
+        [
+            (300, "unchanged", 2, 2, 0),
+            (800, "changed", 1, 2, 0),
+            (1001, "added", 0, 0, 1),
+        ]
+    );
+    assert_eq!(table["total"]["new_holes"], 4);
+    assert_eq!(json, run("json"), "JSON identical across runs");
+
+    let md = run("md");
+    assert!(md.contains("### drill-pth — drill table"), "{md}");
+    assert!(md.contains("| 0.800 | 1 | 2 | 0 | 0 | changed |"), "{md}");
+    let html_text = fs::read_to_string(&html).unwrap();
+    assert!(html_text.contains("<h3>Drill table</h3>"));
+
+    let text = run("summary");
+    assert!(
+        text.contains("drill-pth 0.800 mm: 1 -> 2 holes, 0 -> 0 slots (changed)"),
+        "{text}"
+    );
+    assert!(text.contains("drill-pth total: 3 -> 4 holes, 0 -> 1 slots"));
+    assert!(
+        !text.contains("drill-pth 0.300"),
+        "unchanged sizes stay out of the summary"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn passing_gate_output_matches_exit_0() {
     // #258: a change smaller than --fail-on-area exits 0, but the summary/JSON
     // used to say "differences found" / any_changes:true with no hint that the

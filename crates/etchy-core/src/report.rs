@@ -2,11 +2,12 @@
 //! derive from, so the three can never disagree. `schema_version` is the
 //! integration contract consumers/CI gate on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::diff::{nm2_to_mm2, ChangedRegion, LayerChange};
+use crate::excellon::DrillTools;
 use crate::model::LayerKind;
 use crate::native::{BoardSide, NativeDiagnostic, PointNm, RecordAccounting};
 
@@ -293,6 +294,165 @@ impl RegionReport {
     }
 }
 
+/// One drill layer's tool table, old vs new: hole and slot counts per tool size
+/// (#422). A table of counts from the parsed drill file, not a BOM.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DrillTableReport {
+    /// One row per tool size used on either side, by diameter ascending.
+    pub rows: Vec<DrillTableRow>,
+    pub total: DrillCounts,
+}
+
+/// One tool size. `diameter_um` is the exact compared value; a diameter that
+/// changed shows as one size removed and another added.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DrillTableRow {
+    pub diameter_mm: f64,
+    pub diameter_um: i64,
+    pub change: DrillRowChange,
+    #[serde(flatten)]
+    pub counts: DrillCounts,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct DrillCounts {
+    pub old_holes: u32,
+    pub new_holes: u32,
+    pub old_slots: u32,
+    pub new_slots: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DrillRowChange {
+    /// The size is used only in the new revision.
+    Added,
+    /// The size is used only in the old revision.
+    Removed,
+    /// Used on both sides with a different hole or slot count.
+    Changed,
+    Unchanged,
+}
+
+impl DrillTableReport {
+    /// Compare two tool tables. `None` on a side means that side is absent
+    /// (a one-sided layer). Returns `None` when neither side used any tool.
+    pub fn compare(old: Option<&DrillTools>, new: Option<&DrillTools>) -> Option<Self> {
+        let empty = BTreeMap::new();
+        let old = old.map_or(&empty, |t| &t.by_diameter_um);
+        let new = new.map_or(&empty, |t| &t.by_diameter_um);
+        let sizes: BTreeSet<i64> = old.keys().chain(new.keys()).copied().collect();
+        if sizes.is_empty() {
+            return None;
+        }
+        let mut total = DrillCounts::default();
+        let rows = sizes
+            .into_iter()
+            .map(|um| {
+                let o = old.get(&um).copied().unwrap_or_default();
+                let n = new.get(&um).copied().unwrap_or_default();
+                let counts = DrillCounts {
+                    old_holes: o.holes,
+                    new_holes: n.holes,
+                    old_slots: o.slots,
+                    new_slots: n.slots,
+                };
+                total.old_holes += o.holes;
+                total.new_holes += n.holes;
+                total.old_slots += o.slots;
+                total.new_slots += n.slots;
+                let change = match (old.contains_key(&um), new.contains_key(&um)) {
+                    (false, _) => DrillRowChange::Added,
+                    (_, false) => DrillRowChange::Removed,
+                    _ if o != n => DrillRowChange::Changed,
+                    _ => DrillRowChange::Unchanged,
+                };
+                DrillTableRow {
+                    diameter_mm: um as f64 / 1000.0,
+                    diameter_um: um,
+                    change,
+                    counts,
+                }
+            })
+            .collect();
+        Some(Self { rows, total })
+    }
+
+    /// True when any size was added, removed or changed count.
+    pub fn has_changes(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|r| r.change != DrillRowChange::Unchanged)
+    }
+
+    /// True when either side has a slot, so the slot columns are worth showing.
+    pub fn has_slots(&self) -> bool {
+        self.total.old_slots > 0 || self.total.new_slots > 0
+    }
+
+    /// Header cells and one row of cells per tool size, then the total row.
+    /// Shared by the Markdown and HTML tables so the two cannot disagree.
+    pub fn cells(&self) -> (Vec<&'static str>, Vec<Vec<String>>) {
+        let slots = self.has_slots();
+        let header = if slots {
+            vec![
+                "tool mm",
+                "old holes",
+                "new holes",
+                "old slots",
+                "new slots",
+                "change",
+            ]
+        } else {
+            vec!["tool mm", "old holes", "new holes", "change"]
+        };
+        let row = |size: String, c: &DrillCounts, change: &str| {
+            let mut cells = vec![size, c.old_holes.to_string(), c.new_holes.to_string()];
+            if slots {
+                cells.push(c.old_slots.to_string());
+                cells.push(c.new_slots.to_string());
+            }
+            cells.push(change.to_string());
+            cells
+        };
+        let mut rows: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .map(|r| {
+                row(
+                    format!("{:.3}", r.diameter_mm),
+                    &r.counts,
+                    r.change.as_str(),
+                )
+            })
+            .collect();
+        rows.push(row("total".into(), &self.total, ""));
+        (header, rows)
+    }
+
+    pub fn to_markdown(&self) -> String {
+        let (header, rows) = self.cells();
+        let mut s = format!("| {} |\n|---|", header.join(" | "));
+        s.push_str(&"--:|".repeat(header.len() - 2));
+        s.push_str("---|\n");
+        for cells in rows {
+            s.push_str(&format!("| {} |\n", cells.join(" | ")));
+        }
+        s
+    }
+}
+
+impl DrillRowChange {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DrillRowChange::Added => "added",
+            DrillRowChange::Removed => "removed",
+            DrillRowChange::Changed => "changed",
+            DrillRowChange::Unchanged => "same",
+        }
+    }
+}
+
 /// One layer's entry in the report.
 #[derive(Debug, Clone, Serialize)]
 pub struct LayerReport {
@@ -314,6 +474,9 @@ pub struct LayerReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<RegionReport>,
     pub labels_available: bool,
+    /// Excellon drill layers only; omitted when neither side used a tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drill_table: Option<DrillTableReport>,
 }
 
 impl LayerReport {
@@ -338,7 +501,23 @@ impl LayerReport {
             removed_regions: change.removed_region_count,
             regions: Vec::new(),
             labels_available: false,
+            drill_table: None,
         }
+    }
+
+    /// Display name, e.g. `inner-copper2` or `drill-pth`.
+    pub fn name(&self) -> String {
+        self.inner_index
+            .map_or_else(|| self.kind.to_string(), |i| format!("{}{}", self.kind, i))
+    }
+
+    /// The drill table, when it should be shown in the Markdown/HTML/summary
+    /// output: on a changed layer, or when the counts differ even though the
+    /// geometry did not (a hole drilled twice at one spot).
+    pub fn shown_drill_table(&self) -> Option<&DrillTableReport> {
+        self.drill_table
+            .as_ref()
+            .filter(|t| self.is_changed() || t.has_changes())
     }
 
     pub fn top_regions(&self, n: usize) -> Vec<&RegionReport> {
@@ -481,6 +660,12 @@ impl DiffReport {
                         labels
                     ));
                 }
+            }
+        }
+        for l in &self.layers {
+            if let Some(table) = l.shown_drill_table() {
+                s.push_str(&format!("\n### {} — drill table\n\n", l.name()));
+                s.push_str(&table.to_markdown());
             }
         }
         if !self.warnings.is_empty() {
@@ -693,6 +878,144 @@ mod tests {
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../tests/expected/report-v1-regions.json")).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    fn drill_tools(sizes: &[(i64, u32, u32)]) -> DrillTools {
+        DrillTools {
+            by_diameter_um: sizes
+                .iter()
+                .map(|&(um, holes, slots)| (um, crate::excellon::ToolCount { holes, slots }))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn drill_table_rows_by_size_with_change_and_total() {
+        let old = drill_tools(&[(300, 412, 0), (800, 10, 0), (1000, 4, 1)]);
+        let new = drill_tools(&[(300, 418, 0), (1000, 4, 1), (1200, 2, 0)]);
+        let table = DrillTableReport::compare(Some(&old), Some(&new)).unwrap();
+        let rows: Vec<_> = table
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.diameter_um,
+                    r.change,
+                    r.counts.old_holes,
+                    r.counts.new_holes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (300, DrillRowChange::Changed, 412, 418),
+                (800, DrillRowChange::Removed, 10, 0),
+                (1000, DrillRowChange::Unchanged, 4, 4),
+                (1200, DrillRowChange::Added, 0, 2),
+            ]
+        );
+        assert_eq!(table.rows[0].diameter_mm, 0.3);
+        assert_eq!(
+            table.total,
+            DrillCounts {
+                old_holes: 426,
+                new_holes: 424,
+                old_slots: 1,
+                new_slots: 1,
+            }
+        );
+        assert!(table.has_changes() && table.has_slots());
+    }
+
+    #[test]
+    fn drill_table_slot_count_change_is_a_change() {
+        let old = drill_tools(&[(500, 0, 2)]);
+        let new = drill_tools(&[(500, 0, 3)]);
+        let table = DrillTableReport::compare(Some(&old), Some(&new)).unwrap();
+        assert_eq!(table.rows[0].change, DrillRowChange::Changed);
+    }
+
+    #[test]
+    fn drill_table_is_omitted_when_no_side_used_a_tool() {
+        let empty = DrillTools::default();
+        assert!(DrillTableReport::compare(Some(&empty), Some(&empty)).is_none());
+        assert!(DrillTableReport::compare(None, Some(&empty)).is_none());
+        assert!(DrillTableReport::compare(None, None).is_none());
+        // One-sided: every size is added (or removed).
+        let new = drill_tools(&[(300, 2, 0)]);
+        let table = DrillTableReport::compare(None, Some(&new)).unwrap();
+        assert_eq!(table.rows[0].change, DrillRowChange::Added);
+        assert!(!table.has_slots());
+    }
+
+    fn drill_layer(status: LayerStatus, old: &DrillTools, new: &DrillTools) -> LayerReport {
+        let change = LayerChange {
+            added_area_nm2: if status == LayerStatus::Changed { 1 } else { 0 },
+            has_added: status == LayerStatus::Changed,
+            ..Default::default()
+        };
+        let mut layer = LayerReport::new(
+            LayerKind::Drill(crate::model::DrillKind::Plated),
+            Some("old-PTH.drl".into()),
+            Some("new-PTH.drl".into()),
+            status,
+            &change,
+        );
+        layer.drill_table = DrillTableReport::compare(Some(old), Some(new));
+        layer
+    }
+
+    #[test]
+    fn v1_drill_table_json_matches_example() {
+        let layer = drill_layer(
+            LayerStatus::Changed,
+            &drill_tools(&[(300, 412, 0), (800, 10, 0), (1000, 4, 1)]),
+            &drill_tools(&[(300, 418, 0), (1000, 4, 1), (1200, 2, 0)]),
+        );
+        let actual: serde_json::Value =
+            serde_json::from_str(&DiffReport::new(vec![layer], vec![]).to_json()).unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/expected/report-v1-drill-table.json"))
+                .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn drill_table_markdown_lists_every_size_and_the_total() {
+        let layer = drill_layer(
+            LayerStatus::Changed,
+            &drill_tools(&[(300, 412, 0), (800, 10, 0)]),
+            &drill_tools(&[(300, 418, 0), (1200, 2, 0)]),
+        );
+        let md = DiffReport::new(vec![layer], vec![]).to_markdown_summary();
+        assert!(md.contains("### drill-pth — drill table\n"), "{md}");
+        assert!(md.contains("| tool mm | old holes | new holes | change |\n|---|--:|--:|---|\n"));
+        assert!(md.contains("| 0.300 | 412 | 418 | changed |\n"));
+        assert!(md.contains("| 0.800 | 10 | 0 | removed |\n"));
+        assert!(md.contains("| 1.200 | 0 | 2 | added |\n"));
+        assert!(md.contains("| total | 422 | 420 |  |\n"));
+        assert!(!md.contains("slots"), "no slot columns without slots");
+    }
+
+    #[test]
+    fn drill_table_shows_count_change_on_unchanged_geometry_only() {
+        // Same geometry, one hole drilled twice: the table still shows.
+        let twice = drill_layer(
+            LayerStatus::Unchanged,
+            &drill_tools(&[(300, 2, 0)]),
+            &drill_tools(&[(300, 3, 0)]),
+        );
+        assert!(twice.shown_drill_table().is_some());
+        // Same geometry and same counts: nothing to show.
+        let same = drill_layer(
+            LayerStatus::Unchanged,
+            &drill_tools(&[(300, 2, 0)]),
+            &drill_tools(&[(300, 2, 0)]),
+        );
+        assert!(same.shown_drill_table().is_none());
+        let md = DiffReport::new(vec![same], vec![]).to_markdown_summary();
+        assert!(!md.contains("drill table"));
     }
 
     #[test]

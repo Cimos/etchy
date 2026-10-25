@@ -115,6 +115,7 @@ pub fn board_from_bytes(
             geometry,
             negative,
             x2_objects: None,
+            drill_tools: None,
         });
     }
     Ok((Board { layers }, fmt))

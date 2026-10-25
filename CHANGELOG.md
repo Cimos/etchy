@@ -20,6 +20,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   SVGs and the HTML report, uploaded as a workflow artifact
   (`upload-report`, on by default). New outputs `report-dir` and
   `artifact-url` (#421).
+- Drill table diff: each Excellon drill layer lists hole and slot counts per
+  tool size, old vs new, with added, removed and changed sizes and a layer
+  total, e.g. `drill-pth 0.300 mm: 412 -> 418 holes`. In JSON as an optional
+  `drill_table`, and in the summary, Markdown and HTML reports. Sizes compare
+  in whole micrometres, so inch and metric tools of one size match (#422).
 
 ### Changed
 - GitHub Action: runs the etchy release binary for the runner instead of

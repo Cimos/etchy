@@ -337,6 +337,7 @@ fn board_from_files(
                 geometry: std::sync::Arc::new(geometry),
                 negative,
                 x2_objects: None,
+                drill_tools: None,
             });
         }
     }
