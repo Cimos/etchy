@@ -18,6 +18,7 @@ use gerber_parser::gerber_types::{
     DCode, ExtendedCode, FunctionCode, GCode, InterpolationMode, MacroBoolean, MacroContent,
     MacroDecimal, MacroInteger, Operation, Polarity as GtPolarity, QuadrantMode, Unit,
 };
+use gerber_parser::gerber_types::{AxisSelect, ImageMirroring, ImagePolarity, StepAndRepeat};
 use gerber_parser::parse;
 
 use crate::boolean;
@@ -226,8 +227,16 @@ fn normalize(bytes: &[u8]) -> Result<String> {
         if in_ext {
             buf.push(ch);
             if ch == '%' {
-                out.push_str(buf.trim());
-                out.push('\n');
+                let block = buf.trim();
+                // `%LN` only names the layer; it carries no geometry (#316).
+                if !block.starts_with("%LN") || !block.ends_with("*%") {
+                    if identity_repeat(block) {
+                        out.push_str("%SRX1Y1I0J0*%");
+                    } else {
+                        out.push_str(block);
+                    }
+                    out.push('\n');
+                }
                 buf.clear();
                 in_ext = false;
             }
@@ -259,6 +268,31 @@ fn normalize(bytes: &[u8]) -> Result<String> {
     }
     check_terminated(&buf, "at end of file")?;
     Ok(out)
+}
+
+/// True for a `%SR` that repeats once with zero step, in any spelling that
+/// omits the zero `I`/`J` fields (`%SRX1Y1*%`). The parser only reads the full
+/// form, so these are rewritten to `%SRX1Y1I0J0*%` and accepted downstream.
+fn identity_repeat(block: &str) -> bool {
+    let Some(body) = block.strip_prefix("%SR").and_then(|s| s.strip_suffix("*%")) else {
+        return false;
+    };
+    let mut rest = body;
+    for (tag, default) in [('X', 1.0), ('Y', 1.0), ('I', 0.0), ('J', 0.0)] {
+        if let Some(tail) = rest.strip_prefix(tag) {
+            let end = tail.find(['X', 'Y', 'I', 'J']).unwrap_or(tail.len());
+            let Ok(v) = tail[..end].parse::<f64>() else {
+                return false;
+            };
+            if v != default {
+                return false;
+            }
+            rest = &tail[end..];
+        } else if tag == 'X' || tag == 'Y' {
+            return false;
+        }
+    }
+    rest.is_empty()
 }
 
 /// Fail loud if `buf` still holds a command that never received its `*` (#313).
@@ -473,6 +507,18 @@ impl<'a> Machine<'a> {
             | ExtendedCode::ApertureAttribute(_)
             | ExtendedCode::DeleteAttribute(_)
             | ExtendedCode::ImageName(_) => {}
+            ExtendedCode::ImagePolarity(ImagePolarity::Positive)
+            | ExtendedCode::MirrorImage(ImageMirroring::None)
+            | ExtendedCode::AxisSelect(AxisSelect::AXBY) => {}
+            ExtendedCode::OffsetImage(v) if v.a == 0.0 && v.b == 0.0 => {}
+            ExtendedCode::ScaleImage(v) if v.a == 1.0 && v.b == 1.0 => {}
+            ExtendedCode::StepAndRepeat(StepAndRepeat::Open {
+                repeat_x: 1,
+                repeat_y: 1,
+                distance_x,
+                distance_y,
+            }) if *distance_x == 0.0 && *distance_y == 0.0 => {}
+            ExtendedCode::StepAndRepeat(StepAndRepeat::Close) => {}
             other => {
                 let name = format!("{other:?}");
                 let tag = name.split([' ', '(']).next().unwrap_or("extended code");
@@ -739,16 +785,11 @@ impl<'a> Machine<'a> {
                 self.push(c, true);
             }
             GtAperture::Macro(name, args) => {
-                if args.as_ref().is_some_and(|a| !a.is_empty()) {
-                    return Err(unsupported(&format!(
-                        "macro aperture {name} with parameters"
-                    )));
-                }
                 let am = *self
                     .macros
                     .get(name.as_str())
                     .ok_or_else(|| unsupported(&format!("undefined macro {name}")))?;
-                self.flash_macro(am, at)?;
+                self.flash_macro(am, args.as_deref().unwrap_or(&[]), at)?;
             }
         }
         Ok(())
@@ -765,11 +806,25 @@ impl<'a> Machine<'a> {
     /// flash (a track under a ring's hole) and depend on draw order (#306). A
     /// macro with only exposure-on primitives is pushed primitive by primitive —
     /// the layer union merges them identically, without the extra boolean pass.
-    fn flash_macro(&mut self, am: &ApertureMacro, at: Pt) -> Result<()> {
+    fn flash_macro(&mut self, am: &ApertureMacro, args: &[MacroDecimal], at: Pt) -> Result<()> {
         let (ax, ay) = (at.x as f64, at.y as f64);
         let mut prims: Vec<(bool, Contour)> = Vec::with_capacity(am.content.len());
+        let mut vars = HashMap::new();
+        for (i, arg) in args.iter().enumerate() {
+            vars.insert((i + 1) as u32, md(arg, &vars)?);
+        }
         for content in &am.content {
-            if let Some(p) = self.macro_primitive(content, ax, ay)? {
+            if let MacroContent::VariableDefinition(v) = content {
+                let value = expression(&v.expression, &vars)?;
+                if v.number == 0 {
+                    return Err(unsupported("macro variable $0"));
+                }
+                vars.insert(v.number, value);
+            } else if let MacroContent::Thermal(t) = content {
+                for c in self.macro_thermal(t, ax, ay, &vars)? {
+                    prims.push((true, c));
+                }
+            } else if let Some(p) = self.macro_primitive(content, ax, ay, &vars)? {
                 prims.push(p);
             }
         }
@@ -848,31 +903,32 @@ impl<'a> Machine<'a> {
         content: &MacroContent,
         ax: f64,
         ay: f64,
+        vars: &HashMap<u32, f64>,
     ) -> Result<Option<(bool, Contour)>> {
         Ok(Some(match content {
             MacroContent::Comment(_) | MacroContent::VariableDefinition(_) => return Ok(None),
             MacroContent::Circle(c) => {
-                let exp = mbool(&c.exposure)?;
-                let d = self.dim(md(&c.diameter)?)?;
-                let (cx, cy) = self.macro_pt(&c.center, c.angle.as_ref(), ax, ay)?;
+                let exp = mbool(&c.exposure, vars)?;
+                let d = self.dim(md(&c.diameter, vars)?)?;
+                let (cx, cy) = self.macro_pt(&c.center, c.angle.as_ref(), ax, ay, vars)?;
                 (exp, geom::ngon(cx, cy, d / 2.0))
             }
             MacroContent::CenterLine(l) => {
-                let exp = mbool(&l.exposure)?;
+                let exp = mbool(&l.exposure, vars)?;
                 let (w, h) = (
-                    self.dim(md(&l.dimensions.0)?)?,
-                    self.dim(md(&l.dimensions.1)?)?,
+                    self.dim(md(&l.dimensions.0, vars)?)?,
+                    self.dim(md(&l.dimensions.1, vars)?)?,
                 );
-                let ang = md(&l.angle)?;
-                let (cx, cy) = self.macro_offset(&l.center, ang, ax, ay)?;
+                let ang = md(&l.angle, vars)?;
+                let (cx, cy) = self.macro_offset(&l.center, ang, ax, ay, vars)?;
                 (exp, geom::rect_rot(cx, cy, w, h, ang))
             }
             MacroContent::Outline(o) => {
-                let exp = mbool(&o.exposure)?;
-                let ang = md(&o.angle)?;
+                let exp = mbool(&o.exposure, vars)?;
+                let ang = md(&o.angle, vars)?;
                 let mut c: Contour = Vec::with_capacity(o.points.len());
                 for (px, py) in &o.points {
-                    let (lx, ly) = (self.dim(md(px)?)?, self.dim(md(py)?)?);
+                    let (lx, ly) = (self.dim(md(px, vars)?)?, self.dim(md(py, vars)?)?);
                     let (rx, ry) = geom::rotate(lx, ly, ang);
                     c.push(Pt::new(snap_nm(ax + rx)?, snap_nm(ay + ry)?));
                 }
@@ -881,32 +937,63 @@ impl<'a> Machine<'a> {
                 (exp, crate::geo::wind(c, true))
             }
             MacroContent::VectorLine(v) => {
-                let exp = mbool(&v.exposure)?;
-                let ang = md(&v.angle)?;
-                let w = self.dim(md(&v.width)?)?;
-                let (sx, sy) = self.macro_rot_pt(&v.start, ang, ax, ay)?;
-                let (ex, ey) = self.macro_rot_pt(&v.end, ang, ax, ay)?;
+                let exp = mbool(&v.exposure, vars)?;
+                let ang = md(&v.angle, vars)?;
+                let w = self.dim(md(&v.width, vars)?)?;
+                let (sx, sy) = self.macro_rot_pt(&v.start, ang, ax, ay, vars)?;
+                let (ex, ey) = self.macro_rot_pt(&v.end, ang, ax, ay, vars)?;
                 (exp, geom::stadium(sx, sy, ex, ey, w / 2.0))
             }
             MacroContent::Polygon(p) => {
-                let exp = mbool(&p.exposure)?;
+                let exp = mbool(&p.exposure, vars)?;
                 let n = match p.vertices {
                     MacroInteger::Value(v) => v as usize,
-                    _ => return Err(unsupported("macro polygon with variable vertex count")),
+                    MacroInteger::Variable(v) => macro_integer(macro_var(vars, v)?)?,
+                    MacroInteger::Expression(ref e) => macro_integer(expression(e, vars)?)?,
                 };
                 if !(3..=64).contains(&n) {
                     return Err(unsupported("macro polygon vertex count out of range"));
                 }
-                let ang = md(&p.angle)?;
-                let (cx, cy) = self.macro_offset(&p.center, ang, ax, ay)?;
+                let ang = md(&p.angle, vars)?;
+                let (cx, cy) = self.macro_offset(&p.center, ang, ax, ay, vars)?;
                 (
                     exp,
-                    polygon_ngon(cx, cy, self.dim(md(&p.diameter)?)? / 2.0, n, ang),
+                    polygon_ngon(cx, cy, self.dim(md(&p.diameter, vars)?)? / 2.0, n, ang),
                 )
             }
             MacroContent::Moire(_) => return Err(unsupported("macro moiré primitive")),
             MacroContent::Thermal(_) => return Err(unsupported("macro thermal primitive")),
         }))
+    }
+
+    /// Thermal primitive 7: an outer disc minus the inner disc and the two
+    /// cross gaps, rotated about the macro origin. It has no exposure field.
+    fn macro_thermal(
+        &self,
+        t: &gerber_parser::gerber_types::ThermalPrimitive,
+        ax: f64,
+        ay: f64,
+        vars: &HashMap<u32, f64>,
+    ) -> Result<Vec<Contour>> {
+        let angle = md(&t.angle, vars)?;
+        let (cx, cy) = self.macro_offset(&t.center, angle, ax, ay, vars)?;
+        let outer = self.dim(md(&t.outer_diameter, vars)?)?;
+        let inner = self.dim(md(&t.inner_diameter, vars)?)?;
+        let gap = self.dim(md(&t.gap, vars)?)?;
+        if outer <= inner || inner < 0.0 || gap <= 0.0 || gap >= outer / 2.0_f64.sqrt() {
+            return Err(unsupported("invalid macro thermal dimensions"));
+        }
+        let mut cuts = vec![
+            geom::rect_rot(cx, cy, outer * 2.0, gap, angle),
+            geom::rect_rot(cx, cy, gap, outer * 2.0, angle),
+        ];
+        if inner > 0.0 {
+            cuts.push(geom::ngon(cx, cy, inner / 2.0));
+        }
+        Ok(boolean::flatten(&boolean::difference(
+            &[geom::ngon(cx, cy, outer / 2.0)],
+            &cuts,
+        )))
     }
 
     /// A macro-local centre `(x, y)` (doc units) rotated by `angle` about the macro
@@ -917,8 +1004,12 @@ impl<'a> Machine<'a> {
         angle: f64,
         ax: f64,
         ay: f64,
+        vars: &HashMap<u32, f64>,
     ) -> Result<(f64, f64)> {
-        let (lx, ly) = (self.dim(md(&center.0)?)?, self.dim(md(&center.1)?)?);
+        let (lx, ly) = (
+            self.dim(md(&center.0, vars)?)?,
+            self.dim(md(&center.1, vars)?)?,
+        );
         let (rx, ry) = geom::rotate(lx, ly, angle);
         // Guard the absolute centre (catches a non-finite rotation/offset too).
         snap_nm(ax + rx)?;
@@ -932,12 +1023,13 @@ impl<'a> Machine<'a> {
         angle: Option<&MacroDecimal>,
         ax: f64,
         ay: f64,
+        vars: &HashMap<u32, f64>,
     ) -> Result<(f64, f64)> {
         let ang = match angle {
-            Some(a) => md(a)?,
+            Some(a) => md(a, vars)?,
             None => 0.0,
         };
-        self.macro_offset(center, ang, ax, ay)
+        self.macro_offset(center, ang, ax, ay, vars)
     }
 
     fn macro_rot_pt(
@@ -946,8 +1038,9 @@ impl<'a> Machine<'a> {
         angle: f64,
         ax: f64,
         ay: f64,
+        vars: &HashMap<u32, f64>,
     ) -> Result<(f64, f64)> {
-        self.macro_offset(point, angle, ax, ay)
+        self.macro_offset(point, angle, ax, ay, vars)
     }
 
     // --- helpers ---
@@ -1028,22 +1121,174 @@ fn polygon_ngon(cx: f64, cy: f64, r: f64, n: usize, deg: f64) -> Contour {
         .collect()
 }
 
-/// Read a literal macro decimal; variables/expressions are unsupported (the
-/// boards we target use literals only).
-fn md(d: &MacroDecimal) -> Result<f64> {
-    match d {
-        MacroDecimal::Value(v) => Ok(*v),
-        _ => Err(unsupported("aperture macro with variables/expressions")),
+/// A macro variable's value. A variable that was never given (no `%AD`
+/// parameter, no `$n=` assignment) fails loud rather than reading as 0, so a
+/// pad drawn with a missing size never renders as a quietly wrong shape.
+fn macro_var(vars: &HashMap<u32, f64>, n: u32) -> Result<f64> {
+    vars.get(&n)
+        .copied()
+        .ok_or_else(|| unsupported(&format!("undefined macro variable ${n}")))
+}
+
+/// Evaluate a macro decimal: a literal, a `$n` variable, or an arithmetic
+/// expression over variables (RS-274X §4.5.4.3).
+fn md(d: &MacroDecimal, vars: &HashMap<u32, f64>) -> Result<f64> {
+    let v = match d {
+        MacroDecimal::Value(v) => *v,
+        MacroDecimal::Variable(n) => macro_var(vars, *n)?,
+        MacroDecimal::Expression(e) => expression(e, vars)?,
+    };
+    if !v.is_finite() {
+        return Err(unsupported("non-finite macro value"));
+    }
+    Ok(v)
+}
+
+fn mbool(b: &MacroBoolean, vars: &HashMap<u32, f64>) -> Result<bool> {
+    let v = match b {
+        MacroBoolean::Value(v) => return Ok(*v),
+        MacroBoolean::Variable(n) => macro_var(vars, *n)?,
+        MacroBoolean::Expression(e) => expression(e, vars)?,
+    };
+    match v {
+        0.0 => Ok(false),
+        1.0 => Ok(true),
+        _ => Err(unsupported("macro exposure outside 0 or 1")),
     }
 }
 
-fn mbool(b: &MacroBoolean) -> Result<bool> {
-    match b {
-        MacroBoolean::Value(v) => Ok(*v),
-        _ => Err(unsupported(
-            "aperture macro exposure with variable/expression",
-        )),
+fn macro_integer(v: f64) -> Result<usize> {
+    if v < 0.0 || v > u32::MAX as f64 || v.fract() != 0.0 {
+        return Err(unsupported("invalid macro integer"));
     }
+    Ok(v as usize)
+}
+
+/// Evaluate a macro arithmetic expression: numbers, `$n` variables, unary
+/// `+`/`-`, parentheses, and `+ - x /` with `x` and `/` binding tighter than
+/// `+` and `-` (`x` is multiply in the Gerber spec). Division by zero, an
+/// undefined variable or a malformed expression fails loud.
+fn expression(src: &str, vars: &HashMap<u32, f64>) -> Result<f64> {
+    struct Parser<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+        vars: &'a HashMap<u32, f64>,
+        depth: usize,
+    }
+    impl Parser<'_> {
+        fn space(&mut self) {
+            while self
+                .bytes
+                .get(self.pos)
+                .is_some_and(|c| c.is_ascii_whitespace())
+            {
+                self.pos += 1;
+            }
+        }
+        fn take(&mut self, c: u8) -> bool {
+            self.space();
+            if self.bytes.get(self.pos) == Some(&c) {
+                self.pos += 1;
+                true
+            } else {
+                false
+            }
+        }
+        fn sum(&mut self) -> Result<f64> {
+            let mut v = self.product()?;
+            loop {
+                v = if self.take(b'+') {
+                    v + self.product()?
+                } else if self.take(b'-') {
+                    v - self.product()?
+                } else {
+                    break;
+                };
+            }
+            Ok(v)
+        }
+        fn product(&mut self) -> Result<f64> {
+            let mut v = self.atom()?;
+            loop {
+                v = if self.take(b'x') || self.take(b'X') {
+                    v * self.atom()?
+                } else if self.take(b'/') {
+                    let divisor = self.atom()?;
+                    if divisor == 0.0 {
+                        return Err(unsupported("macro division by zero"));
+                    }
+                    v / divisor
+                } else {
+                    break;
+                };
+            }
+            Ok(v)
+        }
+        fn atom(&mut self) -> Result<f64> {
+            if self.depth >= 64 {
+                return Err(unsupported("macro expression nesting limit"));
+            }
+            self.depth += 1;
+            let result = self.atom_inner();
+            self.depth -= 1;
+            result
+        }
+        fn atom_inner(&mut self) -> Result<f64> {
+            self.space();
+            if self.take(b'+') {
+                return self.atom();
+            }
+            if self.take(b'-') {
+                return Ok(-self.atom()?);
+            }
+            if self.take(b'(') {
+                let v = self.sum()?;
+                if !self.take(b')') {
+                    return Err(unsupported("unclosed macro expression"));
+                }
+                return Ok(v);
+            }
+            if self.take(b'$') {
+                let start = self.pos;
+                while self.bytes.get(self.pos).is_some_and(|c| c.is_ascii_digit()) {
+                    self.pos += 1;
+                }
+                let n = std::str::from_utf8(&self.bytes[start..self.pos])
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| unsupported("invalid macro variable"))?;
+                return macro_var(self.vars, n);
+            }
+            let start = self.pos;
+            while self
+                .bytes
+                .get(self.pos)
+                .is_some_and(|c| c.is_ascii_digit() || *c == b'.')
+            {
+                self.pos += 1;
+            }
+            if start == self.pos {
+                return Err(unsupported("invalid macro expression"));
+            }
+            std::str::from_utf8(&self.bytes[start..self.pos])
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .ok_or_else(|| unsupported("invalid macro number"))
+        }
+    }
+    let mut p = Parser {
+        bytes: src.as_bytes(),
+        pos: 0,
+        vars,
+        depth: 0,
+    };
+    let v = p.sum()?;
+    p.space();
+    if p.pos != p.bytes.len() || !v.is_finite() {
+        return Err(unsupported("invalid macro expression"));
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -1922,5 +2167,156 @@ mod tests {
             resolve_layer(g.as_bytes()),
             Err(EngineError::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn identity_extended_codes_preserve_flash() {
+        let codes = [
+            "%IPPOS*%",
+            "%OFA0B0*%",
+            "%OFA0*%",
+            "%OFB0*%",
+            "%OF*%",
+            "%SFA1B1*%",
+            "%SFA1*%",
+            "%SFB1*%",
+            "%SF*%",
+            "%MIA0B0*%",
+            "%MIA0*%",
+            "%MIB0*%",
+            "%MI*%",
+            "%ASAXBY*%",
+            "%SRX1Y1I0J0*%",
+            "%SRX1Y1*%",
+            "%SRX1Y1I0*%",
+        ];
+        let ideal = std::f64::consts::PI * 0.25 * 0.25;
+        for code in codes {
+            let g =
+                format!("%FSLAX46Y46*%\n%MOMM*%\n{code}\n%ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n");
+            assert!((area_mm2(&g) - ideal).abs() < 0.01, "{code}");
+        }
+    }
+
+    #[test]
+    fn nonidentity_extended_codes_fail_loud() {
+        for code in [
+            "%IPNEG*%",
+            "%OFA1B0*%",
+            "%SFA1B2*%",
+            "%MIA1B0*%",
+            "%ASAYBX*%",
+            "%SRX2Y1I0J0*%",
+        ] {
+            let g =
+                format!("%FSLAX46Y46*%\n%MOMM*%\n{code}\n%ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n");
+            assert!(resolve_layer(g.as_bytes()).is_err(), "{code}");
+        }
+    }
+
+    #[test]
+    fn layer_name_is_ignored() {
+        let g = format!("{HDR}%LNTop Copper*%\nX0Y0D03*\nM02*\n");
+        assert!(area_mm2(&g) > 0.19);
+    }
+
+    #[test]
+    fn kicad_roundrect_macro_area() {
+        let g = include_str!("../../../corpus/gerber/roundrect.gbr");
+        let area = area_mm2(g);
+        let r = 0.1143_f64;
+        let ideal = 0.3302 * 0.2286 + 2.0 * (0.3302 + 0.2286) * r + std::f64::consts::PI * r * r;
+        assert!((area - ideal).abs() < 0.005, "area {area} vs {ideal}");
+    }
+
+    #[test]
+    fn macro_assignments_and_arithmetic() {
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMCALC*\n$2=($1+1)x2/2-1*\n21,1,$2,$1,0,0,0*%\n%ADD10CALC,0.5*%\nD10*\nX0Y0D03*\nM02*\n";
+        assert!((area_mm2(g) - 0.25).abs() < 0.001);
+        for expr in ["$1/0", "$0+1", "1+", "(1+2"] {
+            assert!(expression(expr, &HashMap::new()).is_err(), "{expr}");
+        }
+    }
+
+    #[test]
+    fn parameterised_clear_circle_cuts_macro_only() {
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMRING*\n1,1,$1,0,0*\n1,0,$1/2,0,0*%\n%ADD10RING,1*%\nD10*\nX0Y0D03*\nM02*\n";
+        let ideal = std::f64::consts::PI * (0.5_f64.powi(2) - 0.25_f64.powi(2));
+        assert!((area_mm2(g) - ideal).abs() < 0.01);
+    }
+
+    #[test]
+    fn parameterised_thermal_has_four_spokes() {
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMTH*\n7,0,0,$1,$2,$3,0*%\n%ADD10TH,2X1X0.2*%\nD10*\nX0Y0D03*\nM02*\n";
+        let ps = resolve_layer(g.as_bytes()).unwrap();
+        assert_eq!(ps.region_count(), 4);
+        assert!(ps.area_mm2() > 1.5 && ps.area_mm2() < 2.4);
+    }
+
+    #[test]
+    fn parameterised_polygon_vertex_count() {
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMPOLY*\n5,1,$1+2,0,0,$2,0*%\n%ADD10POLY,4X2*%\nD10*\nX0Y0D03*\nM02*\n";
+        let ideal = 1.5 * 3.0_f64.sqrt();
+        assert!((area_mm2(g) - ideal).abs() < 0.02);
+    }
+
+    #[test]
+    fn unsupported_macro_line_codes_fail_loud() {
+        for primitive in ["2,1,0.2,0,0,1,0,0", "22,1,0.2,0,0,1,0,0"] {
+            let g = format!("%FSLAX46Y46*%\n%MOMM*%\n%AMLINE*\n{primitive}*%\n%ADD10LINE*%\nD10*\nX0Y0D03*\nM02*\n");
+            assert!(resolve_layer(g.as_bytes()).is_err(), "{primitive}");
+        }
+    }
+
+    #[test]
+    fn macro_expression_precedence() {
+        let vars = HashMap::from([(1, 2.0), (2, 3.0)]);
+        for (src, want) in [
+            ("1+2x3", 7.0),
+            ("(1+2)x3", 9.0),
+            ("1+6/2", 4.0),
+            ("8/2/2", 2.0),
+            ("2-3-4", -5.0),
+            ("-2x3", -6.0),
+            ("2x-3", -6.0),
+            ("-(1+2)", -3.0),
+            ("$1+$2x$1", 8.0),
+            ("$1X$2", 6.0),
+            (".5+0.25", 0.75),
+        ] {
+            let got = expression(src, &vars).unwrap();
+            assert!((got - want).abs() < 1e-12, "{src} = {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn undefined_macro_variable_fails_loud() {
+        assert!(expression("$3+1", &HashMap::from([(1, 1.0)])).is_err());
+        // RoundRect given only the radius: the corner variables are undefined.
+        let g = include_str!("../../../corpus/gerber/roundrect.gbr").replace(
+            "%ADD10RoundRect,0.114300X0.165100X-0.114300X0.165100X0.114300X-0.165100X0.114300X-0.165100X-0.114300X0*%",
+            "%ADD10RoundRect,0.114300*%",
+        );
+        assert!(matches!(
+            resolve_layer(g.as_bytes()),
+            Err(EngineError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn assignment_feeds_later_primitives() {
+        // $3 is assigned from $1 and $2, then used as the circle diameter.
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%AMASG*\n$3=$1+$2x2*\n1,1,$3,0,0*%\n%ADD10ASG,0.2X0.4*%\nD10*\nX0Y0D03*\nM02*\n";
+        let ideal = std::f64::consts::PI * 0.5 * 0.5;
+        assert!((area_mm2(g) - ideal).abs() < 0.01);
+    }
+
+    #[test]
+    fn nonidentity_short_repeat_fails_loud() {
+        for code in ["%SRX1Y1I0.5*%", "%SRX3Y1*%"] {
+            let g =
+                format!("%FSLAX46Y46*%\n%MOMM*%\n{code}\n%ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n");
+            assert!(resolve_layer(g.as_bytes()).is_err(), "{code}");
+        }
     }
 }

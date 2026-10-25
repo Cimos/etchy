@@ -44,6 +44,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - The default web viewer shell stays free of feedback collection. The demo now
   loads one feedback widget script with paste, drop, browse, and keyboard
   shortcuts; its payload omits User-Agent (#337).
+- **KiCad and Eagle fab packs load (#316):** aperture macros with `$n`
+  parameters, arithmetic and `$n=` assignments now render, so KiCad's stock
+  `RoundRect` pad no longer stops the load. Identity-valued image commands
+  (`%IPPOS`, `%OFA0B0`, `%SFA1B1`, `%MIA0B0`, `%ASAXBY`, `%SRX1Y1I0J0`) and
+  `%LN` layer names are accepted. Non-identity values, undefined macro
+  variables and division by zero still fail loud.
 - **Non-UTF-8 filenames keep their label (#299):** a layer file whose name isn't
   valid UTF-8 (e.g. a Latin-1 export on Linux) was labelled `""` and classified
   as Other; the CLI and viewer now use a lossy name, so the label stays readable
