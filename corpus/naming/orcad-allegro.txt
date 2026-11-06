@@ -1,0 +1,45 @@
+# OrCAD / Cadence Allegro default names.
+# Format: <filename> => <kind>. See corpus/naming/README.md.
+#
+# Allegro / OrCAD PCB Editor artwork (.art). Films are named after the class
+# subclass: TOP / BOTTOM etch, PIN/SOLDERMASK_*, PACKAGE GEOMETRY/SILKSCREEN_*,
+# PASTEMASK_*, BOARD GEOMETRY/DESIGN_OUTLINE. Sources:
+# https://docs.oshpark.com/design-tools/cadence-allegro/ and
+# https://embedded-systems-design.github.io/exporting-gerber-files-from-cadence-pcb-editor/
+TOP.art => top-copper
+BOTTOM.art => bottom-copper
+SOLDERMASK_TOP.art => top-mask
+SOLDERMASK_BOTTOM.art => bottom-mask
+SILKSCREEN_TOP.art => top-silk
+SILKSCREEN_BOTTOM.art => bottom-silk
+PASTEMASK_TOP.art => top-paste
+PASTEMASK_BOTTOM.art => bottom-paste
+OUTLINE.art => outline
+DESIGN_OUTLINE.art => outline
+# Drill drawing / ident film: a drawing, not the NC drill.
+DRILL.art => documentation
+# Inner etch films are named after user subclasses: stack position unknown.
+GND.art => other
+VCC.art => other
+# NC drill output and its side files.
+board.drl => drill
+nc_param.txt => other
+board.dts => other
+#
+# OrCAD Layout post processor. Source: BatchPCB FAQ via
+# https://community.sparkfun.com/t/orcad-layout-users-generating-correct-gerber-and-drill-files/1796
+board.TOP => top-copper
+board.BOT => bottom-copper
+board.SMT => top-mask
+board.SMB => bottom-mask
+board.SST => top-silk
+board.SSB => bottom-silk
+board.AST => documentation
+# Plane layers (stack position unknown), fab drawing (may or may not carry the
+# outline) and drill drawing stay unclassified.
+board.GND => other
+board.PWR => other
+board.FAB => other
+board.DRD => other
+# Excellon by content.
+thruhole.tap => other

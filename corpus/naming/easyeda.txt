@@ -1,0 +1,25 @@
+# EasyEDA (Std / JLCPCB) default Gerber export.
+# Format: <filename> => <kind>. See corpus/naming/README.md.
+# Source: https://docs.easyeda.com/en/PCB/Gerber-Generate/index.html
+Gerber_TopLayer.GTL => top-copper
+Gerber_BottomLayer.GBL => bottom-copper
+Gerber_InnerLayer1.G1 => inner-copper-1
+# Inner plane layers use .GP<n>; the stem carries the stack ordinal.
+Gerber_InnerLayer2.GP2 => inner-copper-2
+Gerber_TopSilkLayer.GTO => top-silk
+Gerber_BottomSilkLayer.GBO => bottom-silk
+Gerber_TopSolderMaskLayer.GTS => top-mask
+Gerber_BottomSolderMaskLayer.GBS => bottom-mask
+Gerber_TopPasteMaskLayer.GTP => top-paste
+Gerber_BottomPasteMaskLayer.GBP => bottom-paste
+Gerber_BoardOutline.GKO => outline
+Gerber_BoardOutlineLayer.GKO => outline
+Drill_PTH_Through.DRL => drill-pth
+Drill_PTH_Through_Via.DRL => drill-pth
+Drill_NPTH_Through.DRL => drill-npth
+Gerber_TopAssemblyLayer.GTA => documentation
+Gerber_BottomAssemblyLayer.GBA => documentation
+Gerber_DocumentLayer.GDL => documentation
+Gerber_DrillDrawingLayer.GDD => documentation
+# Mechanical layer may carry V-cut paths: not guessed.
+Gerber_MechanicalLayer.GME => other

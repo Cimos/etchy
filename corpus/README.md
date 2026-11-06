@@ -7,7 +7,8 @@ needed. Public Mad_RP2040 fab revisions are committed under
 `crates/etchy-gui/assets/demo/`. Native KiCad fixtures and exported oracles live
 under `corpus/native/kicad/`; PDF fixtures live under `corpus/pdf/`. Small
 Gerber parser cases, such as KiCad's stock `RoundRect` macro with a known
-flash area, live under `corpus/gerber/`.
+flash area, live under `corpus/gerber/`. Filename-classification lists for each
+EDA tool's default output names live under `corpus/naming/`.
 
 ## Harness
 

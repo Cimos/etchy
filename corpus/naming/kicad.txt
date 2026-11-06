@@ -1,0 +1,33 @@
+# KiCad default plot/drill names (baseline; must not change).
+# Format: <filename> => <kind>. See corpus/naming/README.md.
+board-F_Cu.gbr => top-copper
+board-B_Cu.gbr => bottom-copper
+board-In1_Cu.gbr => inner-copper-1
+board-In2_Cu.gbr => inner-copper-2
+board-F_Mask.gbr => top-mask
+board-B_Mask.gbr => bottom-mask
+board-F_Silkscreen.gbr => top-silk
+board-B_Silkscreen.gbr => bottom-silk
+board-F_SilkS.gbr => top-silk
+board-F_Paste.gbr => top-paste
+board-B_Paste.gbr => bottom-paste
+board-Edge_Cuts.gbr => outline
+board-PTH.drl => drill-pth
+board-NPTH.drl => drill-npth
+board.drl => drill
+board-top.pos => placement
+board-job.gbrjob => other
+board-F_Fab.gbr => other
+board-PTH-drl_map.gbr => other
+# "Use Protel filename extensions": .gl<n> is the physical stack layer.
+board.gtl => top-copper
+board.gbl => bottom-copper
+board.gl2 => inner-copper-1
+board.gl3 => inner-copper-2
+board.gts => top-mask
+board.gbs => bottom-mask
+board.gto => top-silk
+board.gbo => bottom-silk
+board.gtp => top-paste
+board.gbp => bottom-paste
+board.gm1 => outline
