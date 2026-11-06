@@ -164,7 +164,8 @@ jobs:
   # comment. The `release` leg downloads the latest released binary (that's
   # what `uses: ./` resolves to, since a local action has no action_ref); the
   # `source` leg builds this PR's CLI, so a CLI change that breaks the Action's
-  # flags fails here before a release ships it. Only the release leg comments.
+  # flags fails here before a release ships it. Only the release leg uploads
+  # the artifact and comments.
   #
   # Fork PRs get a read-only token whatever this block asks for; the Action
   # then warns and skips the comment, and the comment check below is skipped.
@@ -218,10 +219,14 @@ jobs:
           new: ${{ env.NEW }}
           fail-on-diff: "false"
           comment: ${{ matrix.comment }}
+          # Both legs share the report key, so the artifact name; only the
+          # commenting leg uploads, or the other's overwrite kills the link.
+          upload-report: ${{ matrix.comment }}
           build-from-source: ${{ matrix.build-from-source }}
 
       - name: Check outputs, report files and artifact
         env:
+          UPLOADED: ${{ matrix.comment }}
           CHANGED: ${{ steps.etchy.outputs.changed }}
           REPORT_DIR: ${{ steps.etchy.outputs.report-dir }}
           ARTIFACT_URL: ${{ steps.etchy.outputs.artifact-url }}
@@ -235,15 +240,21 @@ jobs:
           done
           n="$(find "$REPORT_DIR/svg" -maxdepth 1 -name '*.svg' -type f | wc -l)"
           [ "$n" -gt 0 ] || fail "no per-layer SVGs in $REPORT_DIR/svg"
-          [[ "$ARTIFACT_URL" == https://* ]] || fail "artifact-url is '$ARTIFACT_URL', expected the uploaded artifact's link"
+          if [ "$UPLOADED" = "true" ]; then
+            [[ "$ARTIFACT_URL" == https://* ]] || fail "artifact-url is '$ARTIFACT_URL', expected the uploaded artifact's link"
+          else
+            [ -z "$ARTIFACT_URL" ] || fail "artifact-url is '$ARTIFACT_URL' with upload-report off"
+          fi
           echo "changed=$CHANGED, $n layer SVGs, artifact $ARTIFACT_URL"
 
-      # Same-repo PRs only: a fork's token can't comment, by design.
+      # Same-repo, non-Dependabot PRs only: fork and Dependabot runs get a
+      # read-only token, so the Action warns instead of commenting, by design.
       - name: Check the sticky PR comment
         if: >-
           matrix.comment == 'true' &&
           github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.actor != 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
