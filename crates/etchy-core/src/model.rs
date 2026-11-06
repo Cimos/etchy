@@ -148,7 +148,7 @@ pub struct Layer {
     /// (#317). Always `false` for Excellon and placement layers.
     pub negative: bool,
     /// X2 object labels and their source contours; None when unavailable.
-    pub x2_objects: Option<Arc<Vec<crate::gerber::LabeledContour>>>,
+    pub x2_objects: Option<Arc<crate::gerber::LabeledObjects>>,
     /// Hole and slot counts per tool size for an Excellon drill file; None for
     /// every other layer, Gerber-format drill files included (#422).
     pub drill_tools: Option<crate::excellon::DrillTools>,
