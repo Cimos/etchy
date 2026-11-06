@@ -92,7 +92,7 @@ impl LayerKind {
     }
 
     /// A total order for stable, human-sensible report ordering (stack top→bottom).
-    fn sort_key(&self) -> (u8, u8) {
+    pub(crate) fn sort_key(&self) -> (u8, u8) {
         match self {
             LayerKind::TopCopper => (0, 0),
             LayerKind::InnerCopper(n) => (1, *n),

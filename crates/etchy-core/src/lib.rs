@@ -136,6 +136,51 @@ pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
     })
 }
 
+/// One revision on its own, with no second revision to compare (#466): every
+/// layer becomes an unchanged [`LayerView`] whose old and new sides both share
+/// the layer's geometry and whose added/removed sets are empty, in the board
+/// stack order [`compare_detailed`] uses. This is the shape the viewer draws for
+/// either side of a diff, built without running the boolean diff of a board
+/// against itself. A board with no layers fails like an empty compare.
+pub fn view_single(board: &Board) -> Result<BoardDiff> {
+    if board.layers.is_empty() {
+        return Err(EngineError::NoLayers);
+    }
+    let mut layers: Vec<&Layer> = board.layers.iter().collect();
+    layers.sort_by_key(|l| l.kind.sort_key());
+    let change = LayerChange::default();
+    let (reports, views): (Vec<LayerReport>, Vec<LayerView>) = layers
+        .into_iter()
+        .map(|l| {
+            let label = Some(l.label.clone());
+            let mut report = LayerReport::new(
+                l.kind,
+                label.clone(),
+                label.clone(),
+                LayerStatus::Unchanged,
+                &change,
+            );
+            report.labels_available = l.x2_objects.is_some();
+            let view = LayerView {
+                kind: l.kind,
+                label_old: label.clone(),
+                label_new: label,
+                status: LayerStatus::Unchanged,
+                old: Arc::clone(&l.geometry),
+                new: Arc::clone(&l.geometry),
+                added: PolygonSet::default(),
+                removed: PolygonSet::default(),
+                change,
+            };
+            (report, view)
+        })
+        .unzip();
+    Ok(BoardDiff {
+        report: DiffReport::new(reports, Vec::new()),
+        layers: views,
+    })
+}
+
 /// Diff a single layer pairing into its (report, view). Pure and independent across
 /// layers, so `compare_detailed` can run it in parallel (perf) without affecting
 /// output order or determinism.
@@ -922,5 +967,50 @@ mod tests {
         // Same allocation, not a copy: the view points at the board's geometry.
         assert!(Arc::ptr_eq(&diff.layers[0].old, &ga));
         assert!(Arc::ptr_eq(&diff.layers[0].new, &gb));
+    }
+
+    #[test]
+    fn view_single_shows_every_layer_unchanged_in_stack_order() {
+        // #466: one revision on its own is a view with nothing added or removed,
+        // in the same stack order a compare would use, sharing the geometry.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let g = Arc::new(
+            polygonize_gerber(format!("{hdr}X5000000Y5000000D03*\nM02*\n").as_bytes()).unwrap(),
+        );
+        let layer = |kind, label: &str| Layer {
+            kind,
+            label: label.into(),
+            geometry: Arc::clone(&g),
+            negative: false,
+            x2_objects: None,
+            drill_tools: None,
+        };
+        let board = Board {
+            layers: vec![
+                layer(LayerKind::BottomCopper, "B_Cu"),
+                layer(LayerKind::TopCopper, "F_Cu"),
+            ],
+        };
+        let single = view_single(&board).unwrap();
+        let paired = compare_detailed(&board, &board).unwrap();
+        let kinds = |d: &BoardDiff| d.layers.iter().map(|l| l.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&single), kinds(&paired));
+        assert!(!single.report.any_changes());
+        assert_eq!(single.report.totals.layers_total, 2);
+        for l in &single.layers {
+            assert_eq!(l.status, LayerStatus::Unchanged);
+            assert!(l.added.is_empty() && l.removed.is_empty());
+            assert!(Arc::ptr_eq(&l.old, &g) && Arc::ptr_eq(&l.new, &g));
+            assert_eq!(l.label_old, l.label_new);
+        }
+        assert!(single.report.layers.iter().all(|r| r.regions.is_empty()));
+    }
+
+    #[test]
+    fn view_single_of_an_empty_board_errors() {
+        assert!(matches!(
+            view_single(&Board::default()),
+            Err(EngineError::NoLayers)
+        ));
     }
 }
