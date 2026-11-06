@@ -105,6 +105,8 @@ pub struct UntabledContent {
     pub draws: u32,
     /// `G36`/`G37` region fills.
     pub regions: u32,
+    /// Flashes inside an open `G36`…`G37` region (invalid in RS-274X).
+    pub region_flashes: u32,
     /// Flashes under clear polarity (`%LPC`), which erase rather than drill.
     pub clear_flashes: u32,
 }
@@ -123,6 +125,11 @@ impl UntabledContent {
                 "draws (slots or routes)",
             ),
             (self.regions, "region fill", "region fills"),
+            (
+                self.region_flashes,
+                "flash inside a region",
+                "flashes inside regions",
+            ),
             (
                 self.non_circle_flashes,
                 "non-circle aperture flash",
@@ -975,6 +982,10 @@ impl<'a> Machine<'a> {
     /// the two formats key the same size identically. Anything else is counted
     /// as content a drill table cannot hold.
     fn tally_flash(&mut self, ap: &GtAperture) -> Result<()> {
+        if self.in_region {
+            self.untabled.region_flashes = self.untabled.region_flashes.saturating_add(1);
+            return Ok(());
+        }
         if !self.polarity_dark {
             self.untabled.clear_flashes = self.untabled.clear_flashes.saturating_add(1);
             return Ok(());
@@ -1554,6 +1565,7 @@ mod tests {
                 zero_size_flashes: 1,
                 draws: 2,
                 regions: 1,
+                region_flashes: 0,
                 clear_flashes: 1,
             }
         );
@@ -1564,6 +1576,16 @@ mod tests {
             "2 draws (slots or routes), 1 region fill, 1 non-circle aperture flash, \
              1 zero-diameter flash, 1 clear-polarity flash"
         );
+    }
+
+    #[test]
+    fn flash_table_does_not_count_a_flash_inside_a_region() {
+        let t = flash_table(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\nG36*\nX0Y0D03*\nG37*\nM02*\n",
+        );
+        assert_eq!(t.untabled.region_flashes, 1);
+        assert!(t.tools.by_diameter_um.is_empty());
+        assert_eq!(t.into_drill_tools().unwrap_err(), "1 flash inside a region");
     }
 
     #[test]
