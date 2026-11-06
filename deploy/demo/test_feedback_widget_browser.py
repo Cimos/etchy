@@ -396,6 +396,27 @@ class FeedbackWidgetBrowserTests(unittest.TestCase):
         body = self.submit()
         self.assertEqual([s["name"] for s in body["screenshots"]], ["big.png"])
 
+    def test_attach_while_sending_is_refused_visibly(self):
+        held = []
+        self.page.route("**/feedback", lambda r: held.append(r))
+        self.open_panel()
+        self.attach("paste", (PNG_A, "a.png", "image/png"))
+        self.thumbs(1)
+        self.page.click("#etfb-send")
+        for _ in range(100):
+            if held:
+                break
+            self.page.wait_for_timeout(50)
+        self.assertEqual(len(held), 1)
+        # The draft is reset when the send completes, so a late paste is refused.
+        self.attach("paste", (PNG_B, "late.png", "image/png"))
+        self.error("Sending")
+        self.thumbs(1)
+        held[0].continue_()
+        self.page.wait_for_selector("#etfb-toast.show")
+        self.assertIn("Thanks", self.page.text_content("#etfb-toast"))
+        self.assertEqual(len(self.records()), 1)
+
     def test_oversized_canvas_capture_is_skipped_with_notice(self):
         self.page.evaluate("n => { HTMLCanvasElement.prototype.toDataURL ="
                            " () => 'data:image/png;base64,' + 'A'.repeat(n); }",

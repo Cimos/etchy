@@ -28,7 +28,7 @@
   var MAX_SHOTS=8, MAX_SHOT_BYTES=8*1024*1024, MAX_BODY=16*1024*1024;
   // Room kept for the text, name and context when budgeting attachments.
   var BODY_RESERVE=256*1024;
-  var pending=0, pendingBytes=0, epoch=0;
+  var pending=0, pendingBytes=0, epoch=0, sending=false;
   function mb(n){return (n/1048576).toFixed(1).replace(/\.0$/,'')+' MB';}
   function names(a){return a.length>3?a.slice(0,3).join(', ')+' and '+(a.length-3)+' more':a.join(', ');}
   function urlBytes(type,size){return ('data:'+type+';base64,').length+Math.ceil(size/3)*4+16;}
@@ -46,7 +46,9 @@
   // Checks every file against the caps before reading it (reserving its slot
   // and bytes so parallel reads can't overshoot), then reports all refusals in
   // one visible message. Nothing is dropped without saying so.
-  function takeFiles(files){var many=[],big=[],total=[],notImg=[],bad=[],my=epoch;
+  function takeFiles(files){var many=[],big=[],total=[],notImg=[],my=epoch;
+    // The draft is reset when the send finishes, so nothing added now would be sent.
+    if(sending){if(files&&files.length)showErr('⚠ Sending — add screenshots after this one is sent.');return;}
     [].forEach.call(files||[],function(file){if(!file)return;
       var name=file.name||'pasted image';
       if(String(file.type).indexOf('image/')!==0){notImg.push(name);return;}
@@ -109,9 +111,9 @@
     if(n>MAX_BODY){showErr('⚠ Feedback too large to send ('+mb(n)+', max '+mb(MAX_BODY)+')'
       +(shots.length?' — remove a screenshot or shorten the text.':' — shorten the text.'));return;}
     showErr('');
-    var b=el('etfb-send');b.disabled=true;b.textContent='Sending…';
+    var b=el('etfb-send');b.disabled=true;b.textContent='Sending…';sending=true;
     fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:body})
-      .then(function(r){if(!r.ok)throw 0;done(true,note);}).catch(function(){done(false);})
+      .then(function(r){if(!r.ok)throw 0;sending=false;done(true,note);}).catch(function(){sending=false;done(false);})
       .then(function(){b.disabled=false;b.textContent='Send feedback';});};
   // --- opt-in: open a pre-filled GitHub issue in a new tab (#68) ---
   // Tokenless: builds a github.com/.../issues/new?title=&labels=&body= URL from
