@@ -11,6 +11,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ### Added
 - Viewer change navigator with per-layer region lists, X2 labels, framing, highlight, and rebindable N/P keys (#419).
+- Release assets and the ghcr container image get a signed build provenance
+  attestation, checked with `gh attestation verify <file> --repo Cimos/etchy`.
+  Each release also ships CycloneDX SBOMs for the CLI and the viewer (#348).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as

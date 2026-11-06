@@ -75,7 +75,9 @@ fails instead. To run it locally the same way, see
 
 A release *is* a pushed tag: `.github/workflows/release.yml` fires on `v*`, builds
 the CLI for four targets and the viewer installers with `--features pdf`, and
-attaches the assets plus `SHA256SUMS` to the GitHub Release. A tag with a `-` in
+attaches the assets, two CycloneDX SBOMs and `SHA256SUMS` to the GitHub Release,
+with a signed build provenance attestation over all of them
+(`.github/workflows/container.yml` attests the ghcr image). A tag with a `-` in
 it (`v0.1.0-rc1`) publishes as a pre-release. Before pushing the tag:
 
 1. **Cut the CHANGELOG section.** Move everything under `## [Unreleased]` in
@@ -90,7 +92,10 @@ it (`v0.1.0-rc1`) publishes as a pre-release. Before pushing the tag:
    `cargo clippy --workspace --all-targets -- -D warnings`, and
    `cargo test --workspace`.
 4. Review and merge the release PR. Then `git tag vX.Y.Z && git push origin vX.Y.Z`
-   and check the workflow attached the archives, installers and `SHA256SUMS`.
+   and check the workflow attached the archives, installers, SBOMs and
+   `SHA256SUMS`. Download one asset and run
+   `gh attestation verify <file> --repo Cimos/etchy`, then
+   `gh attestation verify oci://ghcr.io/cimos/etchy:vX.Y.Z --repo Cimos/etchy`.
 5. Update the Homebrew tap and submit the winget manifest PR after the assets
    are available. Check the site against the published release.
 

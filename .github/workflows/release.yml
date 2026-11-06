@@ -5,10 +5,15 @@ name: Release
 #
 #   etchy-cli-<tag>-<os>.{tar.gz,zip}     command-line tool + README-CLI.txt
 #   etchy-viewer-<tag>-<os>.{msi,dmg,deb,AppImage}   desktop viewer installers
+#   etchy-{cli,viewer}-<tag>.cdx.json     CycloneDX SBOMs (all targets)
+#
+# The release job signs a SLSA build provenance attestation over every asset,
+# checked with `gh attestation verify <file> --repo Cimos/etchy` (#348).
 #
 # macOS runs as ONE job (both CLI targets + the arm64 viewer) to keep macOS
-# runner time down. Installers are built by cargo-packager, installed from
-# crates.io at a pinned version with --locked; no third-party actions.
+# runner time down. Installers are built by cargo-packager and SBOMs by
+# cargo-cyclonedx, both installed from crates.io at a pinned version with
+# --locked; the only actions used are GitHub's own, pinned to a commit SHA.
 on:
   push:
     tags: ["v*"]
@@ -22,6 +27,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   PACKAGER_VERSION: 0.11.8
+  CYCLONEDX_VERSION: 0.5.9
 
 jobs:
   linux:
@@ -39,8 +45,10 @@ jobs:
       - name: System packages
         run: sudo apt-get update && sudo apt-get install -y musl-tools libxkbcommon-dev libgl1-mesa-dev
 
-      - name: Install cargo-packager
-        run: cargo install cargo-packager --version "$PACKAGER_VERSION" --locked
+      - name: Install cargo-packager and cargo-cyclonedx
+        run: |
+          cargo install cargo-packager --version "$PACKAGER_VERSION" --locked
+          cargo install cargo-cyclonedx --version "$CYCLONEDX_VERSION" --locked
 
       - name: Build the CLI (static musl)
         run: cargo build --locked --release -p etchy-cli --features pdf --target x86_64-unknown-linux-musl
@@ -48,6 +56,17 @@ jobs:
       - name: Build the viewer installers
         working-directory: crates/etchy-gui
         run: cargo packager --release -f deb,appimage
+
+      # One SBOM per shipped binary, covering the dependencies of every target
+      # platform, so the Linux job can describe all the release assets.
+      - name: Generate the SBOMs
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          cargo cyclonedx --format json --spec-version 1.5 --target all \
+            --manifest-path crates/etchy-cli/Cargo.toml --features pdf \
+            --override-filename sbom
 
       - name: Package
         env:
@@ -62,6 +81,8 @@ jobs:
           tar czf "dist/$dir.tar.gz" "$dir"
           cp target/packager/*.deb "dist/etchy-viewer-${TAG}-linux-x86_64.deb"
           cp target/packager/*.AppImage "dist/etchy-viewer-${TAG}-linux-x86_64.AppImage"
+          cp crates/etchy-cli/sbom.json "dist/etchy-cli-${TAG}.cdx.json"
+          cp crates/etchy-gui/sbom.json "dist/etchy-viewer-${TAG}.cdx.json"
           ls -l dist
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -187,8 +208,11 @@ jobs:
     runs-on: ubuntu-latest
     # Only this job creates the Release and uploads assets, so scope the write
     # token here — the build jobs above stay read-only (least privilege, #254).
+    # id-token + attestations let it sign and store the provenance (#348).
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -197,6 +221,13 @@ jobs:
 
       - name: Checksums
         run: (cd dist && sha256sum * > SHA256SUMS)
+
+      # Sigstore-signed SLSA provenance tying every asset (SHA256SUMS too) to
+      # this workflow run, tag and commit. Verify with `gh attestation verify`.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
 
       - name: Create or update the GitHub Release
         env:

@@ -1,7 +1,9 @@
 name: Container
 
 # Publish the headless CLI image to ghcr.io on a version tag. Plain `docker`
-# commands only, so there is no third-party action to audit or pin.
+# commands only, so there is no third-party action to audit or pin; the image
+# then gets a signed build provenance attestation from GitHub's actions/attest,
+# checked with `gh attestation verify oci://ghcr.io/cimos/etchy:<tag> --repo Cimos/etchy` (#348).
 on:
   push:
     tags: ["v*"]
@@ -20,6 +22,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # sign the provenance attestation (#348)
+      attestations: write # store it on this repository
+      artifact-metadata: write # record where the attested image is stored
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:
@@ -28,6 +33,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Build and push
+        id: push
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -41,8 +47,21 @@ jobs:
             --label "org.opencontainers.image.licenses=MIT OR Apache-2.0" \
             -t "$image:$TAG" .
           docker push "$image:$TAG"
+          # The digest the registry stored is what the attestation signs.
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$image:$TAG")"
+          digest="${digest#*@}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad digest: $digest"; exit 1; }
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
           # Pre-release tags (with a '-') never move `latest`.
           case "$TAG" in
             *-*) ;;
             *) docker tag "$image:$TAG" "$image:latest" && docker push "$image:latest" ;;
           esac
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
