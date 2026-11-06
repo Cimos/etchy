@@ -21,6 +21,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   that fails to parse is named in a warning instead of silently missing from
   the diff (#449).
 - Site download links and release status now point to the published v0.2.0 release (#458).
+- Gerber X2 layers use less memory. Labelled objects are stored once in a
+  compact form, not cloned beside the diff geometry. Region labels are
+  unchanged (#443).
 
 ## [0.2.0] — 2026-10-26
 

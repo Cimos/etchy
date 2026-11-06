@@ -234,8 +234,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     report.drill_table = drill_table;
     // Index each side's labelled objects once per layer, not once per region:
     // a scan of every object for every region is quadratic on big changes.
-    let added_index = added_x2.as_deref().map(|o| LabelIndex::new(o));
-    let removed_index = removed_x2.as_deref().map(|o| LabelIndex::new(o));
+    let added_index = added_x2.as_deref().map(LabelIndex::new);
+    let removed_index = removed_x2.as_deref().map(LabelIndex::new);
     report.regions = added
         .iter()
         .map(|r| region_report(r, report::RegionChange::Added, added_index.as_ref()))
@@ -275,7 +275,7 @@ const LABEL_GRID_LARGE: usize = 64;
 /// box. It only narrows the candidates: every hit is still confirmed by the
 /// bounding-box test and the exact boolean overlap, so labels match a full scan.
 struct LabelIndex<'a> {
-    objects: &'a [gerber::LabeledContour],
+    objects: &'a gerber::LabeledObjects,
     /// `[min_x, min_y, max_x, max_y]` of each object's outline (first ring).
     boxes: Vec<[i64; 4]>,
     origin: [i64; 2],
@@ -287,16 +287,13 @@ struct LabelIndex<'a> {
 }
 
 impl<'a> LabelIndex<'a> {
-    fn new(objects: &'a [gerber::LabeledContour]) -> Self {
+    fn new(objects: &'a gerber::LabeledObjects) -> Self {
         // The outline bounds the object; holes lie inside it.
         let boxes: Vec<[i64; 4]> = objects
             .iter()
             .map(|o| {
-                let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
-                for p in o.shape.first().into_iter().flatten() {
-                    b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
-                }
-                b
+                o.outline_bbox()
+                    .unwrap_or([i64::MAX, i64::MAX, i64::MIN, i64::MIN])
             })
             .collect();
         let mut ext = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
@@ -390,8 +387,8 @@ fn region_report(
     let mut pins = BTreeSet::new();
     let mut nets = BTreeSet::new();
     for i in index.candidates(&region.bbox_nm) {
-        let object = &index.objects[i as usize];
-        if !boolean::overlaps(region.shape, &object.shape) {
+        let object = index.objects.object(i as usize);
+        if !boolean::overlaps(region.shape, &object.shape()) {
             continue;
         }
         if let Some(name) = &object.labels.refdes {
@@ -523,15 +520,15 @@ mod tests {
             centroid_nm: [500_000, 500_000],
             shape: &shape,
         };
-        let objects: Vec<_> = (0..25)
-            .map(|i| gerber::LabeledContour {
-                shape: vec![contour.clone()],
-                labels: gerber::ObjectLabels {
+        let objects = gerber::LabeledObjects::from_objects((0..25).map(|i| {
+            (
+                vec![contour.clone()],
+                gerber::ObjectLabels {
                     refdes: Some(format!("U{i}")),
                     ..Default::default()
                 },
-            })
-            .collect();
+            )
+        }));
         let index = LabelIndex::new(&objects);
         let report = region_report(&region, report::RegionChange::Added, Some(&index));
         let labels = report.labels.unwrap();
@@ -552,17 +549,13 @@ mod tests {
                 Pt::new(x, y + s),
             ]
         };
-        let mut objects: Vec<_> = (0..30)
-            .flat_map(|i| (0..30).map(move |j| (i, j)))
-            .map(|(i, j)| gerber::LabeledContour {
-                shape: vec![sq(i * 2_000_000, j * 2_000_000, 1_000_000)],
-                labels: gerber::ObjectLabels::default(),
-            })
-            .collect();
-        objects.push(gerber::LabeledContour {
-            shape: vec![sq(-5_000_000, -5_000_000, 70_000_000)],
-            labels: gerber::ObjectLabels::default(),
-        });
+        let objects = gerber::LabeledObjects::from_objects(
+            (0..30)
+                .flat_map(|i| (0..30).map(move |j| (i, j)))
+                .map(|(i, j)| sq(i * 2_000_000, j * 2_000_000, 1_000_000))
+                .chain([sq(-5_000_000, -5_000_000, 70_000_000)])
+                .map(|ring| (vec![ring], gerber::ObjectLabels::default())),
+        );
         let index = LabelIndex::new(&objects);
         assert_eq!(index.large, [900]);
         for bb in [
