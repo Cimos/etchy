@@ -23,3 +23,6 @@ Gerber_DocumentLayer.GDL => documentation
 Gerber_DrillDrawingLayer.GDD => documentation
 # Mechanical layer may carry V-cut paths: not guessed.
 Gerber_MechanicalLayer.GME => other
+# The stem alone isn't trusted: the extension must carry the same number.
+Gerber_InnerLayer2.txt => other
+Gerber_InnerLayer2.GP3 => other

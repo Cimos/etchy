@@ -125,12 +125,14 @@ fn other_eda_scheme(s: &str, e: &str) -> Option<LayerKind> {
         return by_ext;
     }
     // EasyEDA `Gerber_InnerLayer<n>` numbers signal (`.G<n>`) and plane
-    // (`.GP<n>`) inners on one ordinal scale, so the stem gives the index.
+    // (`.GP<n>`) inners on one ordinal scale, so the stem gives the index. The
+    // extension must carry the same number; anything else isn't guessed.
     if let Some(n) = s
         .strip_prefix("GERBER_INNERLAYER")
         .and_then(|d| d.parse::<u8>().ok())
     {
-        if (1..=99).contains(&n) {
+        let ext_n = e.strip_prefix("gp").or_else(|| e.strip_prefix('g'));
+        if (1..=99).contains(&n) && ext_n.and_then(|d| d.parse::<u8>().ok()) == Some(n) {
             return Some(InnerCopper(n));
         }
     }
@@ -612,6 +614,10 @@ mod tests {
         assert_eq!(classify("Gerber_MechanicalLayer", "GME"), Other);
         // Without the EasyEDA stem a plane extension stays unknown.
         assert_eq!(classify("board", "GP2"), Other);
+        // The EasyEDA stem alone isn't trusted: the extension must agree.
+        assert_eq!(classify("Gerber_InnerLayer2", "txt"), Other);
+        assert_eq!(classify("Gerber_InnerLayer2", "gbr"), Other);
+        assert_eq!(classify("Gerber_InnerLayer2", "GP3"), Other);
     }
 
     #[test]
