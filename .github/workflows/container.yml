@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and publish (e.g. v0.1.0)"
+        description: "Existing tag to build and publish (e.g. v0.1.0); run the workflow from that same tag"
         required: true
 
 permissions:
@@ -39,6 +39,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "bad tag: $TAG"; exit 1; }
+          # The provenance names github.sha as the source, so the image must be
+          # built from that commit: run a manual dispatch from the tag itself.
+          [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || { echo "checked-out $TAG is not the workflow commit $GITHUB_SHA; dispatch from the tag"; exit 1; }
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker build \
