@@ -42,6 +42,23 @@ Gate CI on the **magnitude** and **location** of change:
 etchy old/ new/ --gate-layers copper --fail-on-area 0.5
 ```
 
+**Waivers** accept a known change, such as a bumped date code, so the gate still
+passes. A waiver is a box in board mm on one layer, with a required reason:
+
+```toml
+# waivers.toml — pass with: etchy old/ new/ --waivers waivers.toml
+[[waiver]]
+layer = "top-silk"
+box = [10.0, 5.0, 30.0, 9.0]   # x_min, y_min, x_max, y_max in mm, the board's own coordinates
+reason = "date code bumped each revision"
+```
+
+A changed region is waived only if it lies **entirely** inside a box; a partial
+overlap stays a failure and is named as one. The gates and the exit code count only
+unwaived changes, but every output still lists the waived regions with their
+count, area and reason. A waiver that matches nothing is reported as stale;
+`--fail-on-stale-waivers` makes that exit 1.
+
 **Every PR that touches Gerbers gets a layer-by-layer diff comment** — five lines
 add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):

@@ -381,3 +381,164 @@ fn unsupported_geometry_fails_loud() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+/// old/new pair whose only change is one 0.5 mm pad at (25, 25) mm on top copper
+/// (bbox 24.75..25.25 mm), plus a waiver file per call (#425).
+fn waiver_pair(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = scratch(tag);
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    write_layer(&old, "F_Cu.gbr", "");
+    write_layer(&new, "F_Cu.gbr", "X25000000Y25000000D03*\n");
+    (root, old, new)
+}
+
+fn waiver_file(root: &Path, body: &str) -> PathBuf {
+    let path = root.join("waivers.toml");
+    fs::write(&path, body).unwrap();
+    path
+}
+
+fn run_with_waivers(
+    old: &Path,
+    new: &Path,
+    waivers: &Path,
+    extra: &[&str],
+) -> (i32, String, String) {
+    let out = etchy()
+        .args(extra)
+        .arg("--waivers")
+        .arg(waivers)
+        .arg(old)
+        .arg(new)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn fully_waived_diff_exits_0_and_every_output_lists_it() {
+    let (root, old, new) = waiver_pair("waiver-ok");
+    let w = waiver_file(
+        &root,
+        "[[waiver]]\nlayer = \"top-copper\"\nbox = [24, 24, 26, 26]\nreason = \"date code\"\n",
+    );
+
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &[]);
+    assert_eq!(code, 0, "a fully waived diff passes: {stdout}{stderr}");
+    assert!(
+        stderr.contains("using 1 waiver(s)"),
+        "waiver file use is announced: {stderr}"
+    );
+    assert!(stdout.contains("1 region(s) waived"), "{stdout}");
+    assert!(stdout.contains("reason: date code"), "{stdout}");
+
+    let (code, json, _) = run_with_waivers(&old, &new, &w, &["--format", "json"]);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["gate"]["passed"], true);
+    assert_eq!(v["waivers"]["waived_regions"], 1);
+    assert_eq!(v["waivers"]["waivers"][0]["reason"], "date code");
+    assert!(v["waivers"]["waived_area_mm2"].as_f64().unwrap() > 0.19);
+    // The raw diff is still reported in full; waiving never hides a change.
+    assert_eq!(v["any_changes"], true);
+    assert_eq!(v["layers"][0]["added_regions"], 1);
+
+    let html = root.join("r.html");
+    let (code, md, _) = run_with_waivers(
+        &old,
+        &new,
+        &w,
+        &["--format", "md", "--html", html.to_str().unwrap()],
+    );
+    assert_eq!(code, 0);
+    assert!(md.contains("### Waivers"), "{md}");
+    assert!(md.contains("date code"), "{md}");
+    let html_text = fs::read_to_string(&html).unwrap();
+    assert!(html_text.contains("Waivers") && html_text.contains("date code"));
+
+    // With --fail-on-area the waived area does not count either.
+    let (code, _, _) = run_with_waivers(&old, &new, &w, &["--fail-on-area", "0.01"]);
+    assert_eq!(code, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn partially_overlapping_waiver_does_not_waive() {
+    let (root, old, new) = waiver_pair("waiver-partial");
+    // The box cuts the pad in half: not waived, and said so.
+    let w = waiver_file(
+        &root,
+        "[[waiver]]\nlayer = \"top-copper\"\nbox = [25, 24, 26, 26]\nreason = \"half\"\n",
+    );
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &[]);
+    assert_eq!(code, 1, "a partial overlap still fails: {stdout}");
+    assert!(stderr.contains("partially overlap waiver #1"), "{stderr}");
+    assert!(stdout.contains("partially overlaps waiver #1"), "{stdout}");
+    // The waiver matched nothing, so it is stale too.
+    assert!(stderr.contains("stale waiver #1"), "{stderr}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stale_waivers_are_reported_and_can_fail_ci() {
+    let (root, old, new) = waiver_pair("waiver-stale");
+    let w = waiver_file(
+        &root,
+        "[[waiver]]\nlayer = \"top-copper\"\nbox = [24, 24, 26, 26]\nreason = \"date code\"\n\n\
+         [[waiver]]\nlayer = \"top-silk\"\nbox = [0, 0, 10, 10]\nreason = \"old logo\"\n",
+    );
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &[]);
+    assert_eq!(code, 0, "a stale waiver is a warning by default");
+    assert!(stderr.contains("stale waiver #2"), "{stderr}");
+    assert!(stdout.contains("1 stale waiver(s)"), "{stdout}");
+
+    let (code, json, _) = run_with_waivers(&old, &new, &w, &["--format", "json"]);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["waivers"]["stale_waivers"], 1);
+    assert_eq!(v["waivers"]["waivers"][1]["stale"], true);
+    assert!(v["warnings"].to_string().contains("stale waiver #2"));
+
+    let (code, _, stderr) = run_with_waivers(&old, &new, &w, &["--fail-on-stale-waivers"]);
+    assert_eq!(
+        code, 1,
+        "--fail-on-stale-waivers turns a stale waiver into a failure"
+    );
+    assert!(stderr.contains("stale"), "{stderr}");
+
+    // An unchanged pair with a waiver: everything is stale.
+    let (code, _, _) = run_with_waivers(&old, &old, &w, &["--fail-on-stale-waivers"]);
+    assert_eq!(code, 1);
+    let (code, _, _) = run_with_waivers(&old, &old, &w, &[]);
+    assert_eq!(code, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bad_waiver_files_exit_2() {
+    let (root, old, new) = waiver_pair("waiver-bad");
+    for (body, needle) in [
+        ("[[waiver]]\nlayer = \"top-slik\"\nbox = [0, 0, 1, 1]\nreason = \"r\"\n", "top-slik"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [0, 0, 1]\nreason = \"r\"\n", "box"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [1, 0, 0, 1]\nreason = \"r\"\n", "waiver #1"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [0, 0, 1, 1]\nreason = \"r\"\nnote = \"x\"\n", "note"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [0, 0, 1, 1]\n", "reason"),
+        ("not toml [", "waiver"),
+    ] {
+        let w = waiver_file(&root, body);
+        let (code, _, stderr) = run_with_waivers(&old, &new, &w, &[]);
+        assert_eq!(code, 2, "{body:?} must exit 2: {stderr}");
+        assert!(stderr.contains(needle), "{body:?}: {stderr}");
+    }
+    // A missing file is exit 2 as well.
+    let (code, _, _) = run_with_waivers(&old, &new, &root.join("nope.toml"), &[]);
+    assert_eq!(code, 2);
+    let _ = fs::remove_dir_all(root);
+}

@@ -29,6 +29,7 @@ pub mod pagealign;
 pub mod placement;
 pub mod report;
 pub mod view;
+pub mod waiver;
 
 pub use board_input::{board_from_bytes, BoardBuilder};
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
@@ -38,8 +39,8 @@ pub use excellon::{
     DrillTools, ResolvedDrill, ToolCount,
 };
 pub use export::{
-    board_areas_csv, board_report_html, board_report_html_with_limit, layer_svg,
-    layer_svg_with_colors,
+    board_areas_csv, board_report_html, board_report_html_with_limit,
+    board_report_html_with_waivers, layer_svg, layer_svg_with_colors,
 };
 pub use geo::{
     quantize_mm, simplify_contour, triangulate_shape, Aperture, Contour, Polarity, PolygonSet,
@@ -73,6 +74,10 @@ pub use report::{
     ObjectSummary, Totals, NATIVE_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 pub use view::{BoardDiff, LayerView};
+pub use waiver::{
+    apply_waivers, LayerWaiverTotals, PartialOverlap, WaivedRegion, Waiver, WaiverError,
+    WaiverMatch, WaiverReport, WAIVER_LAYER_NAMES,
+};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

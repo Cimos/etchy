@@ -29,3 +29,5 @@ anyhow.workspace = true
 # code can never disagree — #258).
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Parses the --waivers file (#425). MIT OR Apache-2.0; already in the lockfile.
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }

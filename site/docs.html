@@ -179,11 +179,29 @@ result: differences found</pre>
       <tr><td><code>--html &lt;FILE&gt;</code></td><td>Write a single self-contained HTML report: totals, warnings, and every changed layer's overlay inlined. No external assets, so it travels as one file.</td></tr>
       <tr><td><code>--fail-on-area &lt;MM2&gt;</code></td><td>CI gate: exit 1 only when the changed area on the gated layers exceeds this many mm². With neither threshold set, any change on the gated layers fails.</td></tr>
       <tr><td><code>--fail-on-regions &lt;N&gt;</code></td><td>CI gate on the changed region count instead. Set both and either one being exceeded fails.</td></tr>
+      <tr><td><code>--waivers &lt;FILE&gt;</code></td><td>Accept known changes from a TOML waiver file (see <a href="#waivers">Waivers</a>). The gates and the exit code count only unwaived changes; every output still lists what was waived. Never picked up automatically; etchy prints the file it uses.</td></tr>
+      <tr><td><code>--fail-on-stale-waivers</code></td><td>Exit 1 when a waiver matched no changed region, so stale waivers don't pile up. Without it a stale waiver is a warning.</td></tr>
       <tr><td><code>--gate-layers &lt;SPEC&gt;</code></td><td>Which layers the gate looks at: <code>all</code> (default), or a comma list of <code>copper</code>, <code>mask</code>, <code>silk</code>, <code>paste</code>, <code>drill</code> (all drill files), <code>pth</code> (plated drill only), <code>npth</code> (non-plated drill only), <code>outline</code>, <code>documentation</code> (alias <code>docs</code>), <code>placement</code>, <code>other</code>. Group names match exactly. An unknown name is a loud error, never a silently disarmed gate.</td></tr>
       <tr><td><code>--dpi &lt;DPI&gt;</code></td><td>PDF inputs only: rasterization resolution, default 150. Higher is crisper but costs memory and time (per-page pixel area is capped).</td></tr>
       <tr><td><code>--out &lt;DIR&gt;</code></td><td>PDF inputs only: write one overlay PNG per diffed page (<code>page-&lt;n&gt;.png</code>) into this directory.</td></tr>
       <tr><td><code>--min-region-px &lt;N&gt;</code></td><td>PDF inputs only: keep changed regions under N connected pixels out of the overlay as likely anti-aliasing noise. Default 1, which hides nothing. Anything hidden is still counted and still reported — the floor can never produce a silent “no differences”.</td></tr>
     </table>
+
+    <h3 id="waivers" style="font-size:17px;margin:22px 0 4px">Waivers</h3>
+    <p>A board revision that only bumps the date code still trips <code class="inline">--fail-on-area</code>. A waiver file accepts that known change so the gate still passes. Each waiver is a box on one layer, in millimetres in the board's own coordinates (the same numbers etchy prints as a region's bbox), with a required reason:</p>
+    <pre class="code"><span class="c"># waivers.toml</span>
+[[waiver]]
+layer = "top-silk"            <span class="c"># a layer name as etchy prints it: top-copper, inner-copper2, bottom-mask, drill-pth, …</span>
+box = [10.0, 5.0, 30.0, 9.0]  <span class="c"># x_min, y_min, x_max, y_max (mm)</span>
+reason = "date code bumped each revision"</pre>
+    <pre class="code"><span class="k">etchy</span> old/ new/ --waivers waivers.toml --fail-on-area 0.5 --fail-on-stale-waivers</pre>
+    <ul>
+      <li>A changed region is waived only when its bounding box lies <strong>entirely</strong> inside a waiver box. A region that partially overlaps a box is <em>not</em> waived and is reported as partially overlapping it. A region that spans two boxes is not waived either. If boxes overlap, the first one in the file claims the region.</li>
+      <li><code class="inline">--fail-on-area</code>, <code class="inline">--fail-on-regions</code> and the plain any-change exit code count only unwaived changes. The diff itself is unchanged: the per-layer table, JSON <code class="inline">layers</code> and overlays still show every change.</li>
+      <li>Every output lists what was waived: the terminal summary, the JSON <code class="inline">waivers</code> object, the Markdown and HTML reports. Each waiver shows its region count, area and reason. Nothing is dropped quietly.</li>
+      <li>A waiver that matched no changed region is reported as stale (a warning). Add <code class="inline">--fail-on-stale-waivers</code> to make that exit 1 in CI.</li>
+      <li>An unknown layer name, an unknown key, a malformed box, a missing or empty reason, or a file with no <code class="inline">[[waiver]]</code> entries is an error (exit 2). Waivers do not apply to PDF inputs.</li>
+    </ul>
 
     <h3 style="font-size:17px;margin:22px 0 4px">Reports and exports</h3>
     <p>One run can write every output at once — they all come from the same diff computation, so the picture and the numbers can't disagree:</p>

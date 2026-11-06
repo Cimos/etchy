@@ -218,7 +218,7 @@ pub struct RegionReport {
     pub labels: Option<RegionLabels>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RegionChange {
     Added,
@@ -687,7 +687,7 @@ impl DiffReport {
 /// backtick is padded with a space so the pad, not the backtick, meets the fence.
 /// A code span cannot contain a line break at this position, so `\r`/`\n` are
 /// collapsed to a space first.
-fn md_code_span(s: &str) -> String {
+pub(crate) fn md_code_span(s: &str) -> String {
     let text = s.replace(['\r', '\n'], " ");
     let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest_run + 1);
