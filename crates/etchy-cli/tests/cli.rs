@@ -194,6 +194,86 @@ fn drill_table_reaches_json_markdown_html_and_summary() {
 }
 
 #[test]
+fn gerber_drill_layer_compares_with_excellon_in_the_drill_table() {
+    // #457: old is Excellon (metric), new is the same plated drill exported as
+    // Gerber flashes in inches, with one more 0.8 mm hole.
+    let root = scratch("gerber-drill-table");
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    fs::write(
+        old.join("board-PTH.drl"),
+        "M48\nMETRIC,TZ\nT1C0.300\nT2C0.800\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\nM30\n",
+    )
+    .unwrap();
+    let gerber_hdr = "%FSLAX26Y26*%\n%MOIN*%\n%TF.FileFunction,Plated,1,2,PTH,Drill*%\n\
+                      %ADD10C,0.0118*%\n%ADD11C,0.0315*%\n";
+    fs::write(
+        new.join("board-PTH-drl.gbr"),
+        format!(
+            "{gerber_hdr}D10*\nX196850Y196850D03*\nX1968504Y1968504D03*\n\
+             D11*\nX787402Y787402D03*\nX1181102Y787402D03*\nM02*\n"
+        ),
+    )
+    .unwrap();
+    let out = etchy()
+        .arg("--format")
+        .arg("json")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let table = &value["layers"][0]["drill_table"];
+    let rows: Vec<_> = table["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["diameter_um"].as_i64().unwrap(),
+                r["change"].as_str().unwrap(),
+                r["old_holes"].as_u64().unwrap(),
+                r["new_holes"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [(300, "unchanged", 2, 2), (800, "changed", 1, 2)]);
+
+    // A slot drawn on the Gerber side can't be counted: no table, and a
+    // warning that says so.
+    fs::write(
+        new.join("board-PTH-drl.gbr"),
+        format!(
+            "{gerber_hdr}D10*\nX196850Y196850D03*\nX1968504Y1968504D03*\n\
+             D11*\nX787402Y787402D02*\nX1181102Y787402D01*\nM02*\n"
+        ),
+    )
+    .unwrap();
+    let out = etchy()
+        .arg("--format")
+        .arg("json")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(value["layers"][0].get("drill_table").is_none());
+    let warnings = value["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| {
+            let w = w.as_str().unwrap();
+            w.contains("board-PTH-drl.gbr") && w.contains("1 draw (slot or route)")
+        }),
+        "{warnings:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn passing_gate_output_matches_exit_0() {
     // #258: a change smaller than --fail-on-area exits 0, but the summary/JSON
     // used to say "differences found" / any_changes:true with no hint that the
