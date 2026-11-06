@@ -20,6 +20,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   declared format (#429) warns there as it does in the CLI, and a web demo layer
   that fails to parse is named in a warning instead of silently missing from
   the diff (#449).
+- Web viewer: the files of one drag-and-drop now load as one set. The browser
+  reads each file on its own, so they could arrive over several frames and load
+  as a partial board or split across sides. If a file can't be read, the drop
+  now fails with a message instead of loading the rest (#453).
 - Site download links and release status now point to the published v0.2.0 release (#458).
 
 ## [0.2.0] — 2026-10-26
