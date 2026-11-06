@@ -1,10 +1,11 @@
 //! etchy-gui — native desktop viewer (egui).
 //!
-//! `etchy-gui <old> <new>` diffs two Gerber revision directories and shows the
-//! result: a changed-first layer list and a pan/zoom canvas overlaying the diff
-//! (added copper green, removed red, base muted). The geometry + diff come from
-//! the pure `etchy-core` engine via `compare_detailed`; this crate only does I/O
-//! and rendering. M1 scope: flash-only geometry (the engine fails loud otherwise).
+//! `etchy-gui <dir>` opens one Gerber set; `etchy-gui <old> <new>` diffs two.
+//! The viewer shows a changed-first layer list and a pan/zoom canvas overlaying
+//! the diff (added copper green, removed red, base muted). The geometry + diff
+//! come from the pure `etchy-core` engine via `compare_detailed`; this crate only
+//! does I/O and rendering. M1 scope: flash-only geometry (the engine fails loud
+//! otherwise).
 
 // Release builds on Windows open no console window behind the viewer.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -70,10 +71,16 @@ mod native {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let owd = std::env::var_os("OWD").map(PathBuf::from);
         let arg_path = |a: &str| resolve_arg(owd.as_deref(), a);
-        // 0 args → start on the welcome screen; 2 args → load both up front (keeps
-        // the `etchy-gui <old> <new>` contract and fails loud on a bad path).
+        // 0 args → welcome screen; 1 arg → one Gerber set; 2 args → a diff.
         let seed = match args.len() {
             0 => None,
+            1 => match load_single_seed(&arg_path(&args[0])) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("etchy-gui: error: {e:#}");
+                    return ExitCode::from(2);
+                }
+            },
             2 => match load_seed(&arg_path(&args[0]), &arg_path(&args[1])) {
                 Ok(s) => Some(s),
                 Err(e) => {
@@ -82,7 +89,7 @@ mod native {
                 }
             },
             _ => {
-                eprintln!("usage: etchy-gui [<old-dir> <new-dir>]");
+                eprintln!("usage: etchy-gui [<dir> | <old-dir> <new-dir>]");
                 return ExitCode::from(2);
             }
         };
@@ -144,7 +151,7 @@ mod native {
     fn load_seed(
         old_path: &Path,
         new_path: &Path,
-    ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff, f32)> {
+    ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff, f32, bool)> {
         let old = load_source_any(old_path, label(old_path))?;
         let new = load_source_any(new_path, label(new_path))?;
         // Persisted settings aren't restored yet at this point — seed a PDF pair
@@ -160,7 +167,26 @@ mod native {
                 Err(_) => return Err(first),
             },
         };
-        Ok((old, new, diff, dpi))
+        Ok((old, new, diff, dpi, false))
+    }
+
+    /// Load one Gerber set and seed both comparison sides from it so the normal
+    /// layer and canvas machinery can render it without added/removed geometry.
+    fn load_single_seed(
+        path: &Path,
+    ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff, f32, bool)> {
+        let source = load_source_any(path, label(path))?;
+        let LoadedSource::Board(board) = source else {
+            anyhow::bail!("single-set view requires a Gerber directory or .zip fab pack");
+        };
+        let diff = diff_from_sources(&board, &board)?;
+        Ok((
+            LoadedSource::Board(board.clone()),
+            LoadedSource::Board(board),
+            ComputedDiff::Board(diff),
+            PDF_DPI_DEFAULT,
+            true,
+        ))
     }
 
     /// Construct the app, restoring persisted settings. With a seed, both sources
@@ -168,10 +194,10 @@ mod native {
     /// (empty diff).
     fn build_app(
         cc: &eframe::CreationContext<'_>,
-        seed: Option<(LoadedSource, LoadedSource, ComputedDiff, f32)>,
+        seed: Option<(LoadedSource, LoadedSource, ComputedDiff, f32, bool)>,
     ) -> ViewApp {
         match seed {
-            Some((old, new, computed, seed_dpi)) => {
+            Some((old, new, computed, seed_dpi, single_set)) => {
                 let (ol, nl) = (old.label().to_string(), new.label().to_string());
                 let mut app = match computed {
                     ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
@@ -183,6 +209,9 @@ mod native {
                 };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
+                if single_set {
+                    app.mode = Mode::New;
+                }
                 // The seed was rasterized before settings restore; honour a
                 // different persisted DPI now (#223). If that re-rasterize
                 // fails (caps), the setting must fall back to the DPI the
@@ -230,9 +259,12 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use super::{decode_icon_rgba, window_icon, WINDOW_ICON_PNG};
+        use super::{
+            decode_icon_rgba, load_single_seed, window_icon, ComputedDiff, WINDOW_ICON_PNG,
+        };
 
         const WINDOWS_ICON: &[u8] = include_bytes!("../../../assets/brand/etchy-app-icon.ico");
+        const MIN_GERBER: &[u8] = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.0*%\nD10*\nX0Y0D03*\nM02*\n";
 
         // #271: the embedded app icon must decode to a full RGBA buffer of the
         // expected dimensions, so `window_icon` hands the windowing backend a
@@ -279,6 +311,45 @@ mod native {
             for size in [16, 32, 48, 256] {
                 assert!(sizes.contains(&size), "missing {size} px Windows icon");
             }
+        }
+
+        #[test]
+        fn single_set_seed_loads_directories_and_zips_without_changes() {
+            use std::io::Write as _;
+
+            let dir =
+                std::env::temp_dir().join(format!("etchy-single-set-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let gerber_dir = dir.join("RevA");
+            std::fs::create_dir(&gerber_dir).unwrap();
+            std::fs::write(gerber_dir.join("board-F_Cu.gtl"), MIN_GERBER).unwrap();
+
+            let zip_path = dir.join("RevB.zip");
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+            zip.start_file(
+                "board-F_Cu.gtl",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+            zip.write_all(MIN_GERBER).unwrap();
+            zip.finish().unwrap();
+
+            for path in [&gerber_dir, &zip_path] {
+                let (old, new, computed, _, single_set) = load_single_seed(path).unwrap();
+                assert!(single_set);
+                assert_eq!(old.label(), new.label());
+                let ComputedDiff::Board(diff) = computed else {
+                    panic!("single Gerber set must produce a board view");
+                };
+                assert!(!diff.layers.is_empty());
+                assert!(diff.layers.iter().all(|layer| !layer.is_changed()));
+                assert!(diff.layers.iter().any(|layer| !layer.new.shapes.is_empty()));
+            }
+
+            let missing = dir.join("missing");
+            assert!(load_single_seed(&missing).is_err());
+            std::fs::remove_dir_all(&dir).ok();
         }
     }
 }
