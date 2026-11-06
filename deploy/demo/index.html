@@ -132,6 +132,9 @@
   .etfb-thumb .rm:hover{background:#a23;color:#fff}
   .etfb-kbd{display:block;text-align:center;margin-top:8px;font-size:11px;color:#5b6577}
   .etfb-kbd b{color:#8fb6d8;font-weight:700}
+  .etfb-err{display:none;margin-top:8px;border:1px solid #e8b34a;border-radius:6px;background:#33270f;color:#f0d49a;
+    font-size:12px;line-height:1.35;padding:7px 9px}
+  .etfb-err.show{display:block}
   </style>
   <div id="etfb-root">
     <button id="etfb-fab" onclick="etfbOpen()">💬 Feedback</button>
@@ -158,7 +161,8 @@
         <input id="etfb-name" class="etfb-name" placeholder="Your name or initials (optional)">
         <div class="etfb-shots" id="etfb-shots"></div>
         <div class="etfb-shot" id="etfb-shot">📎 Paste screenshots (Ctrl+V), drop, or click to attach</div>
-        <div class="etfb-kbd" id="etfb-shot-hint">Pasted shots are captured at paste time; otherwise the current view is attached on Send.</div>
+        <div class="etfb-kbd" id="etfb-shot-hint">Pasted shots are captured at paste time; otherwise the current view is attached on Send. Up to 8 images, 8 MB each.</div>
+        <div class="etfb-err" id="etfb-err" role="alert" aria-live="assertive"></div>
         <input type="file" id="etfb-file" accept="image/*" multiple style="display:none">
         <div class="etfb-ctx" id="etfb-ctx"></div>
         <button class="etfb-send" id="etfb-send" onclick="etfbSend()">Send feedback</button>
