@@ -873,6 +873,7 @@ dependencies = [
  "etchy-pdf",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

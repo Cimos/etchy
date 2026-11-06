@@ -11,6 +11,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ### Added
 - Viewer change navigator with per-layer region lists, X2 labels, framing, highlight, and rebindable N/P keys (#419).
+- Waivers: `--waivers FILE` accepts known changes, such as a bumped date code,
+  so CI gates still pass. Each waiver is a per-layer box in board mm with a
+  required reason. Only regions wholly inside a box are waived; partial overlaps
+  stay unwaived and are named. The gates count only unwaived changes, while the
+  summary, JSON, Markdown and HTML outputs list every waived region with its
+  count, area and reason. Stale waivers are reported, and
+  `--fail-on-stale-waivers` makes them exit 1. A bad waiver file exits 2 (#425).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
