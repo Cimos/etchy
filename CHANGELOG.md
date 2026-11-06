@@ -17,6 +17,16 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   other apertures gets no table and a warning saying what it could not count
   (#457).
 
+### Changed
+- **Behaviour change:** a drill-table count change is now a diff (#456). When a
+  drill layer's hole or slot count changes for any tool size, the layer is
+  `changed` and the CLI exits 1, even if the geometry is identical (a hole
+  drilled twice at one spot). Renumbering tools of one size with the same
+  counts is not a change. The summary, Markdown and HTML say the change is in
+  the drill table only. JSON adds `drill_counts_changed` on the layer and
+  `gate.drill_count_layers`. A count change on a gated layer fails the CI gate
+  whatever `--fail-on-area`/`--fail-on-regions` say. This applies to tables
+  built from Excellon and from Gerber drill layers.
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
   "gerber parse failed". The message now reads "parse failed", after the
