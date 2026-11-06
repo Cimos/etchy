@@ -359,7 +359,7 @@ fn main() {
     wasm_bindgen_futures::spawn_local(async move {
         let canvas = web_sys::window()
             .and_then(|w| w.document())
-            .and_then(|d| d.get_element_by_id("the_canvas_id"))
+            .and_then(|d| d.get_element_by_id(WEB_CANVAS_ID))
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("canvas element #the_canvas_id");
         // The bundled demo board is the public Mad_RP2040 (v0.0.0 -> v0.0.1), from
@@ -1359,6 +1359,10 @@ static WEB_FOLDER_DROPPED: std::sync::atomic::AtomicBool =
 #[cfg(target_arch = "wasm32")]
 static WEB_DROP_FILE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// The page's canvas that eframe runs in (and listens for drops on).
+#[cfg(target_arch = "wasm32")]
+const WEB_CANVAS_ID: &str = "the_canvas_id";
+
 /// The welcome screen's drag-and-drop hint. The web copy never offers a folder,
 /// since a browser can't deliver one (#331).
 fn welcome_drop_hint(web: bool) -> &'static str {
@@ -1415,8 +1419,15 @@ fn install_web_folder_drop_guard(ctx: egui::Context) {
             ctx.request_repaint();
             return;
         }
+        // eframe reads drops only on its canvas; a drop elsewhere loads
+        // nothing, so counting it would leave the batch waiting for files
+        // that never come.
+        let on_canvas = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|el| el.id() == WEB_CANVAS_ID);
         let count = dt.files().map_or(0, |f| f.length() as usize);
-        if count > 0 {
+        if on_canvas && count > 0 {
             WEB_DROP_FILE_COUNT.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             ctx.request_repaint();
         }

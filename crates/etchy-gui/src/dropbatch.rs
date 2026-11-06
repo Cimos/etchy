@@ -11,8 +11,9 @@
 //! ([`DropBatch::on_drop`]); the batch is ready once that many have arrived.
 //! eframe skips a file whose read fails without telling the app, so a batch
 //! that stops growing short of the count fails loud instead of loading a
-//! partial set. Files that arrive with no recorded drop (the listener missed
-//! it) load once no more have arrived for a short quiet period.
+//! partial set. Its reads may still finish later; those files are discarded
+//! until the next recorded drop. Files that arrive with no recorded drop (the
+//! listener missed it) load once no more have arrived for a short quiet period.
 //!
 //! The logic is pure (time is passed in) so it is unit-tested on native.
 
@@ -46,6 +47,9 @@ pub struct DropBatch<F> {
     expected: usize,
     /// Time of the last drop event or file arrival; `None` when idle.
     last_change: Option<f64>,
+    /// Set after a counted drop stalls: its slow reads may still finish, and
+    /// must not load on their own. Cleared by the next recorded drop.
+    discarding: bool,
 }
 
 impl<F> Default for DropBatch<F> {
@@ -54,6 +58,7 @@ impl<F> Default for DropBatch<F> {
             files: Vec::new(),
             expected: 0,
             last_change: None,
+            discarding: false,
         }
     }
 }
@@ -65,13 +70,14 @@ impl<F> DropBatch<F> {
         if count == 0 {
             return;
         }
+        self.discarding = false;
         self.expected += count;
         self.last_change = Some(now);
     }
 
     /// Files that finished reading this frame.
     pub fn on_files(&mut self, files: Vec<F>, now: f64) {
-        if files.is_empty() {
+        if files.is_empty() || self.discarding {
             return;
         }
         self.files.extend(files);
@@ -93,6 +99,7 @@ impl<F> DropBatch<F> {
             if idle_for >= STALL_SECS {
                 let expected = self.expected;
                 self.take();
+                self.discarding = true;
                 return DropPoll::Incomplete { got, expected };
             }
         } else if idle_for >= QUIET_SECS {
@@ -181,6 +188,24 @@ mod tests {
         assert_eq!(b.poll(100.0), DropPoll::Idle);
         let msg = incomplete_message(2, 3);
         assert!(msg.contains("2 of the 3"), "{msg}");
+    }
+
+    #[test]
+    fn late_files_of_a_stalled_drop_never_load() {
+        let mut b = DropBatch::default();
+        b.on_drop(2, 0.0);
+        b.on_files(vec![1], 0.1);
+        assert!(matches!(
+            b.poll(0.1 + STALL_SECS),
+            DropPoll::Incomplete { .. }
+        ));
+        // The slow read finishes after the drop already failed.
+        b.on_files(vec![2], 20.0);
+        assert_eq!(b.poll(20.0 + QUIET_SECS), DropPoll::Idle);
+        // A fresh drop loads normally.
+        b.on_drop(1, 30.0);
+        b.on_files(vec![3], 30.1);
+        assert_eq!(b.poll(30.1), DropPoll::Ready(vec![3]));
     }
 
     #[test]
