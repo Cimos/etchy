@@ -11,6 +11,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ### Added
 - Viewer change navigator with per-layer region lists, X2 labels, framing, highlight, and rebindable N/P keys (#419).
+- `etchy log <range> [subdir]` lists, per commit in a git range that touches the
+  fab pack, which layers changed and by how much (area, regions), in summary,
+  Markdown and JSON. Each commit is diffed against its first parent, no checkout.
+  `--max-commits` (default 200) fails loud instead of truncating (#424).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as

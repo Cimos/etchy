@@ -194,6 +194,12 @@ result: differences found</pre>
     <pre class="code"><span class="k">etchy</span> v1.0 HEAD fab/          <span class="c"># &lt;refA&gt; &lt;refB&gt; [subdir]</span>
 <span class="k">etchy</span> --git v1.0 HEAD          <span class="c"># whole repo; prints a scoping note</span></pre>
 
+    <h3 style="font-size:17px;margin:22px 0 4px">Per-commit history: <code class="inline">etchy log</code></h3>
+    <p>Give <code class="inline">etchy log</code> a git range and it walks the first-parent commits that touch the fab pack, newest first, and diffs each one against its first parent through the same loader and diff as the two-ref form — no checkout. Each commit lists the layers it changed with added / removed mm² and region counts. A merge is reported against its first parent, so it shows everything it brought into the branch. A commit that adds or deletes the whole pack is reported as <em>pack added</em> / <em>pack removed</em>, never skipped.</p>
+    <pre class="code"><span class="k">etchy</span> log v1.0..HEAD fab/                 <span class="c"># &lt;range&gt; [subdir]</span>
+<span class="k">etchy</span> log main..feature fab/ --format md   <span class="c"># or --format json</span></pre>
+    <p>Exit 0 when no commit changed a layer, 1 when one did, 2 on any error — including a commit whose files don't parse, which is named rather than skipped. <code class="inline">--max-commits &lt;N&gt;</code> (default 200) caps the walk; a range with more commits is an error, never a silently truncated history. To diff a directory that is literally named <code class="inline">log</code>, write <code class="inline">./log</code>.</p>
+
     <h3 style="font-size:17px;margin:22px 0 4px">Schematic PDFs</h3>
     <p>Hand etchy two <code class="inline">.pdf</code> files instead of two directories and it does a page-by-page pixel diff, reporting added / removed / changed pixels and a changed-region count per page. Pages pair by <em>content</em>, not index, so inserting one sheet shows up as a single extra row rather than making every later page look rewritten.</p>
     <pre class="code"><span class="k">$</span> etchy old.pdf new.pdf --out overlays/

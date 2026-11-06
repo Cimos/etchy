@@ -57,6 +57,14 @@ add the Action to a repo (full recipe in
 The job grants `pull-requests: write`; etchy supplies its own token and posts a
 sticky per-layer table (added / removed mm² and region counts).
 
+**History over a git range** — `etchy log` walks the commits that touch the fab
+pack and prints, per commit, which layers changed and by how much (no checkout;
+`--format md|json` too; exit 1 if any commit changed a layer):
+
+```sh
+etchy log v0.1.0..HEAD fab/   # newest first, each commit vs its first parent
+```
+
 **PDF diff** — schematic PDFs get a page-by-page pixel diff (builds with
 `--features pdf`; release binaries ship it on):
 
