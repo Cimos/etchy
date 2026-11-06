@@ -105,6 +105,12 @@ project access token with the `api` scope and the Reporter role, and store it as
 a masked CI/CD variable named `ETCHY_NOTE_TOKEN`. The recipe uses it when it is
 set and falls back to `CI_JOB_TOKEN` otherwise.
 
+## ARM64 runners
+
+Releases after v0.2.0 also ship `etchy-cli-<tag>-linux-aarch64.tar.gz`. On an
+ARM64 runner, use `linux-aarch64` in place of `linux-x86_64` in the two lines
+that name the archive and its folder.
+
 ## Runners without internet access
 
 Mirror the release's CLI archive and `SHA256SUMS` on an internal server and
