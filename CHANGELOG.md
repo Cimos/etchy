@@ -14,6 +14,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - Release assets and the ghcr container image get a signed build provenance
   attestation, checked with `gh attestation verify <file> --repo Cimos/etchy`.
   Each release also ships CycloneDX SBOMs for the CLI and the viewer (#348).
+- Linux ARM64 CLI archive (`etchy-cli-<tag>-linux-aarch64.tar.gz`, static musl)
+  for ARM CI runners and 64-bit Raspberry Pi OS. The GitHub Action installs it
+  on `linux/arm64` runners (#455).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as

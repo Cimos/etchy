@@ -77,7 +77,8 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 
   Or build it yourself with `docker build -t etchy .`.
 
-- **Prebuilt binaries** — `etchy-cli-…` archives for Linux, macOS and Windows,
+- **Prebuilt binaries** — `etchy-cli-…` archives for Linux (x86_64, and ARM64
+  in releases after v0.2.0), macOS (Apple Silicon and Intel) and Windows,
   plus a `SHA256SUMS` file, are on the [Releases](../../releases) page.
   Releases after v0.2.0 also have signed build provenance for every asset and
   the container image, plus CycloneDX SBOMs (`etchy-{cli,viewer}-<tag>.cdx.json`).

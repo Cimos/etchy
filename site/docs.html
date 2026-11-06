@@ -120,7 +120,8 @@
 Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.2.0/etchy-cli-v0.2.0-windows-x86_64.zip -OutFile etchy.zip
 Expand-Archive etchy.zip -DestinationPath .
 .\etchy-cli-v0.2.0-windows-x86_64\etchy.exe --version</pre></div>
-      <div class="i-panel p-lin" id="p-lin" role="tabpanel" aria-labelledby="i-lin" hidden><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
+      <div class="i-panel p-lin" id="p-lin" role="tabpanel" aria-labelledby="i-lin" hidden><pre class="code"><span class="c"># static musl binary — no runtime to install
+# ARM64 / Raspberry Pi (64-bit OS): …-linux-aarch64.tar.gz, in releases after v0.2.0</span>
 curl -LO https://github.com/Cimos/etchy/releases/download/v0.2.0/etchy-cli-v0.2.0-linux-x86_64.tar.gz
 tar xzf etchy-cli-v0.2.0-linux-x86_64.tar.gz
 sudo mv etchy-cli-v0.2.0-linux-x86_64/etchy /usr/local/bin/</pre></div>
