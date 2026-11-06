@@ -18,7 +18,10 @@ pub fn looks_like_gerber(bytes: &[u8]) -> bool {
 }
 
 /// Map a Gerber filename (stem + extension) → [`LayerKind`]. Rename-tolerant:
-/// keys on KiCad-style suffixes and the standard Gerber extensions.
+/// keys on KiCad-style suffixes and the standard Gerber extensions, plus the
+/// default output names of Eagle, OrCAD / Allegro and EasyEDA (Protel shares
+/// Altium's extensions). A name that could mean two layers is left
+/// [`LayerKind::Other`], never guessed; `corpus/naming/` pins every scheme.
 pub fn classify(stem: &str, ext: &str) -> LayerKind {
     let s = stem.to_ascii_uppercase();
     let e = ext.to_ascii_lowercase();
@@ -54,6 +57,9 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
     if e.starts_with("gd") || e.starts_with("gg") || e == "gpt" || e == "gpb" {
         return LayerKind::Documentation;
     }
+    if let Some(kind) = other_eda_scheme(&s, &e) {
+        return kind;
+    }
     let has = |needle: &str| s.contains(needle);
     if has("F_CU") || has("F.CU") || e == "gtl" {
         LayerKind::TopCopper
@@ -82,6 +88,123 @@ pub fn classify(stem: &str, ext: &str) -> LayerKind {
     } else {
         LayerKind::Other
     }
+}
+
+/// Eagle, OrCAD / Allegro and EasyEDA default names (#426), given the
+/// uppercased stem and lowercased extension. Runs before the stem heuristics so
+/// a board name containing `EDGE` or `PICK` can't override these. Each entry is
+/// a tool's documented default (sources in `corpus/naming/`). Deliberately
+/// absent, so they stay `Other`: `.drd` (Excellon from Eagle, a drill drawing
+/// from OrCAD Layout), Eagle `.ly<n>` (Eagle layer number, not stack position),
+/// OrCAD Layout `.gnd`/`.pwr`/`.fab`, and Allegro user-named inner films.
+fn other_eda_scheme(s: &str, e: &str) -> Option<LayerKind> {
+    use LayerKind::*;
+    let by_ext = match e {
+        // Eagle legacy CAM processor (gerb274x.cam).
+        "cmp" => Some(TopCopper),
+        "sol" => Some(BottomCopper),
+        "stc" => Some(TopMask),
+        "sts" => Some(BottomMask),
+        "plc" => Some(TopSilk),
+        "pls" => Some(BottomSilk),
+        "crc" => Some(TopPaste),
+        "crs" => Some(BottomPaste),
+        // OrCAD Layout post processor.
+        "top" => Some(TopCopper),
+        "bot" => Some(BottomCopper),
+        "smt" => Some(TopMask),
+        "smb" => Some(BottomMask),
+        "sst" => Some(TopSilk),
+        "ssb" => Some(BottomSilk),
+        "ast" => Some(Documentation),
+        // EasyEDA top / bottom assembly drawings.
+        "gta" | "gba" => Some(Documentation),
+        _ => None,
+    };
+    if by_ext.is_some() {
+        return by_ext;
+    }
+    // EasyEDA `Gerber_InnerLayer<n>` numbers signal (`.G<n>`) and plane
+    // (`.GP<n>`) inners on one ordinal scale, so the stem gives the index. The
+    // extension must carry the same number; anything else isn't guessed.
+    if let Some(n) = s
+        .strip_prefix("GERBER_INNERLAYER")
+        .and_then(|d| d.parse::<u8>().ok())
+    {
+        let ext_n = e.strip_prefix("gp").or_else(|| e.strip_prefix('g'));
+        if (1..=99).contains(&n) && ext_n.and_then(|d| d.parse::<u8>().ok()) == Some(n) {
+            return Some(InnerCopper(n));
+        }
+    }
+    if e != "gbr" && e != "art" {
+        return None;
+    }
+    // Allegro's drill / ident film is a drawing, not the NC drill.
+    if e == "art" && s.contains("DRILL") {
+        return Some(Documentation);
+    }
+    if e == "art" {
+        match s {
+            "TOP" => return Some(TopCopper),
+            "BOTTOM" => return Some(BottomCopper),
+            _ => {}
+        }
+    }
+    if e == "gbr" && s == "PROFILE" {
+        return Some(Outline);
+    }
+    // Eagle 9 CAM templates and Allegro subclass films. A board-name prefix is
+    // allowed before the layer name, but the name must end the stem.
+    const NAMES: &[(&str, LayerKind)] = &[
+        ("COPPER_TOP", TopCopper),
+        ("COPPER_TOP_L1", TopCopper),
+        ("COPPER_BOTTOM", BottomCopper),
+        ("SOLDERMASK_TOP", TopMask),
+        ("SOLDERMASK_BOTTOM", BottomMask),
+        ("SILKSCREEN_TOP", TopSilk),
+        ("SILKSCREEN_BOTTOM", BottomSilk),
+        ("SOLDERPASTE_TOP", TopPaste),
+        ("SOLDERPASTE_BOTTOM", BottomPaste),
+        ("PASTEMASK_TOP", TopPaste),
+        ("PASTEMASK_BOTTOM", BottomPaste),
+    ];
+    if let Some(&(_, kind)) = NAMES.iter().find(|(name, _)| stem_ends_with(s, name)) {
+        return Some(kind);
+    }
+    // Eagle 9 numbers copper by physical stack position (`_L1` is the top).
+    for (prefix, inner) in [("COPPER_BOTTOM_L", false), ("COPPER_INNER_L", true)] {
+        let Some(at) = s.rfind(prefix) else { continue };
+        if !(at == 0 || is_sep(s.as_bytes()[at - 1])) {
+            continue;
+        }
+        let digits = &s[at + prefix.len()..];
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(n) = digits.parse::<u8>() else {
+            continue;
+        };
+        if (2..=99).contains(&n) {
+            return Some(if inner {
+                InnerCopper(n - 1)
+            } else {
+                BottomCopper
+            });
+        }
+    }
+    None
+}
+
+fn is_sep(b: u8) -> bool {
+    matches!(b, b'_' | b'-' | b'.' | b' ')
+}
+
+/// `s` is `name`, or ends in `name` after a separator.
+fn stem_ends_with(s: &str, name: &str) -> bool {
+    s == name
+        || s.strip_suffix(name)
+            .and_then(|head| head.bytes().last())
+            .is_some_and(is_sep)
 }
 
 /// Parse the X2 `.FilePolarity` file attribute out of a Gerber's bytes (#317):
@@ -406,6 +529,105 @@ mod tests {
         // Top/bottom copper (`.gtl`/`.gbl`) are unaffected by the `gl` branch.
         assert_eq!(classify("board", "gtl"), LayerKind::TopCopper);
         assert_eq!(classify("board", "gbl"), LayerKind::BottomCopper);
+    }
+
+    #[test]
+    fn classify_eagle_names() {
+        use LayerKind::*;
+        // Legacy CAM processor extensions.
+        for (ext, kind) in [
+            ("cmp", TopCopper),
+            ("sol", BottomCopper),
+            ("stc", TopMask),
+            ("sts", BottomMask),
+            ("plc", TopSilk),
+            ("pls", BottomSilk),
+            ("crc", TopPaste),
+            ("crs", BottomPaste),
+        ] {
+            assert_eq!(classify("board", ext), kind, ".{ext}");
+        }
+        // The extension decides, even with a board name the stem rules know.
+        assert_eq!(classify("Edge-Sensor", "cmp"), TopCopper);
+        // Eagle 9 templates, numbered by physical stack position.
+        assert_eq!(classify("copper_top", "gbr"), TopCopper);
+        assert_eq!(classify("copper_top_l1", "gbr"), TopCopper);
+        assert_eq!(classify("copper_inner_l2", "gbr"), InnerCopper(1));
+        assert_eq!(classify("copper_inner_l15", "gbr"), InnerCopper(14));
+        assert_eq!(classify("copper_bottom_l4", "gbr"), BottomCopper);
+        assert_eq!(classify("soldermask_bottom", "gbr"), BottomMask);
+        assert_eq!(classify("solderpaste_top", "gbr"), TopPaste);
+        assert_eq!(classify("silkscreen_top", "gbr"), TopSilk);
+        assert_eq!(classify("profile", "gbr"), Outline);
+        assert_eq!(classify("my-board_copper_bottom", "gbr"), BottomCopper);
+        // Ambiguous or malformed: never guessed.
+        assert_eq!(classify("board", "drd"), Other);
+        assert_eq!(classify("board", "ly2"), Other);
+        assert_eq!(classify("copper_inner_l1", "gbr"), Other);
+        assert_eq!(classify("copper_inner_lx", "gbr"), Other);
+        assert_eq!(classify("copper_top_extra", "gbr"), Other);
+        assert_eq!(classify("mycopper_top", "gbr"), Other);
+        assert_eq!(classify("board_profile", "gbr"), Other);
+    }
+
+    #[test]
+    fn classify_orcad_allegro_names() {
+        use LayerKind::*;
+        // OrCAD Layout.
+        assert_eq!(classify("board", "TOP"), TopCopper);
+        assert_eq!(classify("board", "BOT"), BottomCopper);
+        assert_eq!(classify("board", "SMT"), TopMask);
+        assert_eq!(classify("board", "SMB"), BottomMask);
+        assert_eq!(classify("board", "SST"), TopSilk);
+        assert_eq!(classify("board", "SSB"), BottomSilk);
+        assert_eq!(classify("board", "AST"), Documentation);
+        for ext in ["GND", "PWR", "FAB", "DRD"] {
+            assert_eq!(classify("board", ext), Other, ".{ext}");
+        }
+        // Allegro artwork films.
+        assert_eq!(classify("TOP", "art"), TopCopper);
+        assert_eq!(classify("BOTTOM", "art"), BottomCopper);
+        assert_eq!(classify("SOLDERMASK_TOP", "art"), TopMask);
+        assert_eq!(classify("SILKSCREEN_BOTTOM", "art"), BottomSilk);
+        assert_eq!(classify("PASTEMASK_TOP", "art"), TopPaste);
+        assert_eq!(classify("OUTLINE", "art"), Outline);
+        assert_eq!(classify("DRILL", "art"), Documentation);
+        assert_eq!(classify("GND", "art"), Other);
+        // Bare TOP / BOTTOM only mean copper as Allegro films.
+        assert_eq!(classify("TOP", "gbr"), Other);
+    }
+
+    #[test]
+    fn classify_easyeda_names() {
+        use LayerKind::*;
+        assert_eq!(classify("Gerber_TopLayer", "GTL"), TopCopper);
+        assert_eq!(classify("Gerber_InnerLayer1", "G1"), InnerCopper(1));
+        assert_eq!(classify("Gerber_InnerLayer2", "GP2"), InnerCopper(2));
+        assert_eq!(classify("Gerber_BoardOutlineLayer", "GKO"), Outline);
+        assert_eq!(classify("Gerber_TopAssemblyLayer", "GTA"), Documentation);
+        assert_eq!(classify("Gerber_BottomAssemblyLayer", "GBA"), Documentation);
+        assert_eq!(classify("Gerber_DocumentLayer", "GDL"), Documentation);
+        assert_eq!(
+            classify("Drill_NPTH_Through", "DRL"),
+            Drill(DrillKind::NonPlated)
+        );
+        assert_eq!(classify("Gerber_MechanicalLayer", "GME"), Other);
+        // Without the EasyEDA stem a plane extension stays unknown.
+        assert_eq!(classify("board", "GP2"), Other);
+        // The EasyEDA stem alone isn't trusted: the extension must agree.
+        assert_eq!(classify("Gerber_InnerLayer2", "txt"), Other);
+        assert_eq!(classify("Gerber_InnerLayer2", "gbr"), Other);
+        assert_eq!(classify("Gerber_InnerLayer2", "GP3"), Other);
+    }
+
+    #[test]
+    fn classify_protel_shares_altium_extensions() {
+        use LayerKind::*;
+        assert_eq!(classify("Board", "GTL"), TopCopper);
+        assert_eq!(classify("Board", "G1"), InnerCopper(1));
+        assert_eq!(classify("Board", "GKO"), Outline);
+        assert_eq!(classify("Board", "GP1"), Other);
+        assert_eq!(classify("Board", "DRR"), Other);
     }
 
     #[test]

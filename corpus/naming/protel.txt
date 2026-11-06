@@ -1,0 +1,31 @@
+# Protel 99 SE default CAM Manager names. Altium inherited this extension
+# set, so the Altium rules cover it; this file pins that overlap.
+# Format: <filename> => <kind>. See corpus/naming/README.md.
+# Sources: https://docs.oshpark.com/design-tools/protel/ and
+# https://docs.oshpark.com/troubleshooting/naming-pattern/
+Board.GTL => top-copper
+Board.GBL => bottom-copper
+Board.G1 => inner-copper-1
+Board.G2 => inner-copper-2
+Board.GTS => top-mask
+Board.GBS => bottom-mask
+Board.GTO => top-silk
+Board.GBO => bottom-silk
+Board.GTP => top-paste
+Board.GBP => bottom-paste
+Board.GKO => outline
+Board.GM1 => outline
+Board.GD1 => documentation
+Board.GG1 => documentation
+Board.GPT => documentation
+Board.GPB => documentation
+# Internal planes: .GP1 and .G1 can both be "inner 1" (OSH Park), so the
+# stack position is unknown.
+Board.GP1 => other
+Board.GP2 => other
+Board.GM2 => other
+# Protel writes both: .TXT is the Excellon drill (routed by content); .DRL
+# is classified as drill by name as before.
+Board.TXT => other
+Board.DRL => drill
+Board.DRR => other

@@ -11,6 +11,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ### Added
 - Viewer change navigator with per-layer region lists, X2 labels, framing, highlight, and rebindable N/P keys (#419).
+- Filename classification covers the default output names of Eagle, OrCAD
+  Layout, Allegro and EasyEDA, with Protel pinned alongside Altium. Each scheme
+  has a corpus list under `corpus/naming/`; ambiguous names stay `other` (#426).
+
+### Changed
+- An Allegro `DRILL.art` film is classified as documentation (a drill drawing)
+  instead of the drill layer (#426).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
