@@ -16,6 +16,7 @@ use etchy_core::{
 };
 use serde::Serialize;
 
+mod log;
 #[cfg(feature = "pdf")]
 mod pdf;
 
@@ -51,7 +52,13 @@ impl From<Exit> for ExitCode {
 /// Fast, trustworthy PCB visual + geometric diff. Point it at two revisions of a
 /// board's Gerber output and it shows — and measures — exactly what changed.
 #[derive(Parser, Debug)]
-#[command(name = "etchy", version, about)]
+#[command(
+    name = "etchy",
+    version,
+    about,
+    after_help = "Per-commit history: `etchy log <RANGE> [SUBDIR]` lists the layer changes of \
+                  every commit in a git range (see `etchy log --help`)."
+)]
 struct Cli {
     /// Old revision: a directory of Gerber/Excellon files, or a git ref (see
     /// `--git` / the optional [SUBDIR] argument).
@@ -383,6 +390,11 @@ impl GateVerdict {
 }
 
 fn main() -> ExitCode {
+    // `etchy log …` is the one subcommand. It is dispatched by hand because the
+    // two-revision form takes bare positional paths.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "log") {
+        return log::main();
+    }
     let cli = Cli::parse();
     // Validate the gate BEFORE the (expensive) diff, so a bad --gate-layers is a
     // loud, fast exit 2 — never a silently disarmed gate.
@@ -502,14 +514,7 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     }
 
     let (old, of, ow, new, nf, nw) = if git_mode {
-        // A non-UTF-8 subdir can't be passed to git as a pathspec here; fail loud
-        // rather than silently widening the scan to the whole tree (#299).
-        let subdir = match cli.subdir.as_deref() {
-            None => ".",
-            Some(p) => p
-                .to_str()
-                .with_context(|| format!("[SUBDIR] {} is not valid UTF-8", p.display()))?,
-        };
+        let subdir = git_subdir(cli.subdir.as_deref())?;
         if cli.subdir.is_none() {
             // Whole-repo scans flatten every Gerber/Excellon blob at the ref into
             // one board — fine for a single-board repo, garbage when the tree
@@ -535,20 +540,7 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     };
 
     let diff = compare_detailed(&old, &new).context("comparing revisions")?;
-    let mut report = diff.report.clone();
-    // Layer-classification cross-check warnings (#239), old rev then new. A
-    // conflict repeated on both revisions is reported once per side, tagged by
-    // revision so it's clear which pack the mismatch is in.
-    for (rev, ws) in [("old", ow), ("new", nw)] {
-        for w in ws {
-            report.warnings.push(format!("{rev} {w}"));
-        }
-    }
-    if let (Some(o), Some(n)) = (of, nf) {
-        if let Some(w) = coordinate_mismatch_warning(&o, &n) {
-            report.warnings.push(w);
-        }
-    }
+    let report = report_with_load_warnings(&diff, ow, nw, of, nf);
 
     // Optional SVG export: one file per changed layer (headless render).
     if let Some(dir) = &cli.svg {
@@ -599,6 +591,43 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     Ok(RunOutcome::Board {
         passed: verdict.passed,
     })
+}
+
+/// The `[SUBDIR]` of a git-refs run as a pathspec (`.` when omitted). A non-UTF-8
+/// subdir can't be passed to git as a pathspec here; fail loud rather than
+/// silently widening the scan to the whole tree (#299).
+fn git_subdir(subdir: Option<&Path>) -> Result<&str> {
+    match subdir {
+        None => Ok("."),
+        Some(p) => p
+            .to_str()
+            .with_context(|| format!("[SUBDIR] {} is not valid UTF-8", p.display())),
+    }
+}
+
+/// The diff's report plus the loaders' warnings: layer-classification
+/// cross-checks (#239), old rev then new, and the coordinate-format check. A
+/// conflict repeated on both revisions is reported once per side, tagged by
+/// revision so it's clear which pack the mismatch is in.
+fn report_with_load_warnings(
+    diff: &etchy_core::BoardDiff,
+    old_warnings: Vec<String>,
+    new_warnings: Vec<String>,
+    old_format: Option<GerberFormat>,
+    new_format: Option<GerberFormat>,
+) -> DiffReport {
+    let mut report = diff.report.clone();
+    for (rev, ws) in [("old", old_warnings), ("new", new_warnings)] {
+        for w in ws {
+            report.warnings.push(format!("{rev} {w}"));
+        }
+    }
+    if let (Some(o), Some(n)) = (old_format, new_format) {
+        if let Some(w) = coordinate_mismatch_warning(&o, &n) {
+            report.warnings.push(w);
+        }
+    }
+    report
 }
 
 /// Write a finished report to stdout, treating a downstream pipe that closed
