@@ -159,6 +159,136 @@ jobs:
           deploy/test_collect_feedback.py
           scripts/test_check_landing.py
 
+  # Runs the GitHub Action (action.yml) for real on the bundled demo pair (#454):
+  # the install path, the report files, the artifact upload and the sticky PR
+  # comment. The `release` leg downloads the latest released binary (that's
+  # what `uses: ./` resolves to, since a local action has no action_ref); the
+  # `source` leg builds this PR's CLI, so a CLI change that breaks the Action's
+  # flags fails here before a release ships it. Only the release leg comments.
+  #
+  # Fork PRs get a read-only token whatever this block asks for; the Action
+  # then warns and skips the comment, and the comment check below is skipped.
+  # Plain pull_request only, never pull_request_target.
+  action:
+    name: action smoke test (${{ matrix.install }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # the sticky comment
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - install: release
+            build-from-source: "false"
+            comment: "true"
+          - install: source
+            build-from-source: "true"
+            comment: "false"
+    env:
+      OLD: crates/etchy-gui/assets/demo/old
+      NEW: crates/etchy-gui/assets/demo/new
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Rust (stable)
+        if: matrix.install == 'source'
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      # Own key: this is a --release build of etchy-cli only, so the debug
+      # target/ from the `test` job doesn't help it.
+      - name: Cache cargo + target (release CLI)
+        if: matrix.install == 'source'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-action-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-action-
+
+      # The demo pair differs, so report-only: a diff must not turn this red.
+      - name: Run the Action (demo pair, report only)
+        id: etchy
+        uses: ./
+        with:
+          old: ${{ env.OLD }}
+          new: ${{ env.NEW }}
+          fail-on-diff: "false"
+          comment: ${{ matrix.comment }}
+          build-from-source: ${{ matrix.build-from-source }}
+
+      - name: Check outputs, report files and artifact
+        env:
+          CHANGED: ${{ steps.etchy.outputs.changed }}
+          REPORT_DIR: ${{ steps.etchy.outputs.report-dir }}
+          ARTIFACT_URL: ${{ steps.etchy.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [ "$CHANGED" = "true" ] || fail "changed=$CHANGED, expected true for the demo pair"
+          [ -n "$REPORT_DIR" ] || fail "report-dir output is empty"
+          for f in summary.md report.html comment.md; do
+            [ -s "$REPORT_DIR/$f" ] || fail "$REPORT_DIR/$f is missing or empty"
+          done
+          n="$(find "$REPORT_DIR/svg" -maxdepth 1 -name '*.svg' -type f | wc -l)"
+          [ "$n" -gt 0 ] || fail "no per-layer SVGs in $REPORT_DIR/svg"
+          [[ "$ARTIFACT_URL" == https://* ]] || fail "artifact-url is '$ARTIFACT_URL', expected the uploaded artifact's link"
+          echo "changed=$CHANGED, $n layer SVGs, artifact $ARTIFACT_URL"
+
+      # Same-repo PRs only: a fork's token can't comment, by design.
+      - name: Check the sticky PR comment
+        if: >-
+          matrix.comment == 'true' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPORT_DIR: ${{ steps.etchy.outputs.report-dir }}
+        run: |
+          set -euo pipefail
+          # The report folder is etchy-report-<key>; the comment marker uses the same key.
+          key="$(basename "$REPORT_DIR")"
+          key="${key#etchy-report-}"
+          marker="<!-- etchy-diff:${key} -->"
+          n="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq "[.[] | select(.body | startswith(\"$marker\"))] | length" | awk '{s+=$1} END {print s+0}')"
+          [ "$n" -eq 1 ] || { echo "::error::expected exactly 1 sticky comment with $marker, found $n"; exit 1; }
+          echo "sticky comment present ($marker)"
+
+      # The gate: with fail-on-diff (the default) the same pair must fail the step.
+      - name: Run the Action (demo pair, gate)
+        id: gate
+        continue-on-error: true
+        uses: ./
+        with:
+          old: ${{ env.OLD }}
+          new: ${{ env.NEW }}
+          upload-report: "false"
+          build-from-source: ${{ matrix.build-from-source }}
+
+      - name: Run the Action (no change)
+        id: same
+        uses: ./
+        with:
+          old: ${{ env.OLD }}
+          new: ${{ env.OLD }}
+          build-from-source: ${{ matrix.build-from-source }}
+
+      - name: Check gate and no-change results
+        env:
+          GATE: ${{ steps.gate.outcome }}
+          GATE_CHANGED: ${{ steps.gate.outputs.changed }}
+          SAME_CHANGED: ${{ steps.same.outputs.changed }}
+        run: |
+          set -euo pipefail
+          [ "$GATE" = "failure" ] || { echo "::error::fail-on-diff step outcome is $GATE, expected failure"; exit 1; }
+          [ "$GATE_CHANGED" = "true" ] || { echo "::error::gate changed=$GATE_CHANGED, expected true"; exit 1; }
+          [ "$SAME_CHANGED" = "false" ] || { echo "::error::old-vs-old changed=$SAME_CHANGED, expected false"; exit 1; }
+
   wasm:
     name: web build (wasm)
     runs-on: ubuntu-latest
