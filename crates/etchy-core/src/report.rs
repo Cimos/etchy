@@ -477,6 +477,17 @@ pub struct LayerReport {
     /// Excellon drill layers only; omitted when neither side used a tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drill_table: Option<DrillTableReport>,
+    /// True when the drill table has a tool size added, removed, or with a
+    /// different hole or slot count (#456). Such a layer is changed even when
+    /// its geometry is identical (a hole drilled twice at one spot). Omitted
+    /// when false. Set with [`LayerReport::set_drill_table`].
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub drill_counts_changed: bool,
+    /// Whether the geometry diff found any change, from the [`LayerChange`]
+    /// this report was built from. Not serialized: the areas and region counts
+    /// already carry it.
+    #[serde(skip)]
+    pub geometry_changed: bool,
 }
 
 impl LayerReport {
@@ -502,7 +513,21 @@ impl LayerReport {
             regions: Vec::new(),
             labels_available: false,
             drill_table: None,
+            drill_counts_changed: false,
+            geometry_changed: !change.is_unchanged(),
         }
+    }
+
+    /// Attach the drill table and record whether its counts changed.
+    pub fn set_drill_table(&mut self, table: Option<DrillTableReport>) {
+        self.drill_counts_changed = table.as_ref().is_some_and(DrillTableReport::has_changes);
+        self.drill_table = table;
+    }
+
+    /// True when the layer changed only in its drill table: hole or slot
+    /// counts differ but the geometry is identical, so the overlay is empty.
+    pub fn drill_counts_only(&self) -> bool {
+        self.drill_counts_changed && !self.geometry_changed
     }
 
     /// Display name, e.g. `inner-copper2` or `drill-pth`.
@@ -512,8 +537,8 @@ impl LayerReport {
     }
 
     /// The drill table, when it should be shown in the Markdown/HTML/summary
-    /// output: on a changed layer, or when the counts differ even though the
-    /// geometry did not (a hole drilled twice at one spot).
+    /// output: on a changed layer (a count change alone makes a layer changed,
+    /// #456).
     pub fn shown_drill_table(&self) -> Option<&DrillTableReport> {
         self.drill_table
             .as_ref()
@@ -628,6 +653,13 @@ impl DiffReport {
                 s.push_str(&format!(
                     "| {} | {:.4} | {:.4} | {} | {} |\n",
                     name, l.added_area_mm2, l.removed_area_mm2, l.added_regions, l.removed_regions,
+                ));
+            }
+            for l in self.layers.iter().filter(|l| l.drill_counts_only()) {
+                s.push_str(&format!(
+                    "\n> **{}** changed in the drill table only: hole or slot counts \
+                     differ, the geometry is identical.\n",
+                    l.name()
                 ));
             }
             for l in self.layers.iter().filter(|l| l.is_changed()) {
@@ -962,7 +994,7 @@ mod tests {
             status,
             &change,
         );
-        layer.drill_table = DrillTableReport::compare(Some(old), Some(new));
+        layer.set_drill_table(DrillTableReport::compare(Some(old), Some(new)));
         layer
     }
 
@@ -1007,6 +1039,7 @@ mod tests {
             &drill_tools(&[(300, 3, 0)]),
         );
         assert!(twice.shown_drill_table().is_some());
+        assert!(twice.drill_counts_changed && twice.drill_counts_only());
         // Same geometry and same counts: nothing to show.
         let same = drill_layer(
             LayerStatus::Unchanged,
@@ -1014,8 +1047,37 @@ mod tests {
             &drill_tools(&[(300, 2, 0)]),
         );
         assert!(same.shown_drill_table().is_none());
+        assert!(!same.drill_counts_changed);
         let md = DiffReport::new(vec![same], vec![]).to_markdown_summary();
         assert!(!md.contains("drill table"));
+    }
+
+    #[test]
+    fn drill_count_only_change_is_flagged_in_json_and_markdown() {
+        // #456: compare() marks such a layer Changed; the report must say the
+        // change is in the drill table, not the geometry.
+        let mut twice = drill_layer(
+            LayerStatus::Changed,
+            &drill_tools(&[(300, 2, 0)]),
+            &drill_tools(&[(300, 3, 0)]),
+        );
+        twice.geometry_changed = false;
+        let report = DiffReport::new(vec![twice], vec![]);
+        assert!(report.to_json().contains("\"drill_counts_changed\":true"));
+        let md = report.to_markdown_summary();
+        assert!(
+            md.contains("**drill-pth** changed in the drill table only"),
+            "{md}"
+        );
+        // A geometry change with a count change is not "drill table only".
+        let both = drill_layer(
+            LayerStatus::Changed,
+            &drill_tools(&[(300, 2, 0)]),
+            &drill_tools(&[(300, 3, 0)]),
+        );
+        assert!(both.drill_counts_changed && !both.drill_counts_only());
+        let md = DiffReport::new(vec![both], vec![]).to_markdown_summary();
+        assert!(!md.contains("drill table only"), "{md}");
     }
 
     #[test]
