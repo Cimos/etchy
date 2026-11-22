@@ -506,16 +506,29 @@ fn stale_waivers_are_reported_and_can_fail_ci() {
     assert_eq!(v["waivers"]["waivers"][1]["stale"], true);
     assert!(v["warnings"].to_string().contains("stale waiver #2"));
 
-    let (code, _, stderr) = run_with_waivers(&old, &new, &w, &["--fail-on-stale-waivers"]);
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &["--fail-on-stale-waivers"]);
     assert_eq!(
         code, 1,
         "--fail-on-stale-waivers turns a stale waiver into a failure"
     );
     assert!(stderr.contains("stale"), "{stderr}");
+    assert!(
+        stdout.contains(
+            "result: differences found, waived or within the CI gate, but 1 stale waiver(s) — gate FAIL, exit 1"
+        ),
+        "{stdout}"
+    );
 
     // An unchanged pair with a waiver: everything is stale.
-    let (code, _, _) = run_with_waivers(&old, &old, &w, &["--fail-on-stale-waivers"]);
+    let (code, stdout, _) = run_with_waivers(&old, &old, &w, &["--fail-on-stale-waivers"]);
     assert_eq!(code, 1);
+    assert!(
+        stdout.contains(
+            "result: no differences, but 2 stale waiver(s) — gate FAIL, exit 1 (--fail-on-stale-waivers)"
+        ),
+        "the result line must agree with exit 1: {stdout}"
+    );
+    assert!(!stdout.contains("result: no differences\n"), "{stdout}");
     let (code, _, _) = run_with_waivers(&old, &old, &w, &[]);
     assert_eq!(code, 0);
     let _ = fs::remove_dir_all(root);

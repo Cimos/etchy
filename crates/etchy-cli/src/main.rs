@@ -301,15 +301,24 @@ impl Gate {
             })
     }
 
-    /// Should this diff fail the gate (exit 1)?
-    fn fails(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> bool {
+    /// Is the (unwaived) change on the gated layers over the gate?
+    fn over(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> bool {
         let (area, regions) = self.totals(report, waived);
-        let over = match (self.fail_on_area, self.fail_on_regions) {
+        match (self.fail_on_area, self.fail_on_regions) {
             // No threshold set → any change on the gated layers fails.
             (None, None) => area > 0.0 || regions > 0,
             (a, r) => a.is_some_and(|t| area > t) || r.is_some_and(|t| regions > t),
-        };
-        over || (self.fail_on_stale_waivers && waived.is_some_and(|w| w.stale_waivers > 0))
+        }
+    }
+
+    /// Does `--fail-on-stale-waivers` fail this run?
+    fn stale_fails(&self, waived: Option<&WaiverReport>) -> bool {
+        self.fail_on_stale_waivers && waived.is_some_and(|w| w.stale_waivers > 0)
+    }
+
+    /// Should this diff fail the gate (exit 1)?
+    fn fails(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> bool {
+        self.over(report, waived) || self.stale_fails(waived)
     }
 
     /// True when the gate is non-default (a threshold, a layer scope or
@@ -336,6 +345,7 @@ impl Gate {
         GateVerdict {
             configured: self.configured(),
             passed: !self.fails(report, waived),
+            stale_only: self.stale_fails(waived) && !self.over(report, waived),
             differs: report.any_changes(),
             scope: self.scope(),
             changed_area_mm2: area,
@@ -373,6 +383,10 @@ struct GateVerdict {
     /// True ⇔ the process exits 0. With a configured gate this can be true even
     /// when geometry differs (the change was within the gate, or waived).
     passed: bool,
+    /// True when the gate fails only because of `--fail-on-stale-waivers`: the
+    /// unwaived change alone is within the gate.
+    #[serde(skip)]
+    stale_only: bool,
     /// Whether any geometry changed at all, regardless of the gate.
     #[serde(skip)]
     differs: bool,
@@ -432,7 +446,20 @@ impl GateVerdict {
     /// geometry differs: say so plainly rather than a bare "differences found"
     /// next to an exit 0. Never hides that geometry differs.
     fn summary_result_line(&self) -> String {
-        if !self.differs {
+        if self.stale_only {
+            // Nothing over the gate, but a stale waiver fails the run.
+            let stale = self.waivers.as_ref().map_or(0, |w| w.stale_waivers);
+            format!(
+                "result: {}, but {stale} stale waiver(s) — gate FAIL, exit 1 (--fail-on-stale-waivers)",
+                if !self.differs {
+                    "no differences"
+                } else if self.waivers.is_some() {
+                    "differences found, waived or within the CI gate"
+                } else {
+                    "differences found, within the CI gate"
+                },
+            )
+        } else if !self.differs {
             "result: no differences".to_string()
         } else if self.passed {
             // Geometry differs, but the gate downgraded the exit code to 0.
