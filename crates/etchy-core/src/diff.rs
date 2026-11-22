@@ -183,8 +183,8 @@ pub fn diff_layer(a: &PolygonSet, b: &PolygonSet) -> LayerDiff {
     let ac = boolean::flatten(a);
     let bc = boolean::flatten(b);
     LayerDiff {
-        removed: boolean::difference(&ac, &bc),
-        added: boolean::difference(&bc, &ac),
+        removed: boolean::difference_grouped(&ac, &bc),
+        added: boolean::difference_grouped(&bc, &ac),
     }
 }
 

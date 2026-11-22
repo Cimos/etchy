@@ -795,7 +795,7 @@ impl Body {
         if self.contours.is_empty() {
             return (PolygonSet::default(), tools);
         }
-        (crate::boolean::union(&self.contours, &[]), tools)
+        (crate::boolean::union_grouped(&self.contours, &[]), tools)
     }
 }
 

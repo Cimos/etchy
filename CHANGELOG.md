@@ -92,6 +92,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - A stroked Gerber arc whose radius is smaller than the stroke's half-width
   is now drawn with only the segments its curve needs. A 50 nm arc under a
   0.5 mm stroke took about a minute to resolve; it now takes milliseconds.
+- Drill layers and layer diffs with many separate objects resolve much faster
+  and with less memory: objects that cannot touch are merged in small groups
+  instead of one pass. A drill file whose repeat code laid 50,000 holes in one
+  column took over five minutes and 13 GB; it now takes seconds.
 
 ## [0.2.0] — 2026-10-26
 
