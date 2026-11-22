@@ -12,7 +12,7 @@
 
 # --- build: Alpine's Rust toolchain is musl-native, so a plain release build is
 #     already a static x86_64-unknown-linux-musl binary (no cross setup needed). ---
-FROM rust:1-alpine@sha256:557a94c82b485a14b569120e00867267108c734efe33f10cc31ca0cd5dd1eca9 AS build
+FROM rust:1-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY . .

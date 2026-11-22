@@ -120,14 +120,26 @@ never re-sizes it (#212):
   they always draw it at full visibility regardless of this setting ·
   min-area noise filter (suppression always surfaced, TRUST-3) · **PDF
   resolution** (DPI chips 150/200/300, default 200, VIEW-15): changing it
-  re-rasterizes a loaded PDF pair from the retained bytes; a DPI over the
-  raster caps fails loud into the load error and the setting reverts. The CLI
+  re-rasterizes a loaded PDF pair from the retained bytes. A pair over the
+  raster caps at the chosen DPI renders at the highest whole DPI that fits,
+  with a warning (warnings chip + Pages panel) naming the DPI used, the page
+  and the cap, and a copper line under the chips; the setting keeps the chosen
+  DPI. Below 72 DPI it fails loud into the load error and the setting reverts. The CLI
   default stays 150 (`--dpi` covers it) — a deliberate divergence: on-screen
   zooming wants more pixels than a 1:1 overlay PNG.
 - **Grid** — spacing, colours (display pitch adapts per VIEW-9; snap uses this).
 - **Measure** — units **mm / mil / inch** · snap-to-grid · crosshair + readout
   (the measure tool's one home, #211).
-- **Input** — preset **Altium / KiCad** (pan buttons + clear/units keys).
+- **Input** — preset **Altium / KiCad** (pan buttons + clear/units keys) ·
+  **Reload when files change** (#423, VIEW-19; native only, on by default).
+  Each loaded side's folder, zip, PDF or dropped files are polled for size and
+  modification-time changes; after 500 ms with no further change the side is
+  re-read and re-diffed. Camera, selected layer or page, visibility, layer
+  colours and rulers are kept when the layer stack (or page counts) matches,
+  else the view resets. A copper "reloaded … after a file change" line shows
+  under the top bar for 4 s (it adds "the view was reset" when it did). A
+  failed read or re-diff keeps the previous result and sources, with the error
+  in the load banner. The web viewer has no toggle.
 - **Colours** — canvas/added/removed/per-layer colours, theme presets.
 - **Layers** — per-layer colour rows (square swatches).
 - **Hotkeys** — see §4.

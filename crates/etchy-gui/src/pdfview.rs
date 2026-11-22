@@ -38,6 +38,163 @@ pub const MAX_TEXTURE_SIDE: u32 = 8192;
 #[cfg(feature = "pdf")]
 pub const MAX_DOC_PIXELS: u64 = 250_000_000;
 
+/// The lowest DPI the viewer will drop to when the chosen PDF resolution would
+/// breach a raster cap (#223). Below 72 DPI (one pixel per point) schematic text
+/// is unreadable, so a pair that only fits under it fails loud instead.
+#[cfg(feature = "pdf")]
+pub const MIN_FIT_DPI: f32 = 72.0;
+
+/// Which raster cap a PDF pair breaches at a given DPI (#223). Pages are
+/// 1-based, as the user reads them.
+#[cfg(feature = "pdf")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CapBreach {
+    /// A page side over [`MAX_TEXTURE_SIDE`] (egui would panic uploading it).
+    TextureSide {
+        label: &'static str,
+        page: usize,
+        w: u32,
+        h: u32,
+    },
+    /// A page over [`MAX_PAGE_PIXELS`].
+    PagePixels {
+        label: &'static str,
+        page: usize,
+        w: u32,
+        h: u32,
+    },
+    /// Both documents together over [`MAX_DOC_PIXELS`].
+    DocPixels { total: u64 },
+}
+
+#[cfg(feature = "pdf")]
+impl std::fmt::Display for CapBreach {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            CapBreach::TextureSide { label, page, w, h } => write!(
+                f,
+                "{label} PDF page {page} would be {w}x{h} px, a side over the \
+                 {MAX_TEXTURE_SIDE} px GPU texture limit"
+            ),
+            CapBreach::PagePixels { label, page, w, h } => write!(
+                f,
+                "{label} PDF page {page} would be {w}x{h} px (~{} MP), over the ~{} MP \
+                 per-page cap",
+                (u64::from(w) * u64::from(h)) / 1_000_000,
+                MAX_PAGE_PIXELS / 1_000_000
+            ),
+            CapBreach::DocPixels { total } => write!(
+                f,
+                "the pair would be ~{} MP in total, over the viewer's ~{} MP budget",
+                total / 1_000_000,
+                MAX_DOC_PIXELS / 1_000_000
+            ),
+        }
+    }
+}
+
+/// The first raster cap the pair breaches at `dpi`, or `None` when every page
+/// fits. `old`/`new` are page sizes in PDF points; pixels are sized exactly as
+/// the rasterizer sizes them. Zero-pixel pages are not judged here (lowering
+/// the DPI never fixes them; `build_pdf_view` rejects them loudly).
+#[cfg(feature = "pdf")]
+pub fn cap_breach(old: &[(f32, f32)], new: &[(f32, f32)], dpi: f32) -> Option<CapBreach> {
+    let mut total: u64 = 0;
+    for (label, pages) in [("old", old), ("new", new)] {
+        for (i, pt) in pages.iter().enumerate() {
+            let (w, h) = etchy_pdf::pixel_dims_at(*pt, dpi);
+            let page = i + 1;
+            if w > MAX_TEXTURE_SIDE || h > MAX_TEXTURE_SIDE {
+                return Some(CapBreach::TextureSide { label, page, w, h });
+            }
+            let px = u64::from(w) * u64::from(h);
+            if px > MAX_PAGE_PIXELS {
+                return Some(CapBreach::PagePixels { label, page, w, h });
+            }
+            total += px;
+        }
+    }
+    (total > MAX_DOC_PIXELS).then_some(CapBreach::DocPixels { total })
+}
+
+/// The DPI a PDF pair is actually rendered at (#223).
+#[cfg(feature = "pdf")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DpiFit {
+    /// The DPI to rasterize at: the requested one when it fits, otherwise the
+    /// highest whole DPI below it that clears every cap.
+    pub dpi: f32,
+    /// The DPI the user asked for.
+    pub requested: f32,
+    /// Why the DPI was lowered: the cap breached at the requested DPI.
+    pub lowered: Option<CapBreach>,
+}
+
+#[cfg(feature = "pdf")]
+impl DpiFit {
+    /// The loud warning to show when the DPI was lowered; `None` when not.
+    pub fn note(&self) -> Option<String> {
+        self.lowered.as_ref().map(|why| {
+            format!(
+                "PDF rendered at {} DPI, not the {} DPI set in Settings > Diff: at {} DPI {why}",
+                self.dpi, self.requested, self.requested
+            )
+        })
+    }
+}
+
+/// Fit the requested DPI to the raster caps (#223). Returns the requested DPI
+/// untouched when the pair fits; otherwise lowers it to the highest whole DPI
+/// that fits and records why. Fails with the breach at [`MIN_FIT_DPI`] when
+/// even that is too much — a pair that big is the CLI's job.
+#[cfg(feature = "pdf")]
+pub fn fit_dpi(
+    requested: f32,
+    old: &[(f32, f32)],
+    new: &[(f32, f32)],
+) -> Result<DpiFit, CapBreach> {
+    let Some(why) = cap_breach(old, new, requested) else {
+        return Ok(DpiFit {
+            dpi: requested,
+            requested,
+            lowered: None,
+        });
+    };
+    // Start from the analytic bound for each cap (pixels scale with dpi/72 per
+    // axis), then step down a whole DPI at a time until the exact floored sizing
+    // fits — the bound is only off by float rounding, so this is a step or two.
+    let pages = old.iter().chain(new.iter());
+    let side = pages.clone().map(|&(w, h)| w.max(h)).fold(0.0f32, f32::max);
+    let area_max = pages.clone().map(|&(w, h)| w * h).fold(0.0f32, f32::max);
+    let area_sum: f32 = pages.map(|&(w, h)| w * h).sum();
+    let mut bound = requested;
+    if side > 0.0 {
+        bound = bound.min(72.0 * MAX_TEXTURE_SIDE as f32 / side);
+    }
+    if area_max > 0.0 {
+        bound = bound.min(72.0 * (MAX_PAGE_PIXELS as f32 / area_max).sqrt());
+    }
+    if area_sum > 0.0 {
+        bound = bound.min(72.0 * (MAX_DOC_PIXELS as f32 / area_sum).sqrt());
+    }
+    let mut dpi = bound.floor();
+    if dpi >= requested {
+        // `requested` itself breached, so start strictly below it.
+        dpi = requested.ceil() - 1.0;
+    }
+    while dpi >= MIN_FIT_DPI {
+        if cap_breach(old, new, dpi).is_none() {
+            return Ok(DpiFit {
+                dpi,
+                requested,
+                lowered: Some(why),
+            });
+        }
+        dpi -= 1.0;
+    }
+    Err(cap_breach(old, new, MIN_FIT_DPI).unwrap_or(why))
+}
+
 /// Whether a page exists in both revisions or only one. A sheet appearing or
 /// disappearing IS a change and must stay legible (trust: no silent misses).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,6 +511,9 @@ pub struct PdfView {
     /// pairing. Shown in the viewer whenever it is `Some`: a re-pairing that
     /// silently changed which sheets were compared is not acceptable.
     pub alignment_note: Option<String>,
+    /// Set when the chosen DPI breached a raster cap and the pair was rendered
+    /// at a lower one (#223) — a loud warning, never a silent downgrade.
+    pub dpi_note: Option<String>,
 }
 
 impl PdfView {
@@ -364,6 +524,21 @@ impl PdfView {
     pub fn summary(&self) -> String {
         page_summary(self.old_pages, self.new_pages, self.changed_count())
     }
+}
+
+/// Page alignment is a DP matrix quadratic in the page count — refuse a
+/// document too big for it BEFORE rasterizing a single page (#249).
+#[cfg(feature = "pdf")]
+fn check_page_count(label: &str, pages: usize) -> anyhow::Result<()> {
+    if pages > etchy_core::MAX_ALIGN_PAGES {
+        anyhow::bail!(
+            "the {label} PDF has {pages} pages, over the {}-page limit etchy will align \
+             (page alignment cost grows with the square of the page count) — split \
+             the document, or diff it with the CLI",
+            etchy_core::MAX_ALIGN_PAGES
+        );
+    }
+    Ok(())
 }
 
 /// Rasterize both PDFs at `dpi` (#223: user-settable in Settings > Diff), diff
@@ -391,17 +566,7 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         let dims = etchy_pdf::page_pixel_dims(bytes, dpi)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("reading the {label} PDF"))?;
-        // Page alignment is a DP matrix quadratic in the page count — refuse a
-        // document pair too big for it BEFORE rasterizing a single page (#249).
-        if dims.len() > etchy_core::MAX_ALIGN_PAGES {
-            anyhow::bail!(
-                "the {label} PDF has {} pages, over the {}-page limit etchy will align \
-                 (page alignment cost grows with the square of the page count) — split \
-                 the document, or diff it with the CLI",
-                dims.len(),
-                etchy_core::MAX_ALIGN_PAGES
-            );
-        }
+        check_page_count(label, dims.len())?;
         for (i, (w, h)) in dims.iter().enumerate() {
             let px = u64::from(*w) * u64::from(*h);
             if px == 0 {
@@ -547,6 +712,7 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         order,
         selected,
         alignment_note: alignment.note(),
+        dpi_note: None,
     })
 }
 
@@ -555,6 +721,40 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
 #[cfg(not(feature = "pdf"))]
 pub fn build_pdf_view(_old: &[u8], _new: &[u8], _dpi: f32) -> anyhow::Result<PdfView> {
     anyhow::bail!("this build lacks PDF support — rebuild etchy-gui with --features pdf")
+}
+
+/// The viewer's entry point (#223): fit the requested DPI to the raster caps
+/// (see [`fit_dpi`]), then [`build_pdf_view`] at the fitted DPI. When the DPI
+/// had to be lowered the view carries the reason in `dpi_note`, so the viewer
+/// warns loudly; a pair that will not fit even at [`MIN_FIT_DPI`] fails loud.
+#[cfg(feature = "pdf")]
+pub fn build_pdf_view_fitted(old: &[u8], new: &[u8], requested: f32) -> anyhow::Result<PdfView> {
+    use anyhow::Context as _;
+    let points = |label: &str, bytes: &[u8]| {
+        etchy_pdf::page_point_dims(bytes)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("reading the {label} PDF"))
+    };
+    let (old_pt, new_pt) = (points("old", old)?, points("new", new)?);
+    // The page limit comes first: a pair over it gets that clearer message,
+    // not a raster-cap one from the fit below.
+    check_page_count("old", old_pt.len())?;
+    check_page_count("new", new_pt.len())?;
+    let fit = fit_dpi(requested, &old_pt, &new_pt).map_err(|why| {
+        anyhow::anyhow!(
+            "this PDF pair will not fit the viewer's raster caps even at {MIN_FIT_DPI} DPI: \
+             {why} — diff it with the CLI"
+        )
+    })?;
+    let mut view = build_pdf_view(old, new, fit.dpi)?;
+    view.dpi_note = fit.note();
+    Ok(view)
+}
+
+/// Without the `pdf` feature a PDF input is a loud, actionable error.
+#[cfg(not(feature = "pdf"))]
+pub fn build_pdf_view_fitted(old: &[u8], new: &[u8], requested: f32) -> anyhow::Result<PdfView> {
+    build_pdf_view(old, new, requested)
 }
 
 /// Encode a page's diff overlay to PNG bytes for the Export tab.
@@ -835,6 +1035,160 @@ mod pdf_tests {
             Ok(_) => panic!("an over-cap DPI must fail loud"),
         };
         assert!(err.contains("DPI"), "error names the DPI: {err}");
+    }
+
+    #[test]
+    fn the_page_limit_is_checked_before_the_dpi_fit() {
+        // Over the page limit AND over the document budget even at 72 DPI
+        // (1025 pages of 600x600 pt is ~369 MP): the page limit is what the
+        // user is told, not the raster caps (#223 review).
+        let sheet = || test_sized_sheet(600.0, 600.0, 10, 10);
+        let sheets: Vec<TestSheet> = (0..etchy_core::MAX_ALIGN_PAGES + 1)
+            .map(|_| sheet())
+            .collect();
+        let big = multi_page_pdf(&sheets);
+        let small = one_square_pdf(10, 10);
+        let err = match build_pdf_view_fitted(&big, &small, 200.0) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("an over-limit page count must fail loud"),
+        };
+        assert!(err.contains("-page limit"), "page limit named: {err}");
+    }
+
+    // ---- DPI fitting (#223) -------------------------------------------------
+
+    const A4: (f32, f32) = (595.0, 842.0);
+
+    #[test]
+    fn fit_dpi_keeps_a_dpi_that_fits() {
+        // A4 at 300 DPI is 2479x3508 px, ~8.7 MP: well inside every cap.
+        let fit = fit_dpi(300.0, &[A4], &[A4]).expect("fits");
+        assert_eq!(fit.dpi, 300.0);
+        assert_eq!(fit.requested, 300.0);
+        assert_eq!(fit.lowered, None);
+        assert_eq!(fit.note(), None);
+    }
+
+    #[test]
+    fn fit_dpi_lowers_for_the_texture_side_and_says_why() {
+        // A 2000 pt wide banner at 300 DPI is 8333 px wide: over 8192.
+        let banner = (2000.0, 100.0);
+        let fit = fit_dpi(300.0, &[A4], &[banner]).expect("fits lower");
+        // 8192 * 72 / 2000 = 294.9 → 294 is the highest whole DPI that fits.
+        assert_eq!(fit.dpi, 294.0);
+        assert!(cap_breach(&[A4], &[banner], fit.dpi).is_none());
+        assert!(cap_breach(&[A4], &[banner], fit.dpi + 1.0).is_some());
+        assert_eq!(
+            fit.lowered,
+            Some(CapBreach::TextureSide {
+                label: "new",
+                page: 1,
+                w: 8333,
+                h: 416
+            })
+        );
+        let note = fit.note().expect("a lowered DPI is never silent");
+        assert!(note.contains("294 DPI"), "{note}");
+        assert!(note.contains("300 DPI"), "{note}");
+        assert!(note.contains("new PDF page 1"), "{note}");
+        assert!(note.contains("texture limit"), "{note}");
+    }
+
+    #[test]
+    fn fit_dpi_lowers_for_the_page_pixel_cap() {
+        // A 1000 pt square at 600 DPI is 8333 px a side; the area cap binds
+        // first: 72 * sqrt(50e6 / 1e6) = 509.1.
+        let sq = (1000.0, 1000.0);
+        let fit = fit_dpi(600.0, &[sq], &[sq]).expect("fits lower");
+        assert_eq!(fit.dpi, 509.0);
+        assert!(cap_breach(&[sq], &[sq], fit.dpi).is_none());
+        assert!(cap_breach(&[sq], &[sq], fit.dpi + 1.0).is_some());
+        assert!(matches!(
+            fit.lowered,
+            Some(CapBreach::TextureSide { label: "old", .. })
+        ));
+        // Just under the side cap, the area cap is what breaches.
+        assert!(matches!(
+            cap_breach(&[sq], &[sq], 580.0),
+            Some(CapBreach::PagePixels {
+                label: "old",
+                page: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fit_dpi_lowers_for_the_document_budget() {
+        // 30 A4 sheets a side at 300 DPI: ~8.7 MP each, ~522 MP in total.
+        let pages = vec![A4; 30];
+        let fit = fit_dpi(300.0, &pages, &pages).expect("fits lower");
+        assert!(matches!(fit.lowered, Some(CapBreach::DocPixels { .. })));
+        assert!(fit.dpi < 300.0 && fit.dpi >= MIN_FIT_DPI);
+        assert_eq!(fit.dpi, fit.dpi.floor(), "a whole DPI");
+        assert!(cap_breach(&pages, &pages, fit.dpi).is_none());
+        assert!(cap_breach(&pages, &pages, fit.dpi + 1.0).is_some());
+    }
+
+    #[test]
+    fn fit_dpi_fails_loud_below_the_floor() {
+        // 10000 pt is 10000 px even at 72 DPI: no DPI the viewer accepts fits.
+        let huge = (10_000.0, 100.0);
+        let err = fit_dpi(200.0, &[huge], &[A4]).expect_err("cannot fit");
+        assert!(matches!(
+            err,
+            CapBreach::TextureSide {
+                label: "old",
+                page: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fit_dpi_names_the_right_page() {
+        // Page 3 of the old document is the oversized one.
+        let old = [A4, A4, (3000.0, 100.0)];
+        let fit = fit_dpi(200.0, &old, &[A4]).expect("fits lower");
+        assert!(matches!(
+            fit.lowered,
+            Some(CapBreach::TextureSide {
+                label: "old",
+                page: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn fitted_build_lowers_the_dpi_and_carries_the_warning() {
+        // A 6000 x 50 pt strip at 150 DPI is 12500 px wide; fitted, it renders
+        // at 98 DPI (8166 px) and the view says so.
+        let strip = multi_page_pdf(&[test_sized_sheet(6000.0, 50.0, 10, 10)]);
+        let v = build_pdf_view_fitted(&strip, &strip, 150.0).expect("fits lower");
+        assert_eq!(v.dpi, 98.0);
+        assert!(v.rows[0].width <= MAX_TEXTURE_SIDE);
+        let note = v.dpi_note.as_deref().expect("lowered DPI warns");
+        assert!(
+            note.contains("98 DPI") && note.contains("150 DPI"),
+            "{note}"
+        );
+        // A DPI that fits builds as asked, with no warning.
+        let pdf = one_square_pdf(10, 10);
+        let v = build_pdf_view_fitted(&pdf, &pdf, 300.0).expect("fits");
+        assert_eq!(v.dpi, 300.0);
+        assert_eq!(v.dpi_note, None);
+    }
+
+    #[test]
+    fn fitted_build_fails_loud_when_nothing_fits() {
+        let huge = multi_page_pdf(&[test_sized_sheet(10_000.0, 50.0, 10, 10)]);
+        let err = match build_pdf_view_fitted(&huge, &huge, 200.0) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("an unfittable pair must fail loud"),
+        };
+        assert!(err.contains("72 DPI"), "{err}");
+        assert!(err.contains("CLI"), "{err}");
     }
 
     #[test]

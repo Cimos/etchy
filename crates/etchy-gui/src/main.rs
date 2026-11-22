@@ -22,6 +22,9 @@ mod lod;
 // module is (deliberately) dead — the pure helpers stay compiled + unit-tested.
 #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
 mod pdfview;
+// Reload on change (#423): native only, the web viewer has no files to watch.
+#[cfg(not(target_arch = "wasm32"))]
+mod watch;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
@@ -148,39 +151,52 @@ mod native {
 
     /// What the command line loaded before the window opens.
     enum Seed {
-        /// Two revisions and their computed diff, at the PDF DPI used.
-        Pair(LoadedSource, LoadedSource, ComputedDiff, f32),
-        /// One Gerber set on its own (#466) and its single-set view.
-        Single(LoadedSource, BoardDiff),
+        /// Two revisions and their computed diff, at the PDF DPI used, plus
+        /// where they came from (watched for reloads, #423).
+        Pair(
+            LoadedSource,
+            LoadedSource,
+            ComputedDiff,
+            f32,
+            [SeedOrigin; 2],
+        ),
+        /// One Gerber set on its own (#466), its single-set view and origin.
+        Single(LoadedSource, BoardDiff, SeedOrigin),
+    }
+
+    /// A CLI path and the state of its files just before the load read
+    /// them (#423). The watcher starts from that state, so a re-export
+    /// landing during a slow startup load still triggers a reload.
+    type SeedOrigin = (SourceOrigin, watch::Snapshot);
+
+    fn seed_origin(path: &Path) -> SeedOrigin {
+        let origin = SourceOrigin::Path(path.to_path_buf());
+        let baseline = origin.snapshot();
+        (origin, baseline)
     }
 
     /// Load one Gerber directory or `.zip` for the single-set view (#466),
     /// through the same loader as either side of a diff.
     fn load_single_seed(path: &Path) -> anyhow::Result<Seed> {
+        let origin = seed_origin(path);
         let src = load_source_any(path, label(path))?;
         let view = single_from_source(&src)?;
-        Ok(Seed::Single(src, view))
+        Ok(Seed::Single(src, view, origin))
     }
 
     /// Load both revisions from CLI paths — Gerber dirs/zips or schematic PDFs
     /// (#63) — into sources + their computed diff.
     fn load_seed(old_path: &Path, new_path: &Path) -> anyhow::Result<Seed> {
+        let origins = [seed_origin(old_path), seed_origin(new_path)];
         let old = load_source_any(old_path, label(old_path))?;
         let new = load_source_any(new_path, label(new_path))?;
         // Persisted settings aren't restored yet at this point — seed a PDF pair
         // at the default DPI; `build_app` re-rasterizes if the restored setting
-        // differs (#223). The raster caps scale with DPI, so a pair that only
-        // fits at a lower DPI falls back to the CLI default rather than
-        // refusing to open at all (#223 review) — the DPI actually used is
-        // returned so build_app can keep the setting honest.
-        let (diff, dpi) = match compute_diff(&old, &new, PDF_DPI_DEFAULT) {
-            Ok(d) => (d, PDF_DPI_DEFAULT),
-            Err(first) => match compute_diff(&old, &new, PDF_DPI_FALLBACK) {
-                Ok(d) => (d, PDF_DPI_FALLBACK),
-                Err(_) => return Err(first),
-            },
-        };
-        Ok(Seed::Pair(old, new, diff, dpi))
+        // differs (#223). A pair that breaches the raster caps at the default
+        // is rendered at the highest DPI that fits, with a warning (the view
+        // records the DPI it was actually built at).
+        let diff = compute_diff(&old, &new, PDF_DPI_DEFAULT)?;
+        Ok(Seed::Pair(old, new, diff, PDF_DPI_DEFAULT, origins))
     }
 
     /// Construct the app, restoring persisted settings. With a pair seed, both
@@ -188,31 +204,35 @@ mod native {
     /// single-set view (#466); without one, the welcome screen shows (empty diff).
     fn build_app(cc: &eframe::CreationContext<'_>, seed: Option<Seed>) -> ViewApp {
         match seed {
-            Some(Seed::Single(src, view)) => {
+            Some(Seed::Single(src, view, (origin, baseline))) => {
                 // Built straight from the view so persisted per-board settings
                 // (visible layers, #327) restore onto it like a diff's.
                 let l = src.label().to_string();
                 let mut app = ViewApp::from_cc(cc, view, l.clone(), l);
                 app.enter_single(src);
+                app.set_origin(RevSide::New, origin, baseline);
                 app
             }
-            Some(Seed::Pair(old, new, computed, seed_dpi)) => {
+            Some(Seed::Pair(old, new, computed, seed_dpi, [(o_old, b_old), (o_new, b_new)])) => {
                 let (ol, nl) = (old.label().to_string(), new.label().to_string());
                 let mut app = match computed {
                     ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
                     ComputedDiff::Pdf(view) => {
                         let mut app = ViewApp::from_cc(cc, empty_diff(), ol, nl);
-                        app.pdf = Some(view);
+                        app.set_pdf_view(view);
                         app
                     }
                 };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
+                app.set_origin(RevSide::Old, o_old, b_old);
+                app.set_origin(RevSide::New, o_new, b_new);
                 // The seed was rasterized before settings restore; honour a
-                // different persisted DPI now (#223). If that re-rasterize
-                // fails (caps), the setting must fall back to the DPI the
-                // on-screen view was actually built at — the chip may never
-                // claim a DPI the view isn't (#223 review).
+                // different persisted DPI now (#223). A DPI over the caps is
+                // lowered to fit (with a warning); if the rebuild still fails,
+                // the setting falls back to the DPI the seed was requested at.
+                // The seed may itself have been lowered to fit, so the view can
+                // sit below that setting; its DPI note says so (#223 review).
                 if app.pdf.is_some() && app.pdf_dpi != seed_dpi {
                     app.rebuild_diff();
                     if app.load_error.is_some() {
@@ -1280,7 +1300,17 @@ fn input_rect(mode: Mode, full: Rect, px: f32) -> Rect {
     }
 }
 
+/// The PDF page view kept across a DPI re-render (#223).
+struct PdfViewState {
+    /// The selected row's (old page, new page), 1-based.
+    pages: (Option<usize>, Option<usize>),
+    cam: Camera,
+    measurements: Vec<Measurement>,
+    measure_pts: Vec<[f64; 2]>,
+}
+
 /// Pan/zoom camera in world (nm) space.
+#[derive(Clone)]
 struct Camera {
     center: [f64; 2], // world nm
     scale: f64,       // pixels per nm
@@ -1494,7 +1524,7 @@ fn compute_diff(
             Ok(ComputedDiff::Board(diff_from_sources(o, n)?))
         }
         (LoadedSource::Pdf(o), LoadedSource::Pdf(n)) => Ok(ComputedDiff::Pdf(
-            pdfview::build_pdf_view(&o.bytes, &n.bytes, pdf_dpi)?,
+            pdfview::build_pdf_view_fitted(&o.bytes, &n.bytes, pdf_dpi)?,
         )),
         _ => anyhow::bail!(
             "cannot compare a PDF with Gerber input — load two schematic PDFs \
@@ -1529,15 +1559,10 @@ const FOCUS_DEFAULT: f32 = 0.25;
 /// their `--dpi` flag for anything else.
 const PDF_DPI_DEFAULT: f32 = 200.0;
 
-/// Fallback for the CLI-args seed (#223 review): the raster caps scale with
-/// DPI, so a pair that fit at the old 150 default must still open — it seeds at
-/// 150 when 200 breaches a cap, and the Settings chip reflects the DPI used.
-#[cfg(not(target_arch = "wasm32"))]
-const PDF_DPI_FALLBACK: f32 = 150.0;
-
-/// The Settings > Diff DPI chips (#223). Bounded choices, not a free slider —
-/// each step is checked against the raster caps at load, and a chip that
-/// breaches them fails loud and reverts.
+/// The Settings > Diff DPI chips (#223). Bounded choices, not a free slider.
+/// Each is checked against the raster caps at load: a pair that breaches them
+/// at the chosen DPI is rendered at the highest whole DPI that fits, with a
+/// warning naming the page and the cap.
 const PDF_DPI_CHOICES: [f32; 3] = [150.0, 200.0, 300.0];
 
 /// Floor for the Layers-panel row ghosting (#224): rows mirror the canvas focus
@@ -1744,7 +1769,42 @@ struct ViewApp {
     brand_tex: Option<egui::TextureHandle>,
     /// Which edge the activity rail lives on (Feature 8); persisted via #52.
     rail_side: RailSide,
+    /// Reload and re-diff when an opened input changes on disk (#423). On by
+    /// default; toggled in Settings > Input and persisted. Native only in
+    /// effect (the web viewer has nothing to watch), but kept on both
+    /// surfaces so one settings blob round-trips everywhere.
+    watch_inputs: bool,
+    /// Where each side was loaded from on disk (#423), so a change there can
+    /// be re-read. `None` for a side with no source or no files behind it.
+    #[cfg(not(target_arch = "wasm32"))]
+    origin_old: Option<SourceOrigin>,
+    #[cfg(not(target_arch = "wasm32"))]
+    origin_new: Option<SourceOrigin>,
+    /// The state of each side's files just before the load read them (#423),
+    /// waiting to become the next watcher's baseline. Taken at load time, not
+    /// when the watcher starts a frame or more later, so a re-export landing
+    /// in between still triggers a reload.
+    #[cfg(not(target_arch = "wasm32"))]
+    baseline_old: Option<watch::Snapshot>,
+    #[cfg(not(target_arch = "wasm32"))]
+    baseline_new: Option<watch::Snapshot>,
+    /// The running watchers, one per side (#423). Rebuilt when the origins or
+    /// the toggle change, or when a new load leaves a fresh baseline;
+    /// dropping one stops its thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    watch_old: Option<watch::FileWatcher>,
+    #[cfg(not(target_arch = "wasm32"))]
+    watch_new: Option<watch::FileWatcher>,
+    /// "Reloaded after a file change" and when it was shown (#423), so a
+    /// reload never changes the screen without saying so. Cleared after
+    /// `RELOAD_NOTE_SECS`.
+    #[cfg(not(target_arch = "wasm32"))]
+    reload_note: Option<(String, f64)>,
 }
+
+/// How long the reload notice stays up (#423).
+#[cfg(not(target_arch = "wasm32"))]
+const RELOAD_NOTE_SECS: f64 = 4.0;
 
 /// A one-line note reconciling the export with the Overlay view's noise filter
 /// (#245/#91). The Overlay view hides diff regions below `min_area_mm2`, but the
@@ -1858,6 +1918,21 @@ impl ViewApp {
             active_panel: Some(PanelTab::Layers),
             brand_tex: None,
             rail_side: RailSide::default(),
+            watch_inputs: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            origin_old: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            origin_new: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            baseline_old: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            baseline_new: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_old: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_new: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            reload_note: None,
         }
     }
 
@@ -2549,6 +2624,9 @@ struct Settings {
     rail_side: RailSide,
     /// The user's hotkey map (#201). Missing in pre-#201 configs → defaults.
     keymap: Keymap,
+    /// Reload when an opened input changes (#423). Missing in older configs →
+    /// on, the default.
+    watch_inputs: bool,
 }
 
 impl Default for Settings {
@@ -2573,6 +2651,7 @@ impl Default for Settings {
             swipe_frac: 0.5,
             rail_side: RailSide::default(),
             keymap: Keymap::default(),
+            watch_inputs: true,
         }
     }
 }
@@ -2730,6 +2809,7 @@ impl ViewApp {
             swipe_frac: self.swipe_frac,
             rail_side: self.rail_side,
             keymap: self.keymap,
+            watch_inputs: self.watch_inputs,
         }
     }
 
@@ -2783,6 +2863,7 @@ impl ViewApp {
         self.swipe_frac = clamp_swipe_frac(s.swipe_frac);
         self.rail_side = s.rail_side;
         self.keymap = s.keymap;
+        self.watch_inputs = s.watch_inputs;
     }
 }
 
@@ -2837,6 +2918,15 @@ impl ViewApp {
     /// page view takes over the canvas and panels.
     fn adopt_pdf(&mut self, view: PdfView, old_label: String, new_label: String) {
         self.adopt_diff(empty_diff(), old_label, new_label);
+        self.set_pdf_view(view);
+    }
+
+    /// Install a PDF view. A view rendered below the chosen DPI (#223) puts its
+    /// note in the trust-warning chip, so the lower resolution is never silent.
+    fn set_pdf_view(&mut self, view: PdfView) {
+        if let Some(note) = &view.dpi_note {
+            self.diff.report.warnings.push(note.clone());
+        }
         self.pdf = Some(view);
     }
 
@@ -2878,6 +2968,19 @@ impl ViewApp {
         };
         match single_from_source(src) {
             Ok(view) => {
+                // The set becomes the new side; its origin, pending baseline
+                // and running watcher move with it, so the reload watcher
+                // (#423) keeps covering it without losing its baseline.
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.src_old.is_some() {
+                    self.origin_new = self.origin_old.take();
+                    self.baseline_new = self.baseline_old.take();
+                    self.watch_new = self.watch_old.take();
+                } else {
+                    self.origin_old = None;
+                    self.baseline_old = None;
+                    self.watch_old = None;
+                }
                 let src = self.src_old.take().or_else(|| self.src_new.take());
                 if let Some(src) = src {
                     self.adopt_single(view, src);
@@ -2955,10 +3058,18 @@ impl ViewApp {
     }
 
     /// Change the PDF rasterization DPI (#223). With a PDF pair loaded, the pair
-    /// is re-rasterized from the retained source bytes at the new DPI; a DPI
-    /// that breaches the pixel caps fails loud (`load_error`) and the setting
-    /// reverts, leaving the previous view — still built at the previous DPI —
-    /// on screen. Without a PDF pair it simply takes effect on the next load.
+    /// is re-rasterized from the retained source bytes at the new DPI. A DPI
+    /// that breaches the pixel caps renders at the highest DPI that fits, with
+    /// a warning; the setting keeps the chosen DPI for the next pair. Only a
+    /// pair that fits at no usable DPI fails loud (`load_error`) and reverts,
+    /// leaving the previous view on screen. Without a PDF pair the setting
+    /// simply takes effect on the next load.
+    ///
+    /// A successful re-render keeps the page, camera and rulers the user had.
+    /// The canvas world is nm (raster pixels map through each view's own DPI),
+    /// so the same camera frames the same part of the sheet at any DPI: raising
+    /// the DPI on a zoomed-in page sharpens it in place instead of jumping back
+    /// to the first changed page, zoomed out.
     fn set_pdf_dpi(&mut self, dpi: f32) {
         let prev = self.pdf_dpi;
         if dpi == prev {
@@ -2970,14 +3081,50 @@ impl ViewApp {
             (Some(LoadedSource::Pdf(_)), Some(LoadedSource::Pdf(_)))
         );
         if pdf_pair {
+            let kept = self.pdf_view_state();
             self.load_error = None;
             self.rebuild_diff();
             if self.load_error.is_some() {
                 // Fail loud AND revert: the error stays visible, the setting
                 // goes back to the DPI the on-screen view was built at.
                 self.pdf_dpi = prev;
+            } else if let Some(kept) = kept {
+                self.restore_pdf_view_state(kept);
             }
         }
+    }
+
+    /// The selected page (by its old/new page numbers) with the camera and
+    /// rulers on it, copied before a PDF re-render (#223).
+    fn pdf_view_state(&self) -> Option<PdfViewState> {
+        let pv = self.pdf.as_ref()?;
+        let row = pv.rows.get(pv.selected)?;
+        Some(PdfViewState {
+            pages: (row.old_page, row.new_page),
+            cam: self.cam.clone(),
+            measurements: self.measurements.clone(),
+            measure_pts: self.measure_pts.clone(),
+        })
+    }
+
+    /// Put back what [`Self::pdf_view_state`] copied, when the same page is
+    /// in the re-rendered view. If it is not, the fresh view stays as built
+    /// (first changed page, refit next frame).
+    fn restore_pdf_view_state(&mut self, kept: PdfViewState) {
+        let Some(pv) = self.pdf.as_mut() else {
+            return;
+        };
+        let Some(idx) = pv
+            .rows
+            .iter()
+            .position(|r| (r.old_page, r.new_page) == kept.pages)
+        else {
+            return;
+        };
+        pv.selected = idx;
+        self.cam = kept.cam;
+        self.measurements = kept.measurements;
+        self.measure_pts = kept.measure_pts;
     }
 
     /// Drain any completed async file picks (web) into the diff.
@@ -3033,10 +3180,166 @@ impl ViewApp {
         if let Some(parent) = path.parent() {
             self.last_dir = Some(parent.to_path_buf());
         }
+        // Snapshot before the read (#423): any change after it reloads.
+        let origin = SourceOrigin::Path(path.to_path_buf());
+        let baseline = origin.snapshot();
         match load_source_any(path, derive_label(path)) {
-            Ok(src) => self.set_side(side, src),
+            Ok(src) => {
+                self.set_side(side, src);
+                if self.load_error.is_none() {
+                    self.set_origin(side, origin, baseline);
+                }
+            }
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
+    }
+
+    /// Record where a side now comes from (#423), after it loaded cleanly,
+    /// with the snapshot of its files taken just before they were read.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_origin(&mut self, side: RevSide, origin: SourceOrigin, baseline: watch::Snapshot) {
+        match side {
+            RevSide::Old => {
+                self.origin_old = Some(origin);
+                self.baseline_old = Some(baseline);
+            }
+            RevSide::New => {
+                self.origin_new = Some(origin);
+                self.baseline_new = Some(baseline);
+            }
+        }
+    }
+
+    /// Start, stop or replace the per-side watchers (#423) so they cover
+    /// exactly the loaded sides' origins while the setting is on. A load
+    /// leaves a fresh baseline, which always starts a new watcher from it.
+    /// Cheap when nothing changed: it only compares path lists.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_watchers(&mut self, ctx: &egui::Context) {
+        fn want(
+            on: bool,
+            loaded: bool,
+            origin: &Option<SourceOrigin>,
+        ) -> Option<Vec<std::path::PathBuf>> {
+            if on && loaded {
+                origin.as_ref().map(SourceOrigin::roots)
+            } else {
+                None
+            }
+        }
+        fn sync(
+            slot: &mut Option<watch::FileWatcher>,
+            roots: Option<Vec<std::path::PathBuf>>,
+            baseline: &mut Option<watch::Snapshot>,
+            ctx: &egui::Context,
+        ) {
+            let Some(r) = roots else {
+                // Off or unloaded: stop. A pending baseline stays, so turning
+                // the setting back on still compares against the load.
+                *slot = None;
+                return;
+            };
+            let same = slot.as_ref().is_some_and(|w| w.roots() == r.as_slice());
+            if same && baseline.is_none() {
+                return;
+            }
+            // Without a load-time snapshot (none was recorded) the best
+            // available baseline is the state right now.
+            let base = baseline.take().unwrap_or_else(|| watch::take(&r));
+            let ctx = ctx.clone();
+            *slot = Some(watch::FileWatcher::spawn(r, base, move || {
+                ctx.request_repaint()
+            }));
+        }
+        let old = want(self.watch_inputs, self.src_old.is_some(), &self.origin_old);
+        let new = want(self.watch_inputs, self.src_new.is_some(), &self.origin_new);
+        sync(&mut self.watch_old, old, &mut self.baseline_old, ctx);
+        sync(&mut self.watch_new, new, &mut self.baseline_new, ctx);
+    }
+
+    /// Once per frame (#423): keep the watchers in step, and reload any side
+    /// whose files changed and then settled.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_watchers(&mut self, ctx: &egui::Context, now: f64) {
+        self.sync_watchers(ctx);
+        let old = self.watch_old.as_ref().is_some_and(|w| w.take_change());
+        let new = self.watch_new.as_ref().is_some_and(|w| w.take_change());
+        if old || new {
+            self.reload_sides(old, new, now);
+        }
+        if let Some((_, at)) = self.reload_note {
+            if now - at >= RELOAD_NOTE_SECS {
+                self.reload_note = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    RELOAD_NOTE_SECS - (now - at),
+                ));
+            }
+        }
+    }
+
+    /// Re-read the changed sides from disk and re-diff (#423), keeping the
+    /// camera, selection, visibility and rulers when the layer stack is the
+    /// same. Any failure, reading or diffing, leaves the previous result and
+    /// sources on screen with the error in the banner (the #330 path).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reload_sides(&mut self, old: bool, new: bool, now: f64) {
+        fn read(want: bool, origin: &Option<SourceOrigin>) -> anyhow::Result<Option<LoadedSource>> {
+            match (want, origin) {
+                (true, Some(o)) => o.reload().map(Some),
+                _ => Ok(None),
+            }
+        }
+        let fresh = read(old, &self.origin_old).and_then(|o| Ok((o, read(new, &self.origin_new)?)));
+        let (fresh_old, fresh_new) = match fresh {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.load_error = Some(format!(
+                    "reload after a file change: {e:#} (the previous result is still shown)"
+                ));
+                return;
+            }
+        };
+        if fresh_old.is_none() && fresh_new.is_none() {
+            return;
+        }
+        let kept = self.keep_view();
+        let prev_old = fresh_old.map(|s| self.src_old.replace(s));
+        let prev_new = fresh_new.map(|s| self.src_new.replace(s));
+        self.load_error = None;
+        self.rebuild_diff();
+        if let Some(e) = self.load_error.take() {
+            if let Some(p) = prev_old {
+                self.src_old = p;
+            }
+            if let Some(p) = prev_new {
+                self.src_new = p;
+            }
+            self.load_error = Some(format!(
+                "reload after a file change: {e} (the previous result is still shown)"
+            ));
+            return;
+        }
+        let same_view = self.restore_view(kept);
+        let mut labels = Vec::new();
+        if prev_old.is_some() {
+            labels.push(self.old_label.clone());
+        }
+        if prev_new.is_some() {
+            labels.push(self.new_label.clone());
+        }
+        let tail = if same_view {
+            ""
+        } else {
+            "; the layers changed, so the view was reset"
+        };
+        self.reload_note = Some((
+            format!(
+                "reloaded {} after a file change{tail}",
+                labels.join(" and ")
+            ),
+            now,
+        ));
     }
 
     /// The primary toolbar "Open" action for a side: a folder on native, the
@@ -3103,8 +3406,27 @@ impl ViewApp {
         if paths.is_empty() {
             return;
         }
+        // Snapshot before the read (#423): any change after it reloads.
+        let origins = drop_origins(&paths);
+        let mut baselines = match &origins {
+            DroppedOrigins::One(o) => vec![o.snapshot()],
+            DroppedOrigins::Pair { old, new } => vec![old.snapshot(), new.snapshot()],
+        }
+        .into_iter();
         match load_dropped_paths(&paths) {
-            Ok(loaded) => self.adopt_sources(side, loaded),
+            Ok(loaded) => {
+                self.adopt_sources(side, loaded);
+                if self.load_error.is_none() {
+                    let mut next = || baselines.next().unwrap_or_default();
+                    match origins {
+                        DroppedOrigins::One(o) => self.set_origin(side, o, next()),
+                        DroppedOrigins::Pair { old, new } => {
+                            self.set_origin(RevSide::Old, old, next());
+                            self.set_origin(RevSide::New, new, next());
+                        }
+                    }
+                }
+            }
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
@@ -3635,20 +3957,16 @@ fn is_fab_pack(p: &std::path::Path) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSources> {
     use anyhow::Context as _;
-    if paths.len() == 1 {
-        let p = &paths[0];
-        if is_fab_pack(p) || is_pdf_input(p) {
-            return load_source_any(p, derive_label(p)).map(DroppedSources::One);
+    match drop_shape(paths) {
+        DropShape::Single(p) => {
+            return load_source_any(p, derive_label(p)).map(DroppedSources::One)
         }
-    }
-    if paths.len() == 2 && paths.iter().all(|p| is_fab_pack(p)) {
-        // Order by file name (#325); label the same way Open does (#329).
-        let mut pair: Vec<(String, &std::path::PathBuf)> =
-            paths.iter().map(|p| (path_label(p), p)).collect();
-        pair.sort_by(|a, b| a.0.cmp(&b.0));
-        let old = load_source_any(pair[0].1, derive_label(pair[0].1))?;
-        let new = load_source_any(pair[1].1, derive_label(pair[1].1))?;
-        return Ok(DroppedSources::Pair { old, new });
+        DropShape::Pair(o, n) => {
+            let old = load_source_any(o, derive_label(o))?;
+            let new = load_source_any(n, derive_label(n))?;
+            return Ok(DroppedSources::Pair { old, new });
+        }
+        DropShape::Loose => {}
     }
     if paths.iter().any(|p| p.is_dir()) {
         anyhow::bail!("a folder was dropped beside other files — {DROP_SHAPE_HINT}");
@@ -3677,6 +3995,163 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSou
         files.push((path_label(p), bytes));
     }
     files_to_sources(files)
+}
+
+/// How a native drop is read (#325): one folder, `.zip` or `.pdf` on its own;
+/// two folders or `.zip`s as old and new, ordered by name; anything else as
+/// loose layer files. Shared by the loader and the reload origins (#423) so
+/// the two can never disagree about what a drop was.
+#[cfg(not(target_arch = "wasm32"))]
+enum DropShape<'a> {
+    Single(&'a std::path::PathBuf),
+    Pair(&'a std::path::PathBuf, &'a std::path::PathBuf),
+    Loose,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drop_shape(paths: &[std::path::PathBuf]) -> DropShape<'_> {
+    if paths.len() == 1 {
+        let p = &paths[0];
+        if is_fab_pack(p) || is_pdf_input(p) {
+            return DropShape::Single(p);
+        }
+    }
+    if paths.len() == 2 && paths.iter().all(|p| is_fab_pack(p)) {
+        // Order by file name (#325); label the same way Open does (#329).
+        let mut pair: Vec<(String, &std::path::PathBuf)> =
+            paths.iter().map(|p| (path_label(p), p)).collect();
+        pair.sort_by(|a, b| a.0.cmp(&b.0));
+        return DropShape::Pair(pair[0].1, pair[1].1);
+    }
+    DropShape::Loose
+}
+
+/// Where one side was loaded from on disk (#423), kept so a change there can
+/// be re-read through the same loader.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceOrigin {
+    /// A folder, `.zip` fab pack or schematic `.pdf`.
+    Path(std::path::PathBuf),
+    /// Loose layer files dropped together as one set.
+    Files(Vec<std::path::PathBuf>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SourceOrigin {
+    /// The paths to watch for this side.
+    fn roots(&self) -> Vec<std::path::PathBuf> {
+        match self {
+            SourceOrigin::Path(p) => vec![p.clone()],
+            SourceOrigin::Files(ps) => ps.clone(),
+        }
+    }
+
+    /// The current state of this side's files, for a watcher baseline.
+    fn snapshot(&self) -> watch::Snapshot {
+        watch::take(&self.roots())
+    }
+
+    /// Read this side again, the same way it was first loaded.
+    fn reload(&self) -> anyhow::Result<LoadedSource> {
+        match self {
+            SourceOrigin::Path(p) => load_source_any(p, derive_label(p)),
+            SourceOrigin::Files(ps) => match load_dropped_paths(ps)? {
+                DroppedSources::One(src) => Ok(src),
+                DroppedSources::Pair { .. } => {
+                    anyhow::bail!("the reloaded files now read as two revisions, not one")
+                }
+            },
+        }
+    }
+}
+
+/// The origins a native drop resolved to (#423), mirroring [`DroppedSources`].
+#[cfg(not(target_arch = "wasm32"))]
+enum DroppedOrigins {
+    One(SourceOrigin),
+    Pair {
+        old: SourceOrigin,
+        new: SourceOrigin,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drop_origins(paths: &[std::path::PathBuf]) -> DroppedOrigins {
+    match drop_shape(paths) {
+        DropShape::Single(p) => DroppedOrigins::One(SourceOrigin::Path(p.clone())),
+        DropShape::Pair(o, n) => DroppedOrigins::Pair {
+            old: SourceOrigin::Path(o.clone()),
+            new: SourceOrigin::Path(n.clone()),
+        },
+        DropShape::Loose => DroppedOrigins::One(SourceOrigin::Files(paths.to_vec())),
+    }
+}
+
+/// The view state a reload keeps (#423): camera, selected layer (or page),
+/// layer visibility, per-layer colours and rulers. Restored only when the
+/// reloaded comparison has the same layer stack (or page counts), since all
+/// of it is indexed per layer or in board coordinates.
+#[cfg(not(target_arch = "wasm32"))]
+struct KeptView {
+    key: String,
+    cam: Camera,
+    selected: usize,
+    visible_layers: Vec<bool>,
+    base_overrides: Vec<(usize, Color32)>,
+    measurements: Vec<Measurement>,
+    pdf_selected: Option<usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ViewApp {
+    /// What identifies the shown comparison's layout, for [`KeptView`].
+    fn view_key(&self) -> String {
+        match &self.pdf {
+            Some(p) => format!("pdf:{}:{}", p.old_pages, p.new_pages),
+            None => format!("board:{}", board_key(&self.diff)),
+        }
+    }
+
+    fn keep_view(&self) -> KeptView {
+        KeptView {
+            key: self.view_key(),
+            cam: self.cam.clone(),
+            selected: self.selected,
+            visible_layers: self.visible_layers.clone(),
+            base_overrides: self.base_overrides.clone(),
+            measurements: self.measurements.clone(),
+            pdf_selected: self.pdf.as_ref().map(|p| p.selected),
+        }
+    }
+
+    /// Put back a kept view after a reload, if the layout still matches.
+    /// Returns false only when the layer stack (or page counts) changed and
+    /// the view was reset. A camera that was never fitted (the welcome
+    /// screen, or a reload before the first frame) is not put back, so the
+    /// view still fits itself, but that is not a reset.
+    fn restore_view(&mut self, kept: KeptView) -> bool {
+        if kept.key != self.view_key() {
+            return false;
+        }
+        if kept.cam.fitted {
+            self.cam = kept.cam;
+        }
+        if kept.selected < self.diff.layers.len() {
+            self.selected = kept.selected;
+        }
+        if kept.visible_layers.len() == self.visible_layers.len() {
+            self.visible_layers = kept.visible_layers;
+        }
+        self.base_overrides = kept.base_overrides;
+        self.measurements = kept.measurements;
+        if let (Some(pdf), Some(sel)) = (self.pdf.as_mut(), kept.pdf_selected) {
+            if sel < pdf.rows.len() {
+                pdf.selected = sel;
+            }
+        }
+        true
+    }
 }
 
 impl ViewApp {
@@ -3753,6 +4228,12 @@ impl eframe::App for ViewApp {
             }
         }
         self.handle_dropped_files(ui.ctx());
+        // Reload on change (#423): native only.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let now = ui.ctx().input(|i| i.time);
+            self.poll_watchers(ui.ctx(), now);
+        }
 
         // Startup splash (foreground overlay; skipped once done). Drawn before the
         // panels so it covers the welcome screen too, but composited on top.
@@ -4230,6 +4711,13 @@ impl eframe::App for ViewApp {
         if let Some(err) = self.load_error.clone() {
             egui::Panel::top("load_error").show_inside(ui, |ui| {
                 ui.colored_label(C_REMOVED, format!("[!] load failed — {err}"));
+            });
+        }
+        // A reload after a file change says so, briefly (#423).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((note, _)) = self.reload_note.clone() {
+            egui::Panel::top("reload_note").show_inside(ui, |ui| {
+                ui.colored_label(C_COPPER, note);
             });
         }
 
@@ -5061,8 +5549,9 @@ impl ViewApp {
                 .color(Color32::from_gray(150)),
         );
         // Rasterization DPI for schematic-PDF pairs (#223). A click with a PDF
-        // pair loaded re-rasterizes from the retained bytes; over-cap fails loud
-        // and reverts (see `set_pdf_dpi`). The CLI default stays 150 (--dpi).
+        // pair loaded re-rasterizes from the retained bytes; over the caps it
+        // renders lower and warns (see `set_pdf_dpi`). The CLI default stays
+        // 150 (--dpi).
         let mut pick: Option<f32> = None;
         ui.horizontal(|ui| {
             ui.label("DPI");
@@ -5084,8 +5573,24 @@ impl ViewApp {
         .response
         .on_hover_text(
             "Rasterization DPI for schematic-PDF diffs. Changing it re-renders \
-             the loaded pair; a DPI over the raster caps fails loud and reverts.",
+             the loaded pair; a page too big for the raster caps at this DPI is \
+             rendered at the highest DPI that fits, with a warning.",
         );
+        // The chip shows the setting; when the loaded pair had to be rendered
+        // lower, say so right here too, so the chip never reads as the DPI on
+        // screen when it is not.
+        if let Some(pv) = &self.pdf {
+            if pv.dpi != self.pdf_dpi {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "This pair is rendered at {} DPI (lowered to fit the raster caps)",
+                        pv.dpi
+                    ))
+                    .small()
+                    .color(C_COPPER),
+                );
+            }
+        }
         if let Some(dpi) = pick {
             self.set_pdf_dpi(dpi);
         }
@@ -5134,6 +5639,15 @@ impl ViewApp {
             "Pan mouse button by ECAD tool: \
              Altium = right-drag, KiCad = middle/right-drag.",
         );
+        // The web viewer has no files on disk to watch (#423).
+        #[cfg(not(target_arch = "wasm32"))]
+        ui.checkbox(&mut self.watch_inputs, "Reload when files change")
+            .on_hover_text(
+                "Re-read and re-diff an opened folder, zip, PDF or set of files when it \
+                 changes on disk, once it has been quiet for half a second. If the layers \
+                 are the same, the camera, selected layer and visibility are kept; if a \
+                 layer was added or removed, the view is reset.",
+            );
     }
 
     /// Settings → Colours: diff colours + per-theme canvas/grid (#53/#31/#52).
@@ -6215,6 +6729,10 @@ impl ViewApp {
         // The alignment chosen (#249) sits with the page list, in copper, because
         // it changes which sheets each row compares.
         if let Some(note) = &pv.alignment_note {
+            ui.label(egui::RichText::new(note).small().color(C_COPPER));
+        }
+        // A DPI lowered to fit the raster caps (#223) is also a trust note.
+        if let Some(note) = &pv.dpi_note {
             ui.label(egui::RichText::new(note).small().color(C_COPPER));
         }
         ui.separator();
@@ -8027,6 +8545,219 @@ mod tests {
         assert_eq!(app.new_label, "new");
     }
 
+    /// Two revision folders on disk, each holding one copper layer, for the
+    /// reload tests (#423).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reload_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("etchy-reload-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("rev-a"), root.join("rev-b"));
+        for d in [&old, &new] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("board-F_Cu.gtl"), MIN_GERBER).unwrap();
+        }
+        (root, old, new)
+    }
+
+    /// [`MIN_GERBER`] with a bigger pad: a real change on the same board.
+    const GROWN_GERBER: &[u8] = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.2*%\nD10*\nX0Y0D03*\nM02*\n";
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reload_rediffs_and_keeps_the_view() {
+        use super::{RevSide, SourceOrigin, ViewApp};
+        let (root, old, new) = reload_fixture("keep");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert_eq!(app.origin_new, Some(SourceOrigin::Path(new.clone())));
+        assert!(!app.diff.layers[0].is_changed());
+
+        // The user has framed something and hidden the layer.
+        app.cam.fitted = true;
+        app.cam.center = [123.0, 456.0];
+        app.cam.scale = 0.5;
+        app.visible_layers[0] = false;
+
+        std::fs::write(new.join("board-F_Cu.gtl"), GROWN_GERBER).unwrap();
+        app.reload_sides(false, true, 10.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(app.diff.layers[0].is_changed(), "the re-export was diffed");
+        assert_eq!(app.cam.center, [123.0, 456.0], "camera kept");
+        assert_eq!(app.cam.scale, 0.5);
+        assert!(!app.visible_layers[0], "visibility kept");
+        let (note, at) = app.reload_note.clone().expect("a reload says so");
+        assert!(note.contains("after a file change"), "got: {note}");
+        assert!(!note.contains("reset"), "same layers, view kept: {note}");
+        assert_eq!(at, 10.0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reload_with_a_new_layer_resets_the_view_and_says_so() {
+        use super::{RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("reset");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        app.cam.fitted = true;
+        app.cam.center = [123.0, 456.0];
+
+        std::fs::write(new.join("board-B_Cu.gbl"), MIN_GERBER).unwrap();
+        app.reload_sides(false, true, 1.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert_eq!(app.diff.layers.len(), 2);
+        assert!(!app.cam.fitted, "a different stack re-fits");
+        let (note, _) = app.reload_note.clone().unwrap();
+        assert!(note.contains("view was reset"), "got: {note}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_reload_keeps_the_previous_result_on_screen() {
+        use super::{LoadedSource, RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("fail");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+
+        // The new side becomes a PDF-vs-Gerber pair: reading works, diffing
+        // fails, and the board pair must stay on screen and in the sources.
+        let new_pdf = root.join("rev-b.pdf");
+        std::fs::write(&new_pdf, b"%PDF-1.7").unwrap();
+        app.origin_new = Some(super::SourceOrigin::Path(new_pdf));
+        app.reload_sides(false, true, 1.0);
+        let err = app.load_error.clone().expect("a failed reload fails loud");
+        assert!(err.contains("reload after a file change"), "got: {err}");
+        assert!(err.contains("previous result is still shown"), "got: {err}");
+        assert!(matches!(app.src_new, Some(LoadedSource::Board(_))));
+        assert_eq!(app.diff.layers.len(), 1);
+        assert!(app.reload_note.is_none());
+
+        // A read failure (the folder is gone) is reported the same way.
+        app.load_error = None;
+        app.origin_new = Some(super::SourceOrigin::Path(root.join("missing")));
+        app.reload_sides(false, true, 2.0);
+        let err = app.load_error.clone().expect("a failed read fails loud");
+        assert!(err.contains("reload after a file change"), "got: {err}");
+        assert!(matches!(app.src_new, Some(LoadedSource::Board(_))));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn drop_origins_follow_the_drop_shape() {
+        use super::{drop_origins, DroppedOrigins, SourceOrigin};
+        let (root, old, new) = reload_fixture("shape");
+        match drop_origins(&[new.clone(), old.clone()]) {
+            DroppedOrigins::Pair { old: o, new: n } => {
+                assert_eq!(o, SourceOrigin::Path(old.clone()), "old = first by name");
+                assert_eq!(n, SourceOrigin::Path(new.clone()));
+            }
+            DroppedOrigins::One(_) => panic!("two folders are a pair"),
+        }
+        match drop_origins(std::slice::from_ref(&old)) {
+            DroppedOrigins::One(o) => assert_eq!(o, SourceOrigin::Path(old.clone())),
+            DroppedOrigins::Pair { .. } => panic!("one folder is one side"),
+        }
+        let loose = vec![old.join("board-F_Cu.gtl"), new.join("board-F_Cu.gtl")];
+        match drop_origins(&loose) {
+            DroppedOrigins::One(o) => {
+                assert_eq!(o, SourceOrigin::Files(loose.clone()));
+                assert_eq!(o.roots(), loose);
+            }
+            DroppedOrigins::Pair { .. } => panic!("loose files are one set"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn watchers_follow_the_toggle_and_the_loaded_sides() {
+        use super::{RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("toggle");
+        let ctx = egui::Context::default();
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.sync_watchers(&ctx);
+        assert!(app.watch_old.is_none() && app.watch_new.is_none());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        app.sync_watchers(&ctx);
+        assert_eq!(
+            app.watch_old.as_ref().unwrap().roots(),
+            std::slice::from_ref(&old)
+        );
+        assert_eq!(
+            app.watch_new.as_ref().unwrap().roots(),
+            std::slice::from_ref(&new)
+        );
+        app.watch_inputs = false;
+        app.sync_watchers(&ctx);
+        assert!(app.watch_old.is_none() && app.watch_new.is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A re-export that lands after the load read the files but before the
+    /// first frame starts the watcher is still picked up: the baseline is the
+    /// snapshot taken at load time, not when the watcher starts.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_change_between_load_and_watcher_start_still_reloads() {
+        use super::{RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("early");
+        let ctx = egui::Context::default();
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(app.baseline_new.is_some(), "the load records its snapshot");
+
+        std::fs::write(new.join("board-F_Cu.gtl"), GROWN_GERBER).unwrap();
+        app.sync_watchers(&ctx);
+        assert!(app.baseline_new.is_none(), "the watcher took the snapshot");
+        let watcher = app.watch_new.as_ref().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut fired = false;
+        while std::time::Instant::now() < deadline {
+            if watcher.take_change() {
+                fired = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(fired, "the early re-export must trigger a reload");
+        assert!(
+            !app.watch_old.as_ref().unwrap().take_change(),
+            "the untouched side stays quiet"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Reloading the one loaded side on the welcome screen (camera never
+    /// fitted, layers unchanged) must not claim the view was reset.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_reload_of_one_side_on_the_welcome_screen_is_not_a_reset() {
+        use super::{RevSide, ViewApp};
+        let (root, _old, new) = reload_fixture("welcome");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(!app.cam.fitted, "nothing has been framed yet");
+
+        std::fs::write(new.join("board-F_Cu.gtl"), GROWN_GERBER).unwrap();
+        app.reload_sides(false, true, 3.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        let (note, _) = app.reload_note.clone().expect("a reload says so");
+        assert!(note.contains("after a file change"), "got: {note}");
+        assert!(!note.contains("reset"), "nothing was reset: {note}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// A one-layer Gerber set for the single-set tests (#466).
     fn single_board(label: &str, warnings: Vec<String>) -> super::LoadedSource {
         let (board, fmt, _) = crate::loader::board_from_bytes(vec![(
@@ -9194,6 +9925,8 @@ mod tests {
         let mut app2 = ViewApp::new(empty_diff(), "x".into(), "y".into());
         app2.apply_settings(bare);
         assert_eq!(app2.base_opacity, BASE_OPACITY_FAINT);
+        // Reload on change (#423) is on for configs that predate it.
+        assert!(app2.watch_inputs);
     }
 
     #[test]
@@ -9221,6 +9954,72 @@ mod tests {
         app3.apply_settings(wild);
         assert_eq!(app3.focus, 1.0);
         assert_eq!(app3.pdf_dpi, 600.0);
+    }
+
+    /// #223: a PDF pair rendered below the chosen DPI puts the reason in the
+    /// trust-warning chip; one rendered as asked adds no warning.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn a_lowered_pdf_dpi_lands_in_the_warnings() {
+        use super::ViewApp;
+        use crate::pdfview::{build_pdf_view_fitted, multi_page_pdf, test_sized_sheet};
+        let strip = multi_page_pdf(&[test_sized_sheet(6000.0, 50.0, 10, 10)]);
+        let pv = build_pdf_view_fitted(&strip, &strip, 150.0).expect("fits lower");
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.adopt_pdf(pv, "old".into(), "new".into());
+        assert_eq!(app.diff.report.warnings.len(), 1);
+        assert!(app.diff.report.warnings[0].contains("98 DPI"));
+        let pdf = crate::pdfview::one_square_pdf(10, 10);
+        let pv = build_pdf_view_fitted(&pdf, &pdf, 150.0).expect("fits");
+        app.adopt_pdf(pv, "old".into(), "new".into());
+        assert!(app.diff.report.warnings.is_empty());
+    }
+
+    /// #223 review: changing the DPI re-renders the pair but keeps the page
+    /// the user was on and the camera (world is nm, so it frames the same
+    /// spot at any DPI) instead of jumping to the first changed page, refit.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn a_dpi_change_keeps_the_page_and_camera() {
+        use super::{Camera, LoadedPdf, LoadedSource, ViewApp};
+        use crate::pdfview::{multi_page_pdf, test_sheet};
+        // Both pages change; page 2 changes more, so page 2 sorts first and
+        // the user moves to page 1.
+        let old = multi_page_pdf(&[test_sheet(10, 10), test_sheet(10, 10)]);
+        let new = multi_page_pdf(&[test_sheet(12, 10), test_sheet(60, 60)]);
+        let pdf = |label: &str, bytes: &[u8]| {
+            Some(LoadedSource::Pdf(LoadedPdf {
+                label: label.into(),
+                bytes: bytes.to_vec(),
+            }))
+        };
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.src_old = pdf("old", &old);
+        app.src_new = pdf("new", &new);
+        app.pdf_dpi = 150.0;
+        app.rebuild_diff();
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        let pv = app.pdf.as_ref().expect("pdf view");
+        let first = pv.order[0];
+        let other = pv.order[1];
+        assert_ne!(pv.rows[first].old_page, pv.rows[other].old_page);
+        let want_page = pv.rows[other].old_page;
+        app.select_pdf_page(other);
+        app.cam = Camera {
+            center: [1234.0, 5678.0],
+            scale: 3e-5,
+            fit_scale: 1e-5,
+            fitted: true,
+        };
+        app.set_pdf_dpi(300.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        let pv = app.pdf.as_ref().expect("pdf view");
+        assert_eq!(pv.dpi, 300.0, "re-rendered at the new DPI");
+        assert_eq!(pv.rows[pv.selected].old_page, want_page, "same page");
+        assert!(app.cam.fitted, "no refit");
+        assert_eq!(app.cam.center, [1234.0, 5678.0]);
+        assert_eq!(app.cam.scale, 3e-5);
+        assert_eq!(app.cam.fit_scale, 1e-5);
     }
 
     /// #222 regression: a changed PDF pair yields a non-empty export set — the
@@ -9892,6 +10691,7 @@ mod tests {
             swipe_frac: 0.42,
             rail_side: RailSide::Right,
             keymap,
+            watch_inputs: false,
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
