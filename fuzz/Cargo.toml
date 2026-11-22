@@ -1,10 +1,13 @@
-# cargo-fuzz harness for the Gerber, Excellon and pick-and-place front-ends
-# (#85, #308). Its own workspace so the stable `cargo build --workspace` never
+# cargo-fuzz harness for the Gerber, Excellon and pick-and-place front-ends,
+# waiver files and board loading (#85, #308). Its own workspace so the stable `cargo build --workspace` never
 # tries to build it — libfuzzer needs a nightly toolchain + the sanitizer
 # runtime. Run with:
 #   cargo +nightly fuzz run resolve_layer
 #   cargo +nightly fuzz run resolve_excellon
 #   cargo +nightly fuzz run resolve_placement
+#   cargo +nightly fuzz run parse_waivers        (waiver TOML, as the CLI reads it)
+#   cargo +nightly fuzz run gerber_drill_table   (Gerber drill layer to drill table)
+#   cargo +nightly fuzz run board_builder        (a few named files through BoardBuilder)
 [package]
 name = "etchy-fuzz"
 version = "0.0.0"
@@ -17,6 +20,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 etchy-core = { path = "../crates/etchy-core" }
+# parse_waivers mirrors the CLI's waiver parsing, so it uses the CLI's settings.
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 
 [[bin]]
 name = "resolve_layer"
@@ -35,6 +41,27 @@ bench = false
 [[bin]]
 name = "resolve_placement"
 path = "fuzz_targets/resolve_placement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_waivers"
+path = "fuzz_targets/parse_waivers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gerber_drill_table"
+path = "fuzz_targets/gerber_drill_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "board_builder"
+path = "fuzz_targets/board_builder.rs"
 test = false
 doc = false
 bench = false

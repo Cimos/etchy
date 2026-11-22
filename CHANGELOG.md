@@ -28,6 +28,33 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   page and the cap; Settings › Diff shows the lower DPI next to the chips. A
   pair that does not fit even at 72 DPI still fails loud (#223).
 
+### Fixed
+- A pick-and-place file with a line holding only a quoted field (such as
+  `""`) now fails with a parse error instead of crashing.
+- A Gerber `%FS` format with more than six decimal digits now fails with a
+  parse error instead of crashing the parser.
+- A Gerber coordinate with more digits than any format allows (over 12
+  significant digits) now fails with a parse error instead of overflowing.
+- A Gerber command holding a non-ASCII byte now fails with a parse error
+  instead of crashing the parser. Comments and attribute values may still
+  hold UTF-8. Lines inside a multi-line `%` block are read as part of that
+  block, not as commands of their own.
+- A Gerber file attribute (`%TF`, or a `G04 #@! TF` comment) with too few
+  values no longer crashes the parser. File attributes and comments carry no
+  geometry and are skipped when resolving a layer.
+- A Gerber `%TO.P` pin attribute without both a component and a pin now
+  fails with a parse error instead of crashing the parser.
+- A stroked Gerber arc whose radius is smaller than the stroke's half-width
+  is now drawn with only the segments its curve needs. A 50 nm arc under a
+  0.5 mm stroke took about a minute to resolve; it now takes milliseconds.
+- Drill layers and layer diffs with many separate objects resolve much faster
+  and with less memory: objects that cannot touch are merged in small groups
+  instead of one pass. A drill file whose repeat code laid 50,000 holes in one
+  column took over five minutes and 13 GB; it now takes seconds.
+- An Excellon hit, slot end or tool size more than 10 m from the origin now
+  fails with a parse error. A repeat code with a huge count and step walked
+  53,000 holes 3.5 km down one column and took over a minute to load.
+
 ## [0.3.0] - 2026-11-23
 
 ### Added

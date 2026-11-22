@@ -258,7 +258,11 @@ fn parse_whitespace(text: &str) -> Result<Vec<Placement>> {
         // If the last field is non-numeric it's the Side column; the three numbers
         // before it are PosX PosY Rot. Otherwise the last three are PosX PosY Rot.
         let last_is_num = f.last().is_some_and(|s| s.parse::<f64>().is_ok());
-        let base = if last_is_num { f.len() } else { f.len() - 1 };
+        let base = if last_is_num {
+            f.len()
+        } else {
+            f.len().saturating_sub(1)
+        };
         let parsed = if base >= 4 {
             let (x, y, rot) = (f[base - 3], f[base - 2], f[base - 1]);
             match (x.parse::<f64>(), y.parse::<f64>(), rot.parse::<f64>()) {
@@ -442,6 +446,15 @@ R1        1k     R_0402    15.0000   20.0000    0.0000 top\n\
     const CSV_POS: &str = "Designator,Comment,Layer,Center-X(mm),Center-Y(mm),Rotation\n\
 C1,100nF,top,10.0,20.0,90\n\
 R1,1k,top,15.0,20.0,0\n";
+
+    /// Fuzz find: a line that is only a quoted run is emptied by the Description
+    /// strip, which underflowed the column index. It must be a typed error.
+    #[test]
+    fn quoted_run_only_line_is_an_error_not_a_panic() {
+        assert!(resolve_placement(b"\"\"").is_err());
+        let anchored = format!("{KICAD_POS}\"\"\n");
+        assert!(parse_placements(&anchored).is_err());
+    }
 
     #[test]
     fn parses_kicad_whitespace_pos() {
