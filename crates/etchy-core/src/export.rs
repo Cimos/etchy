@@ -131,7 +131,7 @@ pub fn layer_svg_with_colors(layer: &LayerView, added_fill: &str, removed_fill: 
 }
 
 /// Minimal XML text escaping for the `<title>`.
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -190,6 +190,19 @@ pub fn board_report_html_with_limit(
     new: &str,
     limit: usize,
 ) -> String {
+    board_report_html_with_waivers(diff, old, new, limit, None)
+}
+
+/// [`board_report_html_with_limit`] plus a Waivers section (#425) listing every
+/// waiver with its matched region count, area and reason, stale waivers, and
+/// regions that partially overlap a waiver and so stay unwaived.
+pub fn board_report_html_with_waivers(
+    diff: &BoardDiff,
+    old: &str,
+    new: &str,
+    limit: usize,
+    waivers: Option<&crate::waiver::WaiverReport>,
+) -> String {
     let t = &diff.report.totals;
     let mut s = String::with_capacity(4096);
     s.push_str("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n");
@@ -218,6 +231,15 @@ pub fn board_report_html_with_limit(
             "<div class=\"warn\">[!] {}</div>\n",
             xml_escape(w)
         ));
+    }
+    if let Some(w) = waivers {
+        for warning in w.warnings() {
+            s.push_str(&format!(
+                "<div class=\"warn\">[!] {}</div>\n",
+                xml_escape(&warning)
+            ));
+        }
+        s.push_str(&w.to_html(limit));
     }
     let mut any = false;
     for layer in &diff.layers {
