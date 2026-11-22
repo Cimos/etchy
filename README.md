@@ -70,7 +70,7 @@ add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
 
 ```yaml
-      - uses: Cimos/etchy@v0.2.0
+      - uses: Cimos/etchy@v0.3.0
         with:
           old: fab/rev-a
           new: fab/rev-b
@@ -102,16 +102,16 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 - **Container** (headless CLI, distroless, ~11 MB):
 
   ```sh
-  docker pull ghcr.io/cimos/etchy:v0.2.0
-  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.2.0 --format summary /work/old /work/new
+  docker pull ghcr.io/cimos/etchy:v0.3.0
+  docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.3.0 --format summary /work/old /work/new
   ```
 
   Or build it yourself with `docker build -t etchy .`.
 
-- **Prebuilt binaries** — `etchy-cli-…` archives for Linux (x86_64, and ARM64
-  in releases after v0.2.0), macOS (Apple Silicon and Intel) and Windows,
+- **Prebuilt binaries** — `etchy-cli-…` archives for Linux (x86_64 and ARM64,
+  from v0.3.0), macOS (Apple Silicon and Intel) and Windows,
   plus a `SHA256SUMS` file, are on the [Releases](../../releases) page.
-  Releases after v0.2.0 also have signed build provenance for every asset and
+  From v0.3.0, releases also have signed build provenance for every asset and
   the container image, plus CycloneDX SBOMs (`etchy-{cli,viewer}-<tag>.cdx.json`).
   `SHA256SUMS` only shows a download is intact; to check it came from etchy's
   release workflow, run `gh attestation verify <file> --repo Cimos/etchy`
@@ -150,7 +150,7 @@ ask once before the first run.
 ODB++ ingestion, and native schematic files. (Pick-and-place is diffed as
 *placement geometry* — where parts sit — not a BOM/component list.)
 
-**Planned:** reading **KiCad `.kicad_pcb`** boards directly (0.3.0), then Altium
+**Planned:** reading **KiCad `.kicad_pcb`** boards directly (0.4.0), then Altium
 `.PcbDoc`, with a list of changed objects alongside the layer diff
 ([#122](../../issues/122), [spec](docs/design/native-cad-ingestion/spec.md)).
 
