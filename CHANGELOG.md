@@ -18,6 +18,15 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   view is reset and the notice says so. A failed reload keeps the previous
   result on screen with the error. Toggle in
   Settings > Input, on by default (#423).
+- Viewer: Settings › Diff has a PDF render DPI setting. Changing it re-renders
+  the open PDF pair and keeps the page, zoom, position and rulers (#223).
+
+### Changed
+- Viewer: a schematic PDF pair too big for the raster caps at the chosen DPI
+  now renders at the highest DPI that fits instead of refusing to load. A
+  warning in the warnings chip and the Pages panel names the DPI used, the
+  page and the cap; Settings › Diff shows the lower DPI next to the chips. A
+  pair that does not fit even at 72 DPI still fails loud (#223).
 
 ## [0.3.0] - 2026-11-23
 

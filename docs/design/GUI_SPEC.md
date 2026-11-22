@@ -120,8 +120,11 @@ never re-sizes it (#212):
   they always draw it at full visibility regardless of this setting ·
   min-area noise filter (suppression always surfaced, TRUST-3) · **PDF
   resolution** (DPI chips 150/200/300, default 200, VIEW-15): changing it
-  re-rasterizes a loaded PDF pair from the retained bytes; a DPI over the
-  raster caps fails loud into the load error and the setting reverts. The CLI
+  re-rasterizes a loaded PDF pair from the retained bytes. A pair over the
+  raster caps at the chosen DPI renders at the highest whole DPI that fits,
+  with a warning (warnings chip + Pages panel) naming the DPI used, the page
+  and the cap, and a copper line under the chips; the setting keeps the chosen
+  DPI. Below 72 DPI it fails loud into the load error and the setting reverts. The CLI
   default stays 150 (`--dpi` covers it) — a deliberate divergence: on-screen
   zooming wants more pixels than a 1:1 overlay PNG.
 - **Grid** — spacing, colours (display pitch adapts per VIEW-9; snap uses this).
