@@ -98,6 +98,40 @@ pub fn obround(cx: f64, cy: f64, w: f64, h: f64) -> Contour {
 /// CW). Returns the polyline points (nm) including both endpoints. A coincident
 /// from/to is a full circle. Multi-quadrant (sweep may exceed 90°, up to 360°).
 pub fn arc_points(fx: f64, fy: f64, tx: f64, ty: f64, cx: f64, cy: f64, ccw: bool) -> Vec<Pt> {
+    arc_points_with(fx, fy, tx, ty, cx, cy, ccw, true)
+}
+
+/// [`arc_points`] for the path of a stroke `stroke_r` wide (half-width, nm).
+/// When the arc's radius is below the stroke's, the stroke covers the arc's
+/// own area, so the segment-count floor only adds near-coincident stadiums:
+/// 64 of them around a 50 nm arc cost the boolean pass a minute (a fuzz find).
+/// The sagitta tolerance still bounds the error then.
+#[allow(clippy::too_many_arguments)] // start/end/centre points + direction + width
+pub fn stroke_arc_points(
+    fx: f64,
+    fy: f64,
+    tx: f64,
+    ty: f64,
+    cx: f64,
+    cy: f64,
+    ccw: bool,
+    stroke_r: f64,
+) -> Vec<Pt> {
+    let r = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+    arc_points_with(fx, fy, tx, ty, cx, cy, ccw, r >= stroke_r)
+}
+
+#[allow(clippy::too_many_arguments)] // start/end/centre points + direction + floor
+fn arc_points_with(
+    fx: f64,
+    fy: f64,
+    tx: f64,
+    ty: f64,
+    cx: f64,
+    cy: f64,
+    ccw: bool,
+    floor_segments: bool,
+) -> Vec<Pt> {
     let r = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
     if r < 1.0 {
         return vec![p(fx, fy), p(tx, ty)];
@@ -116,7 +150,11 @@ pub fn arc_points(fx: f64, fy: f64, tx: f64, ty: f64, cx: f64, cy: f64, ccw: boo
     // area instead of collapsing to a doubled-back sliver (#236): at r <= the µm
     // tolerance the step saturates at π (n=2, zero area). A full turn gets at least
     // CIRCLE_SEGMENTS, matching flash-circle fidelity.
-    let floor = (sweep / (2.0 * PI) * CIRCLE_SEGMENTS as f64).ceil() as usize;
+    let floor = if floor_segments {
+        (sweep / (2.0 * PI) * CIRCLE_SEGMENTS as f64).ceil() as usize
+    } else {
+        0
+    };
     let n = ((sweep / max_step).ceil() as usize)
         .max(floor)
         .clamp(2, 4096);

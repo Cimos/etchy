@@ -1082,7 +1082,7 @@ impl<'a> Machine<'a> {
         if self.is_arc(offset) {
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
             let center = self.arc_center(to, offset, ccw)?;
-            let pts = geom::arc_points(
+            let pts = geom::stroke_arc_points(
                 self.cur.x as f64,
                 self.cur.y as f64,
                 to.x as f64,
@@ -1090,6 +1090,7 @@ impl<'a> Machine<'a> {
                 center.0,
                 center.1,
                 ccw,
+                r,
             );
             for w in pts.windows(2) {
                 let c = geom::stadium(
@@ -1916,6 +1917,20 @@ mod tests {
         assert_parse_error_no_panic(b"%TO.P,J*%");
         let ok = format!("{HDR}%TO.P,U1,3*%\nX0Y0D03*\nM02*\n");
         assert!(resolve_layer(ok.as_bytes()).is_ok());
+    }
+
+    /// Fuzz find: a full circle of radius 50 nm stroked 0.5 mm wide became 64
+    /// near-coincident stadiums, and the union took about a minute. The stroke
+    /// covers such an arc, so it needs only the sagitta's few segments.
+    #[test]
+    fn tiny_arc_under_a_wide_stroke_is_fast_and_a_disk() {
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.500000*%\nD10*\nG75*\n\
+                 X15000000Y-10000000D02*\nG03*\nX15000000Y-10000000I-50J0D01*\nM02*\n";
+        let t = std::time::Instant::now();
+        let area = area_mm2(g);
+        assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+        let disk = std::f64::consts::PI * 0.25 * 0.25;
+        assert!((area - disk).abs() < 0.01 * disk, "{area} vs {disk}");
     }
 
     /// A fuzz input must give a typed error, and not by way of the catch_unwind

@@ -89,6 +89,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   geometry and are skipped when resolving a layer.
 - A Gerber `%TO.P` pin attribute without both a component and a pin now
   fails with a parse error instead of crashing the parser.
+- A stroked Gerber arc whose radius is smaller than the stroke's half-width
+  is now drawn with only the segments its curve needs. A 50 nm arc under a
+  0.5 mm stroke took about a minute to resolve; it now takes milliseconds.
 
 ## [0.2.0] — 2026-10-26
 
