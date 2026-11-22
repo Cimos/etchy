@@ -17,6 +17,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   Diff-only controls are hidden or disabled. Opening or dropping an old
   revision turns it into a normal diff, and the welcome screen can show one
   loaded set alone, including in the web viewer (#466).
+- Desktop viewer reloads and re-diffs when the opened files change on disk,
+  for example after a re-export, so it no longer has to be reopened. It waits
+  for half a second of quiet so a half-written fab pack is not read, keeps the
+  camera, selected layer and visibility, and briefly says it reloaded. A failed
+  reload keeps the previous result on screen with the error. Toggle in
+  Settings > Input, on by default (#423).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as

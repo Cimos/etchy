@@ -127,7 +127,16 @@ never re-sizes it (#212):
 - **Grid** — spacing, colours (display pitch adapts per VIEW-9; snap uses this).
 - **Measure** — units **mm / mil / inch** · snap-to-grid · crosshair + readout
   (the measure tool's one home, #211).
-- **Input** — preset **Altium / KiCad** (pan buttons + clear/units keys).
+- **Input** — preset **Altium / KiCad** (pan buttons + clear/units keys) ·
+  **Reload when files change** (#423, VIEW-19; native only, on by default).
+  Each loaded side's folder, zip, PDF or dropped files are polled for size and
+  modification-time changes; after 500 ms with no further change the side is
+  re-read and re-diffed. Camera, selected layer or page, visibility, layer
+  colours and rulers are kept when the layer stack (or page counts) matches,
+  else the view resets. A copper "reloaded … after a file change" line shows
+  under the top bar for 4 s (it adds "the view was reset" when it did). A
+  failed read or re-diff keeps the previous result and sources, with the error
+  in the load banner. The web viewer has no toggle.
 - **Colours** — canvas/added/removed/per-layer colours, theme presets.
 - **Layers** — per-layer colour rows (square swatches).
 - **Hotkeys** — see §4.

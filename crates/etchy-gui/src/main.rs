@@ -22,6 +22,9 @@ mod lod;
 // module is (deliberately) dead — the pure helpers stay compiled + unit-tested.
 #[cfg_attr(not(feature = "pdf"), allow(dead_code))]
 mod pdfview;
+// Reload on change (#423): native only, the web viewer has no files to watch.
+#[cfg(not(target_arch = "wasm32"))]
+mod watch;
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, StrokeKind};
@@ -148,10 +151,11 @@ mod native {
 
     /// What the command line loaded before the window opens.
     enum Seed {
-        /// Two revisions and their computed diff, at the PDF DPI used.
-        Pair(LoadedSource, LoadedSource, ComputedDiff, f32),
-        /// One Gerber set on its own (#466) and its single-set view.
-        Single(LoadedSource, BoardDiff),
+        /// Two revisions and their computed diff, at the PDF DPI used, plus
+        /// the paths they came from (watched for reloads, #423).
+        Pair(LoadedSource, LoadedSource, ComputedDiff, f32, [PathBuf; 2]),
+        /// One Gerber set on its own (#466), its single-set view and its path.
+        Single(LoadedSource, BoardDiff, PathBuf),
     }
 
     /// Load one Gerber directory or `.zip` for the single-set view (#466),
@@ -159,7 +163,7 @@ mod native {
     fn load_single_seed(path: &Path) -> anyhow::Result<Seed> {
         let src = load_source_any(path, label(path))?;
         let view = single_from_source(&src)?;
-        Ok(Seed::Single(src, view))
+        Ok(Seed::Single(src, view, path.to_path_buf()))
     }
 
     /// Load both revisions from CLI paths — Gerber dirs/zips or schematic PDFs
@@ -180,7 +184,13 @@ mod native {
                 Err(_) => return Err(first),
             },
         };
-        Ok(Seed::Pair(old, new, diff, dpi))
+        Ok(Seed::Pair(
+            old,
+            new,
+            diff,
+            dpi,
+            [old_path.to_path_buf(), new_path.to_path_buf()],
+        ))
     }
 
     /// Construct the app, restoring persisted settings. With a pair seed, both
@@ -188,15 +198,16 @@ mod native {
     /// single-set view (#466); without one, the welcome screen shows (empty diff).
     fn build_app(cc: &eframe::CreationContext<'_>, seed: Option<Seed>) -> ViewApp {
         match seed {
-            Some(Seed::Single(src, view)) => {
+            Some(Seed::Single(src, view, path)) => {
                 // Built straight from the view so persisted per-board settings
                 // (visible layers, #327) restore onto it like a diff's.
                 let l = src.label().to_string();
                 let mut app = ViewApp::from_cc(cc, view, l.clone(), l);
                 app.enter_single(src);
+                app.origin_new = Some(SourceOrigin::Path(path));
                 app
             }
-            Some(Seed::Pair(old, new, computed, seed_dpi)) => {
+            Some(Seed::Pair(old, new, computed, seed_dpi, [old_path, new_path])) => {
                 let (ol, nl) = (old.label().to_string(), new.label().to_string());
                 let mut app = match computed {
                     ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
@@ -208,6 +219,8 @@ mod native {
                 };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
+                app.origin_old = Some(SourceOrigin::Path(old_path));
+                app.origin_new = Some(SourceOrigin::Path(new_path));
                 // The seed was rasterized before settings restore; honour a
                 // different persisted DPI now (#223). If that re-rasterize
                 // fails (caps), the setting must fall back to the DPI the
@@ -1281,6 +1294,7 @@ fn input_rect(mode: Mode, full: Rect, px: f32) -> Rect {
 }
 
 /// Pan/zoom camera in world (nm) space.
+#[derive(Clone)]
 struct Camera {
     center: [f64; 2], // world nm
     scale: f64,       // pixels per nm
@@ -1744,7 +1758,33 @@ struct ViewApp {
     brand_tex: Option<egui::TextureHandle>,
     /// Which edge the activity rail lives on (Feature 8); persisted via #52.
     rail_side: RailSide,
+    /// Reload and re-diff when an opened input changes on disk (#423). On by
+    /// default; toggled in Settings > Input and persisted. Native only in
+    /// effect (the web viewer has nothing to watch), but kept on both
+    /// surfaces so one settings blob round-trips everywhere.
+    watch_inputs: bool,
+    /// Where each side was loaded from on disk (#423), so a change there can
+    /// be re-read. `None` for a side with no source or no files behind it.
+    #[cfg(not(target_arch = "wasm32"))]
+    origin_old: Option<SourceOrigin>,
+    #[cfg(not(target_arch = "wasm32"))]
+    origin_new: Option<SourceOrigin>,
+    /// The running watchers, one per side (#423). Rebuilt when the origins or
+    /// the toggle change; dropping one stops its thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    watch_old: Option<watch::FileWatcher>,
+    #[cfg(not(target_arch = "wasm32"))]
+    watch_new: Option<watch::FileWatcher>,
+    /// "Reloaded after a file change" and when it was shown (#423), so a
+    /// reload never changes the screen without saying so. Cleared after
+    /// `RELOAD_NOTE_SECS`.
+    #[cfg(not(target_arch = "wasm32"))]
+    reload_note: Option<(String, f64)>,
 }
+
+/// How long the reload notice stays up (#423).
+#[cfg(not(target_arch = "wasm32"))]
+const RELOAD_NOTE_SECS: f64 = 4.0;
 
 /// A one-line note reconciling the export with the Overlay view's noise filter
 /// (#245/#91). The Overlay view hides diff regions below `min_area_mm2`, but the
@@ -1858,6 +1898,17 @@ impl ViewApp {
             active_panel: Some(PanelTab::Layers),
             brand_tex: None,
             rail_side: RailSide::default(),
+            watch_inputs: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            origin_old: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            origin_new: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_old: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch_new: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            reload_note: None,
         }
     }
 
@@ -2549,6 +2600,9 @@ struct Settings {
     rail_side: RailSide,
     /// The user's hotkey map (#201). Missing in pre-#201 configs → defaults.
     keymap: Keymap,
+    /// Reload when an opened input changes (#423). Missing in older configs →
+    /// on, the default.
+    watch_inputs: bool,
 }
 
 impl Default for Settings {
@@ -2573,6 +2627,7 @@ impl Default for Settings {
             swipe_frac: 0.5,
             rail_side: RailSide::default(),
             keymap: Keymap::default(),
+            watch_inputs: true,
         }
     }
 }
@@ -2730,6 +2785,7 @@ impl ViewApp {
             swipe_frac: self.swipe_frac,
             rail_side: self.rail_side,
             keymap: self.keymap,
+            watch_inputs: self.watch_inputs,
         }
     }
 
@@ -2783,6 +2839,7 @@ impl ViewApp {
         self.swipe_frac = clamp_swipe_frac(s.swipe_frac);
         self.rail_side = s.rail_side;
         self.keymap = s.keymap;
+        self.watch_inputs = s.watch_inputs;
     }
 }
 
@@ -2878,6 +2935,18 @@ impl ViewApp {
         };
         match single_from_source(src) {
             Ok(view) => {
+                // The set becomes the new side; its origin moves with it so
+                // the reload watcher (#423) keeps covering it.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let origin = if self.src_old.is_some() {
+                        self.origin_old.take()
+                    } else {
+                        self.origin_new.take()
+                    };
+                    self.origin_old = None;
+                    self.origin_new = origin;
+                }
                 let src = self.src_old.take().or_else(|| self.src_new.take());
                 if let Some(src) = src {
                     self.adopt_single(view, src);
@@ -3034,9 +3103,144 @@ impl ViewApp {
             self.last_dir = Some(parent.to_path_buf());
         }
         match load_source_any(path, derive_label(path)) {
-            Ok(src) => self.set_side(side, src),
+            Ok(src) => {
+                self.set_side(side, src);
+                if self.load_error.is_none() {
+                    self.set_origin(side, SourceOrigin::Path(path.to_path_buf()));
+                }
+            }
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
+    }
+
+    /// Record where a side now comes from (#423), after it loaded cleanly.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_origin(&mut self, side: RevSide, origin: SourceOrigin) {
+        match side {
+            RevSide::Old => self.origin_old = Some(origin),
+            RevSide::New => self.origin_new = Some(origin),
+        }
+    }
+
+    /// Start, stop or replace the per-side watchers (#423) so they cover
+    /// exactly the loaded sides' origins while the setting is on. Cheap when
+    /// nothing changed: it only compares path lists.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_watchers(&mut self, ctx: &egui::Context) {
+        fn want(
+            on: bool,
+            loaded: bool,
+            origin: &Option<SourceOrigin>,
+        ) -> Option<Vec<std::path::PathBuf>> {
+            if on && loaded {
+                origin.as_ref().map(SourceOrigin::roots)
+            } else {
+                None
+            }
+        }
+        fn sync(
+            slot: &mut Option<watch::FileWatcher>,
+            roots: Option<Vec<std::path::PathBuf>>,
+            ctx: &egui::Context,
+        ) {
+            let current = slot.as_ref().map(|w| w.roots().to_vec());
+            if current == roots {
+                return;
+            }
+            *slot = roots.map(|r| {
+                let ctx = ctx.clone();
+                watch::FileWatcher::spawn(r, move || ctx.request_repaint())
+            });
+        }
+        let old = want(self.watch_inputs, self.src_old.is_some(), &self.origin_old);
+        let new = want(self.watch_inputs, self.src_new.is_some(), &self.origin_new);
+        sync(&mut self.watch_old, old, ctx);
+        sync(&mut self.watch_new, new, ctx);
+    }
+
+    /// Once per frame (#423): keep the watchers in step, and reload any side
+    /// whose files changed and then settled.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_watchers(&mut self, ctx: &egui::Context, now: f64) {
+        self.sync_watchers(ctx);
+        let old = self.watch_old.as_ref().is_some_and(|w| w.take_change());
+        let new = self.watch_new.as_ref().is_some_and(|w| w.take_change());
+        if old || new {
+            self.reload_sides(old, new, now);
+        }
+        if let Some((_, at)) = self.reload_note {
+            if now - at >= RELOAD_NOTE_SECS {
+                self.reload_note = None;
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    RELOAD_NOTE_SECS - (now - at),
+                ));
+            }
+        }
+    }
+
+    /// Re-read the changed sides from disk and re-diff (#423), keeping the
+    /// camera, selection, visibility and rulers when the layer stack is the
+    /// same. Any failure, reading or diffing, leaves the previous result and
+    /// sources on screen with the error in the banner (the #330 path).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reload_sides(&mut self, old: bool, new: bool, now: f64) {
+        fn read(want: bool, origin: &Option<SourceOrigin>) -> anyhow::Result<Option<LoadedSource>> {
+            match (want, origin) {
+                (true, Some(o)) => o.reload().map(Some),
+                _ => Ok(None),
+            }
+        }
+        let fresh = read(old, &self.origin_old).and_then(|o| Ok((o, read(new, &self.origin_new)?)));
+        let (fresh_old, fresh_new) = match fresh {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.load_error = Some(format!(
+                    "reload after a file change: {e:#} (the previous result is still shown)"
+                ));
+                return;
+            }
+        };
+        if fresh_old.is_none() && fresh_new.is_none() {
+            return;
+        }
+        let kept = self.keep_view();
+        let prev_old = fresh_old.map(|s| self.src_old.replace(s));
+        let prev_new = fresh_new.map(|s| self.src_new.replace(s));
+        self.load_error = None;
+        self.rebuild_diff();
+        if let Some(e) = self.load_error.take() {
+            if let Some(p) = prev_old {
+                self.src_old = p;
+            }
+            if let Some(p) = prev_new {
+                self.src_new = p;
+            }
+            self.load_error = Some(format!(
+                "reload after a file change: {e} (the previous result is still shown)"
+            ));
+            return;
+        }
+        let same_view = self.restore_view(kept);
+        let mut labels = Vec::new();
+        if prev_old.is_some() {
+            labels.push(self.old_label.clone());
+        }
+        if prev_new.is_some() {
+            labels.push(self.new_label.clone());
+        }
+        let tail = if same_view {
+            ""
+        } else {
+            "; the layers changed, so the view was reset"
+        };
+        self.reload_note = Some((
+            format!(
+                "reloaded {} after a file change{tail}",
+                labels.join(" and ")
+            ),
+            now,
+        ));
     }
 
     /// The primary toolbar "Open" action for a side: a folder on native, the
@@ -3104,7 +3308,18 @@ impl ViewApp {
             return;
         }
         match load_dropped_paths(&paths) {
-            Ok(loaded) => self.adopt_sources(side, loaded),
+            Ok(loaded) => {
+                self.adopt_sources(side, loaded);
+                if self.load_error.is_none() {
+                    match drop_origins(&paths) {
+                        DroppedOrigins::One(o) => self.set_origin(side, o),
+                        DroppedOrigins::Pair { old, new } => {
+                            self.origin_old = Some(old);
+                            self.origin_new = Some(new);
+                        }
+                    }
+                }
+            }
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
@@ -3635,20 +3850,16 @@ fn is_fab_pack(p: &std::path::Path) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSources> {
     use anyhow::Context as _;
-    if paths.len() == 1 {
-        let p = &paths[0];
-        if is_fab_pack(p) || is_pdf_input(p) {
-            return load_source_any(p, derive_label(p)).map(DroppedSources::One);
+    match drop_shape(paths) {
+        DropShape::Single(p) => {
+            return load_source_any(p, derive_label(p)).map(DroppedSources::One)
         }
-    }
-    if paths.len() == 2 && paths.iter().all(|p| is_fab_pack(p)) {
-        // Order by file name (#325); label the same way Open does (#329).
-        let mut pair: Vec<(String, &std::path::PathBuf)> =
-            paths.iter().map(|p| (path_label(p), p)).collect();
-        pair.sort_by(|a, b| a.0.cmp(&b.0));
-        let old = load_source_any(pair[0].1, derive_label(pair[0].1))?;
-        let new = load_source_any(pair[1].1, derive_label(pair[1].1))?;
-        return Ok(DroppedSources::Pair { old, new });
+        DropShape::Pair(o, n) => {
+            let old = load_source_any(o, derive_label(o))?;
+            let new = load_source_any(n, derive_label(n))?;
+            return Ok(DroppedSources::Pair { old, new });
+        }
+        DropShape::Loose => {}
     }
     if paths.iter().any(|p| p.is_dir()) {
         anyhow::bail!("a folder was dropped beside other files — {DROP_SHAPE_HINT}");
@@ -3677,6 +3888,153 @@ fn load_dropped_paths(paths: &[std::path::PathBuf]) -> anyhow::Result<DroppedSou
         files.push((path_label(p), bytes));
     }
     files_to_sources(files)
+}
+
+/// How a native drop is read (#325): one folder, `.zip` or `.pdf` on its own;
+/// two folders or `.zip`s as old and new, ordered by name; anything else as
+/// loose layer files. Shared by the loader and the reload origins (#423) so
+/// the two can never disagree about what a drop was.
+#[cfg(not(target_arch = "wasm32"))]
+enum DropShape<'a> {
+    Single(&'a std::path::PathBuf),
+    Pair(&'a std::path::PathBuf, &'a std::path::PathBuf),
+    Loose,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drop_shape(paths: &[std::path::PathBuf]) -> DropShape<'_> {
+    if paths.len() == 1 {
+        let p = &paths[0];
+        if is_fab_pack(p) || is_pdf_input(p) {
+            return DropShape::Single(p);
+        }
+    }
+    if paths.len() == 2 && paths.iter().all(|p| is_fab_pack(p)) {
+        // Order by file name (#325); label the same way Open does (#329).
+        let mut pair: Vec<(String, &std::path::PathBuf)> =
+            paths.iter().map(|p| (path_label(p), p)).collect();
+        pair.sort_by(|a, b| a.0.cmp(&b.0));
+        return DropShape::Pair(pair[0].1, pair[1].1);
+    }
+    DropShape::Loose
+}
+
+/// Where one side was loaded from on disk (#423), kept so a change there can
+/// be re-read through the same loader.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SourceOrigin {
+    /// A folder, `.zip` fab pack or schematic `.pdf`.
+    Path(std::path::PathBuf),
+    /// Loose layer files dropped together as one set.
+    Files(Vec<std::path::PathBuf>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SourceOrigin {
+    /// The paths to watch for this side.
+    fn roots(&self) -> Vec<std::path::PathBuf> {
+        match self {
+            SourceOrigin::Path(p) => vec![p.clone()],
+            SourceOrigin::Files(ps) => ps.clone(),
+        }
+    }
+
+    /// Read this side again, the same way it was first loaded.
+    fn reload(&self) -> anyhow::Result<LoadedSource> {
+        match self {
+            SourceOrigin::Path(p) => load_source_any(p, derive_label(p)),
+            SourceOrigin::Files(ps) => match load_dropped_paths(ps)? {
+                DroppedSources::One(src) => Ok(src),
+                DroppedSources::Pair { .. } => {
+                    anyhow::bail!("the reloaded files now read as two revisions, not one")
+                }
+            },
+        }
+    }
+}
+
+/// The origins a native drop resolved to (#423), mirroring [`DroppedSources`].
+#[cfg(not(target_arch = "wasm32"))]
+enum DroppedOrigins {
+    One(SourceOrigin),
+    Pair {
+        old: SourceOrigin,
+        new: SourceOrigin,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drop_origins(paths: &[std::path::PathBuf]) -> DroppedOrigins {
+    match drop_shape(paths) {
+        DropShape::Single(p) => DroppedOrigins::One(SourceOrigin::Path(p.clone())),
+        DropShape::Pair(o, n) => DroppedOrigins::Pair {
+            old: SourceOrigin::Path(o.clone()),
+            new: SourceOrigin::Path(n.clone()),
+        },
+        DropShape::Loose => DroppedOrigins::One(SourceOrigin::Files(paths.to_vec())),
+    }
+}
+
+/// The view state a reload keeps (#423): camera, selected layer (or page),
+/// layer visibility, per-layer colours and rulers. Restored only when the
+/// reloaded comparison has the same layer stack (or page counts), since all
+/// of it is indexed per layer or in board coordinates.
+#[cfg(not(target_arch = "wasm32"))]
+struct KeptView {
+    key: String,
+    cam: Camera,
+    selected: usize,
+    visible_layers: Vec<bool>,
+    base_overrides: Vec<(usize, Color32)>,
+    measurements: Vec<Measurement>,
+    pdf_selected: Option<usize>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ViewApp {
+    /// What identifies the shown comparison's layout, for [`KeptView`].
+    fn view_key(&self) -> String {
+        match &self.pdf {
+            Some(p) => format!("pdf:{}:{}", p.old_pages, p.new_pages),
+            None => format!("board:{}", board_key(&self.diff)),
+        }
+    }
+
+    fn keep_view(&self) -> KeptView {
+        KeptView {
+            key: self.view_key(),
+            cam: self.cam.clone(),
+            selected: self.selected,
+            visible_layers: self.visible_layers.clone(),
+            base_overrides: self.base_overrides.clone(),
+            measurements: self.measurements.clone(),
+            pdf_selected: self.pdf.as_ref().map(|p| p.selected),
+        }
+    }
+
+    /// Put back a kept view after a reload, if the layout still matches.
+    /// Returns whether it was restored.
+    fn restore_view(&mut self, kept: KeptView) -> bool {
+        if kept.key != self.view_key() || !kept.cam.fitted {
+            return false;
+        }
+        self.cam = kept.cam;
+        if kept.selected < self.diff.layers.len() {
+            self.selected = kept.selected;
+        }
+        if kept.visible_layers.len() == self.visible_layers.len() {
+            self.visible_layers = kept.visible_layers;
+        }
+        self.base_overrides = kept.base_overrides;
+        self.measurements = kept.measurements;
+        if let (Some(pdf), Some(sel)) = (self.pdf.as_mut(), kept.pdf_selected) {
+            if sel < pdf.rows.len() {
+                pdf.selected = sel;
+            }
+        }
+        true
+    }
 }
 
 impl ViewApp {
@@ -3753,6 +4111,12 @@ impl eframe::App for ViewApp {
             }
         }
         self.handle_dropped_files(ui.ctx());
+        // Reload on change (#423): native only.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let now = ui.ctx().input(|i| i.time);
+            self.poll_watchers(ui.ctx(), now);
+        }
 
         // Startup splash (foreground overlay; skipped once done). Drawn before the
         // panels so it covers the welcome screen too, but composited on top.
@@ -4230,6 +4594,13 @@ impl eframe::App for ViewApp {
         if let Some(err) = self.load_error.clone() {
             egui::Panel::top("load_error").show_inside(ui, |ui| {
                 ui.colored_label(C_REMOVED, format!("[!] load failed — {err}"));
+            });
+        }
+        // A reload after a file change says so, briefly (#423).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((note, _)) = self.reload_note.clone() {
+            egui::Panel::top("reload_note").show_inside(ui, |ui| {
+                ui.colored_label(C_COPPER, note);
             });
         }
 
@@ -5134,6 +5505,14 @@ impl ViewApp {
             "Pan mouse button by ECAD tool: \
              Altium = right-drag, KiCad = middle/right-drag.",
         );
+        // The web viewer has no files on disk to watch (#423).
+        #[cfg(not(target_arch = "wasm32"))]
+        ui.checkbox(&mut self.watch_inputs, "Reload when files change")
+            .on_hover_text(
+                "Re-read and re-diff an opened folder, zip, PDF or set of files when it \
+                 changes on disk, once it has been quiet for half a second. The camera, \
+                 selected layer and visibility are kept.",
+            );
     }
 
     /// Settings → Colours: diff colours + per-theme canvas/grid (#53/#31/#52).
@@ -8027,6 +8406,162 @@ mod tests {
         assert_eq!(app.new_label, "new");
     }
 
+    /// Two revision folders on disk, each holding one copper layer, for the
+    /// reload tests (#423).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reload_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("etchy-reload-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("rev-a"), root.join("rev-b"));
+        for d in [&old, &new] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("board-F_Cu.gtl"), MIN_GERBER).unwrap();
+        }
+        (root, old, new)
+    }
+
+    /// [`MIN_GERBER`] with a bigger pad: a real change on the same board.
+    const GROWN_GERBER: &[u8] = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,1.2*%\nD10*\nX0Y0D03*\nM02*\n";
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reload_rediffs_and_keeps_the_view() {
+        use super::{RevSide, SourceOrigin, ViewApp};
+        let (root, old, new) = reload_fixture("keep");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert_eq!(app.origin_new, Some(SourceOrigin::Path(new.clone())));
+        assert!(!app.diff.layers[0].is_changed());
+
+        // The user has framed something and hidden the layer.
+        app.cam.fitted = true;
+        app.cam.center = [123.0, 456.0];
+        app.cam.scale = 0.5;
+        app.visible_layers[0] = false;
+
+        std::fs::write(new.join("board-F_Cu.gtl"), GROWN_GERBER).unwrap();
+        app.reload_sides(false, true, 10.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(app.diff.layers[0].is_changed(), "the re-export was diffed");
+        assert_eq!(app.cam.center, [123.0, 456.0], "camera kept");
+        assert_eq!(app.cam.scale, 0.5);
+        assert!(!app.visible_layers[0], "visibility kept");
+        let (note, at) = app.reload_note.clone().expect("a reload says so");
+        assert!(note.contains("after a file change"), "got: {note}");
+        assert!(!note.contains("reset"), "same layers, view kept: {note}");
+        assert_eq!(at, 10.0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reload_with_a_new_layer_resets_the_view_and_says_so() {
+        use super::{RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("reset");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        app.cam.fitted = true;
+        app.cam.center = [123.0, 456.0];
+
+        std::fs::write(new.join("board-B_Cu.gbl"), MIN_GERBER).unwrap();
+        app.reload_sides(false, true, 1.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert_eq!(app.diff.layers.len(), 2);
+        assert!(!app.cam.fitted, "a different stack re-fits");
+        let (note, _) = app.reload_note.clone().unwrap();
+        assert!(note.contains("view was reset"), "got: {note}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_reload_keeps_the_previous_result_on_screen() {
+        use super::{LoadedSource, RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("fail");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+
+        // The new side becomes a PDF-vs-Gerber pair: reading works, diffing
+        // fails, and the board pair must stay on screen and in the sources.
+        let new_pdf = root.join("rev-b.pdf");
+        std::fs::write(&new_pdf, b"%PDF-1.7").unwrap();
+        app.origin_new = Some(super::SourceOrigin::Path(new_pdf));
+        app.reload_sides(false, true, 1.0);
+        let err = app.load_error.clone().expect("a failed reload fails loud");
+        assert!(err.contains("reload after a file change"), "got: {err}");
+        assert!(err.contains("previous result is still shown"), "got: {err}");
+        assert!(matches!(app.src_new, Some(LoadedSource::Board(_))));
+        assert_eq!(app.diff.layers.len(), 1);
+        assert!(app.reload_note.is_none());
+
+        // A read failure (the folder is gone) is reported the same way.
+        app.load_error = None;
+        app.origin_new = Some(super::SourceOrigin::Path(root.join("missing")));
+        app.reload_sides(false, true, 2.0);
+        let err = app.load_error.clone().expect("a failed read fails loud");
+        assert!(err.contains("reload after a file change"), "got: {err}");
+        assert!(matches!(app.src_new, Some(LoadedSource::Board(_))));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn drop_origins_follow_the_drop_shape() {
+        use super::{drop_origins, DroppedOrigins, SourceOrigin};
+        let (root, old, new) = reload_fixture("shape");
+        match drop_origins(&[new.clone(), old.clone()]) {
+            DroppedOrigins::Pair { old: o, new: n } => {
+                assert_eq!(o, SourceOrigin::Path(old.clone()), "old = first by name");
+                assert_eq!(n, SourceOrigin::Path(new.clone()));
+            }
+            DroppedOrigins::One(_) => panic!("two folders are a pair"),
+        }
+        match drop_origins(std::slice::from_ref(&old)) {
+            DroppedOrigins::One(o) => assert_eq!(o, SourceOrigin::Path(old.clone())),
+            DroppedOrigins::Pair { .. } => panic!("one folder is one side"),
+        }
+        let loose = vec![old.join("board-F_Cu.gtl"), new.join("board-F_Cu.gtl")];
+        match drop_origins(&loose) {
+            DroppedOrigins::One(o) => {
+                assert_eq!(o, SourceOrigin::Files(loose.clone()));
+                assert_eq!(o.roots(), loose);
+            }
+            DroppedOrigins::Pair { .. } => panic!("loose files are one set"),
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn watchers_follow_the_toggle_and_the_loaded_sides() {
+        use super::{RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("toggle");
+        let ctx = egui::Context::default();
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.sync_watchers(&ctx);
+        assert!(app.watch_old.is_none() && app.watch_new.is_none());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        app.sync_watchers(&ctx);
+        assert_eq!(
+            app.watch_old.as_ref().unwrap().roots(),
+            std::slice::from_ref(&old)
+        );
+        assert_eq!(
+            app.watch_new.as_ref().unwrap().roots(),
+            std::slice::from_ref(&new)
+        );
+        app.watch_inputs = false;
+        app.sync_watchers(&ctx);
+        assert!(app.watch_old.is_none() && app.watch_new.is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// A one-layer Gerber set for the single-set tests (#466).
     fn single_board(label: &str, warnings: Vec<String>) -> super::LoadedSource {
         let (board, fmt, _) = crate::loader::board_from_bytes(vec![(
@@ -9194,6 +9729,8 @@ mod tests {
         let mut app2 = ViewApp::new(empty_diff(), "x".into(), "y".into());
         app2.apply_settings(bare);
         assert_eq!(app2.base_opacity, BASE_OPACITY_FAINT);
+        // Reload on change (#423) is on for configs that predate it.
+        assert!(app2.watch_inputs);
     }
 
     #[test]
@@ -9892,6 +10429,7 @@ mod tests {
             swipe_frac: 0.42,
             rail_side: RailSide::Right,
             keymap,
+            watch_inputs: false,
         };
         let json = serde_json::to_string(&s).expect("serialize");
         let back: Settings = serde_json::from_str(&json).expect("deserialize");
