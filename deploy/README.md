@@ -20,6 +20,16 @@ committed at `crates/etchy-gui/assets/demo/` and checked against `scripts/demo-a
   category, severity, optional name, auto-context incl. `window.__etchyState` =
   layer/mode/zoom from the Rust hook, screenshot paste/drop/browse, and
   Ctrl/Cmd+Enter submission. It sends no User-Agent or client IP in the payload.
+  Tests: `deploy/demo/test_feedback_widget.py` (text checks, standard library)
+  and `deploy/demo/test_feedback_widget_browser.py`, which loads this page in
+  headless Chromium against `etchy-server.py` with the WASM stubbed, and checks
+  Ctrl/Cmd+Enter submit, pasted shots as removable thumbnails, drag-drop, the
+  file picker, the POST payload (no `ua`/`ip`, within the screenshot caps) and
+  that nothing is sent without a user action (#439). Run it with
+  `python3 -m pip install --require-hashes -r deploy/requirements-browser-test.txt`,
+  `python3 -m playwright install chromium`, then `python3 -m unittest
+  deploy/demo/test_feedback_widget_browser.py`. It skips if Playwright is
+  missing; CI sets `ETCHY_BROWSER_TEST=1` so it fails instead.
   The page references `/etchy-gui.js` + `/etchy-gui_bg.wasm` with a `?v=` cache-bust.
 - `demo/etchy-server.py` — static file server **+ `POST /feedback`** → appends one
   JSON line per submission to `feedback.jsonl` (server ts + unique `id` +

@@ -1,0 +1,49 @@
+# Eagle CAM processor default names.
+# Format: <filename> => <kind>. See corpus/naming/README.md.
+#
+# Legacy jobs (gerb274x.cam + excellon.cam, Eagle 5-7). Sources: Eagle help
+# "Output File"; https://cs.uml.edu/~fredm/courses/91.548-spr03/eagle-gerber-output.shtml
+board.cmp => top-copper
+board.sol => bottom-copper
+board.stc => top-mask
+board.sts => bottom-mask
+board.plc => top-silk
+board.pls => bottom-silk
+board.crc => top-paste
+board.crs => bottom-paste
+# .drd is Excellon from Eagle but a drill DRAWING (Gerber) from OrCAD Layout:
+# the name is ambiguous, so content decides (Excellon -> drill on load).
+board.drd => other
+# Reports, not layers.
+board.dri => other
+board.gpi => other
+# Inner .ly<n> is the Eagle layer number (Route2..Route15), not the stack
+# position, so the inner index can't be read from it.
+board.ly2 => other
+board.ly15 => other
+#
+# Eagle 9 templates (CAMOutputs/GerberFiles, DrillFiles). Sources: Eagle 9
+# template_2_layer.cam / AISLER-4-Layer.cam jobs; copper_inner_l<n> is the
+# physical stack layer ("layer": n in the job).
+copper_top.gbr => top-copper
+copper_bottom.gbr => bottom-copper
+copper_top_l1.gbr => top-copper
+copper_inner_l2.gbr => inner-copper-1
+copper_inner_l3.gbr => inner-copper-2
+copper_bottom_l4.gbr => bottom-copper
+soldermask_top.gbr => top-mask
+soldermask_bottom.gbr => bottom-mask
+solderpaste_top.gbr => top-paste
+solderpaste_bottom.gbr => bottom-paste
+silkscreen_top.gbr => top-silk
+silkscreen_bottom.gbr => bottom-silk
+profile.gbr => outline
+drill_1_16.xln => drill
+drills_pth.xln => drill-pth
+holes_npth.xln => drill-npth
+PnP_board_front.txt => placement
+gerber_job.gbrjob => other
+# A board-name prefix is tolerated on the multi-word names.
+myboard_copper_top.gbr => top-copper
+# copper_inner_l1 would be the top layer: malformed, not guessed.
+copper_inner_l1.gbr => other
