@@ -120,7 +120,8 @@
 Invoke-WebRequest https://github.com/Cimos/etchy/releases/download/v0.2.0/etchy-cli-v0.2.0-windows-x86_64.zip -OutFile etchy.zip
 Expand-Archive etchy.zip -DestinationPath .
 .\etchy-cli-v0.2.0-windows-x86_64\etchy.exe --version</pre></div>
-      <div class="i-panel p-lin" id="p-lin" role="tabpanel" aria-labelledby="i-lin" hidden><pre class="code"><span class="c"># static musl binary — no runtime to install</span>
+      <div class="i-panel p-lin" id="p-lin" role="tabpanel" aria-labelledby="i-lin" hidden><pre class="code"><span class="c"># static musl binary — no runtime to install
+# ARM64 / Raspberry Pi (64-bit OS): …-linux-aarch64.tar.gz, in releases after v0.2.0</span>
 curl -LO https://github.com/Cimos/etchy/releases/download/v0.2.0/etchy-cli-v0.2.0-linux-x86_64.tar.gz
 tar xzf etchy-cli-v0.2.0-linux-x86_64.tar.gz
 sudo mv etchy-cli-v0.2.0-linux-x86_64/etchy /usr/local/bin/</pre></div>
@@ -137,7 +138,7 @@ docker run --rm -v "$PWD:/work" ghcr.io/cimos/etchy:v0.2.0 --format summary -- /
     </div>
 
     <p>Download v0.2.0 from the <a href="https://github.com/Cimos/etchy/releases/tag/v0.2.0">release page</a>.</p>
-    <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS).</p>
+    <p><strong>Check what you downloaded.</strong> Every release carries a <code class="inline">SHA256SUMS</code> file: download it next to the archive and run <code class="inline">sha256sum -c SHA256SUMS --ignore-missing</code> (<code class="inline">shasum -a 256 -c</code> on macOS). That only shows the download arrived intact, because the same release job wrote the checksums. Releases after v0.2.0 also carry a signed build provenance attestation for every file and the container image, which shows it was built by etchy's release workflow from the tagged commit. Check it with the GitHub CLI: <code class="inline">gh attestation verify &lt;file&gt; --repo Cimos/etchy</code>, or <code class="inline">gh attestation verify oci://ghcr.io/cimos/etchy:&lt;tag&gt; --repo Cimos/etchy</code> for the image. Those releases also have CycloneDX SBOMs, <code class="inline">etchy-cli-&lt;tag&gt;.cdx.json</code> and <code class="inline">etchy-viewer-&lt;tag&gt;.cdx.json</code>, listing the crates built into each binary.</p>
     <p>The <strong>desktop viewer</strong> has its own installers on the <a href="https://github.com/Cimos/etchy/releases">Releases</a> page: <code class="inline">etchy-viewer-v0.2.0-windows-x86_64.msi</code>, <code class="inline">etchy-viewer-v0.2.0-macos-aarch64.dmg</code> (Apple Silicon), <code class="inline">etchy-viewer-v0.2.0-linux-x86_64.AppImage</code>, and <code class="inline">etchy-viewer-v0.2.0-linux-x86_64.deb</code>. The MSI and DEB add the <code class="inline">etchy</code> CLI to PATH; Homebrew links it on macOS with <code class="inline">brew install --cask cimos/etchy/etchy</code>. The AppImage and a DMG opened directly do not put the CLI on PATH. The installers are not code-signed yet: Windows shows a SmartScreen prompt (More info, then Run anyway) and macOS asks you to allow the app once in System Settings, Privacy &amp; Security. A browser build exists, but no hosted viewer is offered yet.</p>
   </section>
 
@@ -165,7 +166,12 @@ top-paste        unchanged          0.00000      0.00000         0         0
 outline          unchanged          0.00000      0.00000         0         0
 
 10 of 13 layer(s) changed; total <span class="add">+213.29638</span> mm² / <span class="rem">-448.70036</span> mm² (967+/863- regions)
-result: differences found</pre>
+drill-npth 2.200 mm: 6 -&gt; 0 holes (removed)
+drill-npth 3.200 mm: 0 -&gt; 6 holes (added)
+drill-npth total: 88 -&gt; 88 holes
+drill 0.249 mm: 208 -&gt; 222 holes, 0 -&gt; 0 slots (changed)
+drill total: 218 -&gt; 232 holes, 27 -&gt; 27 slots
+result: differences found — hole counts changed on drill-npth, drill (drill table)</pre>
 
     <h3 style="font-size:17px;margin:22px 0 4px">Every flag</h3>
     <table>
@@ -177,13 +183,31 @@ result: differences found</pre>
       <tr><td><code>--json</code></td><td>Deprecated alias for <code>--format json</code>. Still works.</td></tr>
       <tr><td><code>--svg &lt;DIR&gt;</code></td><td>Write one SVG overlay per changed layer into this directory (<code>00-top-copper.svg</code>, <code>01-inner-copper1.svg</code>, …). Created if missing.</td></tr>
       <tr><td><code>--html &lt;FILE&gt;</code></td><td>Write a single self-contained HTML report: totals, warnings, and every changed layer's overlay inlined. No external assets, so it travels as one file.</td></tr>
-      <tr><td><code>--fail-on-area &lt;MM2&gt;</code></td><td>CI gate: exit 1 only when the changed area on the gated layers exceeds this many mm². With neither threshold set, any change on the gated layers fails.</td></tr>
+      <tr><td><code>--fail-on-area &lt;MM2&gt;</code></td><td>CI gate: exit 1 only when the changed area on the gated layers exceeds this many mm². With neither threshold set, any change on the gated layers fails. A drill hole or slot count change on a gated layer fails whatever the thresholds — it has no area to measure.</td></tr>
       <tr><td><code>--fail-on-regions &lt;N&gt;</code></td><td>CI gate on the changed region count instead. Set both and either one being exceeded fails.</td></tr>
+      <tr><td><code>--waivers &lt;FILE&gt;</code></td><td>Accept known changes from a TOML waiver file (see <a href="#waivers">Waivers</a>). The gates and the exit code count only unwaived changes; every output still lists what was waived. Never picked up automatically; etchy prints the file it uses.</td></tr>
+      <tr><td><code>--fail-on-stale-waivers</code></td><td>Exit 1 when a waiver matched no changed region, so stale waivers don't pile up. Without it a stale waiver is a warning.</td></tr>
       <tr><td><code>--gate-layers &lt;SPEC&gt;</code></td><td>Which layers the gate looks at: <code>all</code> (default), or a comma list of <code>copper</code>, <code>mask</code>, <code>silk</code>, <code>paste</code>, <code>drill</code> (all drill files), <code>pth</code> (plated drill only), <code>npth</code> (non-plated drill only), <code>outline</code>, <code>documentation</code> (alias <code>docs</code>), <code>placement</code>, <code>other</code>. Group names match exactly. An unknown name is a loud error, never a silently disarmed gate.</td></tr>
       <tr><td><code>--dpi &lt;DPI&gt;</code></td><td>PDF inputs only: rasterization resolution, default 150. Higher is crisper but costs memory and time (per-page pixel area is capped).</td></tr>
       <tr><td><code>--out &lt;DIR&gt;</code></td><td>PDF inputs only: write one overlay PNG per diffed page (<code>page-&lt;n&gt;.png</code>) into this directory.</td></tr>
       <tr><td><code>--min-region-px &lt;N&gt;</code></td><td>PDF inputs only: keep changed regions under N connected pixels out of the overlay as likely anti-aliasing noise. Default 1, which hides nothing. Anything hidden is still counted and still reported — the floor can never produce a silent “no differences”.</td></tr>
     </table>
+
+    <h3 id="waivers" style="font-size:17px;margin:22px 0 4px">Waivers</h3>
+    <p>A board revision that only bumps the date code still trips <code class="inline">--fail-on-area</code>. A waiver file accepts that known change so the gate still passes. Each waiver is a box on one layer, in millimetres in the board's own coordinates (the same numbers etchy prints as a region's bbox), with a required reason:</p>
+    <pre class="code"><span class="c"># waivers.toml</span>
+[[waiver]]
+layer = "top-silk"            <span class="c"># a layer name as etchy prints it: top-copper, inner-copper2, bottom-mask, drill-pth, …</span>
+box = [10.0, 5.0, 30.0, 9.0]  <span class="c"># x_min, y_min, x_max, y_max (mm)</span>
+reason = "date code bumped each revision"</pre>
+    <pre class="code"><span class="k">etchy</span> old/ new/ --waivers waivers.toml --fail-on-area 0.5 --fail-on-stale-waivers</pre>
+    <ul>
+      <li>A changed region is waived only when its bounding box lies <strong>entirely</strong> inside a waiver box. A region that partially overlaps a box is <em>not</em> waived and is reported as partially overlapping it. A region that spans two boxes is not waived either. If boxes overlap, the first one in the file claims the region.</li>
+      <li><code class="inline">--fail-on-area</code>, <code class="inline">--fail-on-regions</code> and the plain any-change exit code count only unwaived changes. The diff itself is unchanged: the per-layer table, JSON <code class="inline">layers</code> and overlays still show every change.</li>
+      <li>Every output lists what was waived: the terminal summary, the JSON <code class="inline">waivers</code> object, the Markdown and HTML reports. Each waiver shows its region count, area and reason. Nothing is dropped quietly.</li>
+      <li>A waiver that matched no changed region is reported as stale (a warning). Add <code class="inline">--fail-on-stale-waivers</code> to make that exit 1 in CI.</li>
+      <li>An unknown layer name, an unknown key, a malformed box, a missing or empty reason, or a file with no <code class="inline">[[waiver]]</code> entries is an error (exit 2). Waivers do not apply to PDF inputs.</li>
+    </ul>
 
     <h3 style="font-size:17px;margin:22px 0 4px">Reports and exports</h3>
     <p>One run can write every output at once — they all come from the same diff computation, so the picture and the numbers can't disagree:</p>
@@ -193,6 +217,12 @@ result: differences found</pre>
     <p>Give etchy two git refs and it reads the committed fab files straight out of the object store. A third argument scopes it to the subdirectory the Gerbers live in:</p>
     <pre class="code"><span class="k">etchy</span> v1.0 HEAD fab/          <span class="c"># &lt;refA&gt; &lt;refB&gt; [subdir]</span>
 <span class="k">etchy</span> --git v1.0 HEAD          <span class="c"># whole repo; prints a scoping note</span></pre>
+
+    <h3 style="font-size:17px;margin:22px 0 4px">Per-commit history: <code class="inline">etchy log</code></h3>
+    <p>Give <code class="inline">etchy log</code> a git range and it walks the first-parent commits that touch the fab pack, newest first, and diffs each one against its first parent through the same loader and diff as the two-ref form — no checkout. Each commit lists the layers it changed with added / removed mm² and region counts. A merge is reported against its first parent, so it shows everything it brought into the branch. A commit that adds or deletes the whole pack is reported as <em>pack added</em> / <em>pack removed</em>, never skipped.</p>
+    <pre class="code"><span class="k">etchy</span> log v1.0..HEAD fab/                 <span class="c"># &lt;range&gt; [subdir]</span>
+<span class="k">etchy</span> log main..feature fab/ --format md   <span class="c"># or --format json</span></pre>
+    <p>Exit 0 when no commit changed a layer, 1 when one did, 2 on any error — including a commit whose files don't parse, which is named rather than skipped. <code class="inline">--max-commits &lt;N&gt;</code> (default 200) caps the walk; a range with more commits is an error, never a silently truncated history. To diff a directory that is literally named <code class="inline">log</code>, write <code class="inline">./log</code>.</p>
 
     <h3 style="font-size:17px;margin:22px 0 4px">Schematic PDFs</h3>
     <p>Hand etchy two <code class="inline">.pdf</code> files instead of two directories and it does a page-by-page pixel diff, reporting added / removed / changed pixels and a changed-region count per page. Pages pair by <em>content</em>, not index, so inserting one sheet shows up as a single extra row rather than making every later page look rewritten.</p>
@@ -209,7 +239,7 @@ result: differences found</pre>
     <table>
       <tr><th>Code</th><th>Meaning</th></tr>
       <tr><td><code>0</code></td><td>Nothing to block on — either the two revisions are identical, or a gate is configured and the change came in under it</td></tr>
-      <tr><td><code>1</code></td><td>Differences found — the revisions differ (the normal “what changed” result)</td></tr>
+      <tr><td><code>1</code></td><td>Differences found — the revisions differ (the normal “what changed” result). A drill hole or slot count change per tool size counts, even with identical geometry</td></tr>
       <tr><td><code>2</code></td><td>Error — a comparison couldn't be made: the inputs aren't the <strong>same board</strong> (extents mismatch — etchy compares revisions of one board, not two different boards), a layer failed to parse, or files are missing</td></tr>
     </table>
   </section>

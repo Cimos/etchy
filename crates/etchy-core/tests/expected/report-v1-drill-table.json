@@ -8,6 +8,7 @@
     "added_area_mm2": 1e-12, "removed_area_mm2": 0.0, "added_area_nm2": "1", "removed_area_nm2": "0",
     "added_regions": 0, "removed_regions": 0,
     "labels_available": false,
+    "drill_counts_changed": true,
     "drill_table": {
       "rows": [
         {"diameter_mm": 0.3, "diameter_um": 300, "change": "changed", "old_holes": 412, "new_holes": 418, "old_slots": 0, "new_slots": 0},

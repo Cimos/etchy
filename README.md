@@ -42,6 +42,29 @@ Gate CI on the **magnitude** and **location** of change:
 etchy old/ new/ --gate-layers copper --fail-on-area 0.5
 ```
 
+A change in a drill layer's hole or slot counts per tool size is a diff too
+(exit 1), even when the drilled geometry is identical — say a hole drilled
+twice at one spot. It fails any gate that includes that drill layer, whatever
+the thresholds.
+
+**Waivers** accept a known change, such as a bumped date code, so the gate still
+passes. A waiver is a box in board mm on one layer, with a required reason:
+
+```toml
+# waivers.toml — pass with: etchy old/ new/ --waivers waivers.toml
+[[waiver]]
+layer = "top-silk"
+box = [10.0, 5.0, 30.0, 9.0]   # x_min, y_min, x_max, y_max in mm, the board's own coordinates
+reason = "date code bumped each revision"
+```
+
+A changed region is waived only if it lies **entirely** inside a box; a partial
+overlap stays a failure and is named as one. The gates and the exit code count only
+unwaived changes, but every output still lists the waived regions with their
+count, area and reason. A waiver that matches nothing is reported as stale;
+`--fail-on-stale-waivers` makes that exit 1. Waivers cover changed geometry
+only; a drill hole-count change still fails the gate.
+
 **Every PR that touches Gerbers gets a layer-by-layer diff comment** — five lines
 add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):
@@ -56,6 +79,14 @@ add the Action to a repo (full recipe in
 
 The job grants `pull-requests: write`; etchy supplies its own token and posts a
 sticky per-layer table (added / removed mm² and region counts).
+
+**History over a git range** — `etchy log` walks the commits that touch the fab
+pack and prints, per commit, which layers changed and by how much (no checkout;
+`--format md|json` too; exit 1 if any commit changed a layer):
+
+```sh
+etchy log v0.1.0..HEAD fab/   # newest first, each commit vs its first parent
+```
 
 **PDF diff** — schematic PDFs get a page-by-page pixel diff (builds with
 `--features pdf`; release binaries ship it on):
@@ -77,8 +108,14 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 
   Or build it yourself with `docker build -t etchy .`.
 
-- **Prebuilt binaries** — `etchy-cli-…` archives for Linux, macOS and Windows,
+- **Prebuilt binaries** — `etchy-cli-…` archives for Linux (x86_64, and ARM64
+  in releases after v0.2.0), macOS (Apple Silicon and Intel) and Windows,
   plus a `SHA256SUMS` file, are on the [Releases](../../releases) page.
+  Releases after v0.2.0 also have signed build provenance for every asset and
+  the container image, plus CycloneDX SBOMs (`etchy-{cli,viewer}-<tag>.cdx.json`).
+  `SHA256SUMS` only shows a download is intact; to check it came from etchy's
+  release workflow, run `gh attestation verify <file> --repo Cimos/etchy`
+  (`oci://ghcr.io/cimos/etchy:<tag>` for the image).
 
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
 changed-first layer list, Overlay / Old / New / Split / Swipe modes, pan /

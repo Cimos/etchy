@@ -194,6 +194,163 @@ fn drill_table_reaches_json_markdown_html_and_summary() {
 }
 
 #[test]
+fn gerber_drill_layer_compares_with_excellon_in_the_drill_table() {
+    // #457: old is Excellon (metric), new is the same plated drill exported as
+    // Gerber flashes in inches, with one more 0.8 mm hole.
+    let root = scratch("gerber-drill-table");
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    fs::write(
+        old.join("board-PTH.drl"),
+        "M48\nMETRIC,TZ\nT1C0.300\nT2C0.800\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\nM30\n",
+    )
+    .unwrap();
+    let gerber_hdr = "%FSLAX26Y26*%\n%MOIN*%\n%TF.FileFunction,Plated,1,2,PTH,Drill*%\n\
+                      %ADD10C,0.0118*%\n%ADD11C,0.0315*%\n";
+    fs::write(
+        new.join("board-PTH-drl.gbr"),
+        format!(
+            "{gerber_hdr}D10*\nX196850Y196850D03*\nX1968504Y1968504D03*\n\
+             D11*\nX787402Y787402D03*\nX1181102Y787402D03*\nM02*\n"
+        ),
+    )
+    .unwrap();
+    let out = etchy()
+        .arg("--format")
+        .arg("json")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let table = &value["layers"][0]["drill_table"];
+    let rows: Vec<_> = table["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["diameter_um"].as_i64().unwrap(),
+                r["change"].as_str().unwrap(),
+                r["old_holes"].as_u64().unwrap(),
+                r["new_holes"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(rows, [(300, "unchanged", 2, 2), (800, "changed", 1, 2)]);
+
+    // A slot drawn on the Gerber side can't be counted: no table, and a
+    // warning that says so.
+    fs::write(
+        new.join("board-PTH-drl.gbr"),
+        format!(
+            "{gerber_hdr}D10*\nX196850Y196850D03*\nX1968504Y1968504D03*\n\
+             D11*\nX787402Y787402D02*\nX1181102Y787402D01*\nM02*\n"
+        ),
+    )
+    .unwrap();
+    let out = etchy()
+        .arg("--format")
+        .arg("json")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(value["layers"][0].get("drill_table").is_none());
+    let warnings = value["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().any(|w| {
+            let w = w.as_str().unwrap();
+            w.contains("board-PTH-drl.gbr") && w.contains("1 draw (slot or route)")
+        }),
+        "{warnings:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn hole_count_change_sets_the_exit_code() {
+    // #456: a drill-table count change is a diff even with identical geometry;
+    // renumbering tools of one size is not.
+    let root = scratch("drill-count-exit");
+    let drill = |name: &str, body: &str| {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("board-PTH.drl"),
+            format!("M48\nMETRIC,TZ\nT1C0.300\nT2C0.300\n%\n{body}M30\n"),
+        )
+        .unwrap();
+        dir
+    };
+    let old = drill("old", "T1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\n");
+    let twice = drill(
+        "twice",
+        "T1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\nX20.0Y20.0\n",
+    );
+    let swapped = drill("swapped", "T1\nX20.0Y20.0\nT2\nX5.0Y5.0\nX50.0Y50.0\n");
+    let moved = drill("moved", "T1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX30.0Y30.0\n");
+    let code = |new: &Path, extra: &[&str]| {
+        let out = etchy().args(extra).arg(&old).arg(new).output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+
+    let (exit, text, _) = code(&twice, &[]);
+    assert_eq!(exit, Some(1), "a hole drilled twice is a diff: {text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("drill-pth ") && l.contains(" changed ")),
+        "{text}"
+    );
+    assert!(
+        text.contains("drill-pth: changed in the drill table only"),
+        "{text}"
+    );
+    assert!(text.contains("hole counts changed on drill-pth (drill table)"));
+
+    let (exit, json, _) = code(&twice, &["--format", "json"]);
+    assert_eq!(exit, Some(1));
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["any_changes"], true);
+    assert_eq!(value["layers"][0]["status"], "changed");
+    assert_eq!(value["layers"][0]["drill_counts_changed"], true);
+    assert_eq!(value["layers"][0]["added_regions"], 0);
+    assert_eq!(value["gate"]["passed"], false);
+    assert_eq!(value["gate"]["drill_count_layers"][0], "drill-pth");
+
+    let (exit, md, _) = code(&twice, &["--format", "md"]);
+    assert_eq!(exit, Some(1));
+    assert!(md.contains("**drill-pth** changed in the drill table only"));
+
+    // Gating: thresholds don't wave it through; a scope without drill does.
+    let (exit, _, err) = code(&twice, &["--fail-on-area", "100"]);
+    assert_eq!(exit, Some(1));
+    assert!(err.contains("hole counts changed on drill-pth"), "{err}");
+    assert_eq!(code(&twice, &["--gate-layers", "pth"]).0, Some(1));
+    assert_eq!(code(&twice, &["--gate-layers", "copper"]).0, Some(0));
+
+    // Same-size tool swap: every size keeps its count, so no diff.
+    let (exit, text, _) = code(&swapped, &[]);
+    assert_eq!(exit, Some(0), "{text}");
+    assert!(text.contains("result: no differences"), "{text}");
+
+    // A geometry change still exits 1, and is not "drill table only".
+    let (exit, text, _) = code(&moved, &[]);
+    assert_eq!(exit, Some(1), "{text}");
+    assert!(!text.contains("drill table only"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn passing_gate_output_matches_exit_0() {
     // #258: a change smaller than --fail-on-area exits 0, but the summary/JSON
     // used to say "differences found" / any_changes:true with no hint that the
@@ -380,4 +537,178 @@ fn unsupported_geometry_fails_loud() {
         .contains("unsupported"));
 
     let _ = fs::remove_dir_all(&root);
+}
+
+/// old/new pair whose only change is one 0.5 mm pad at (25, 25) mm on top copper
+/// (bbox 24.75..25.25 mm), plus a waiver file per call (#425).
+fn waiver_pair(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = scratch(tag);
+    let old = root.join("old");
+    let new = root.join("new");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&new).unwrap();
+    write_layer(&old, "F_Cu.gbr", "");
+    write_layer(&new, "F_Cu.gbr", "X25000000Y25000000D03*\n");
+    (root, old, new)
+}
+
+fn waiver_file(root: &Path, body: &str) -> PathBuf {
+    let path = root.join("waivers.toml");
+    fs::write(&path, body).unwrap();
+    path
+}
+
+fn run_with_waivers(
+    old: &Path,
+    new: &Path,
+    waivers: &Path,
+    extra: &[&str],
+) -> (i32, String, String) {
+    let out = etchy()
+        .args(extra)
+        .arg("--waivers")
+        .arg(waivers)
+        .arg(old)
+        .arg(new)
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn fully_waived_diff_exits_0_and_every_output_lists_it() {
+    let (root, old, new) = waiver_pair("waiver-ok");
+    let w = waiver_file(
+        &root,
+        "[[waiver]]\nlayer = \"top-copper\"\nbox = [24, 24, 26, 26]\nreason = \"date code\"\n",
+    );
+
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &[]);
+    assert_eq!(code, 0, "a fully waived diff passes: {stdout}{stderr}");
+    assert!(
+        stderr.contains("using 1 waiver(s)"),
+        "waiver file use is announced: {stderr}"
+    );
+    assert!(stdout.contains("1 region(s) waived"), "{stdout}");
+    assert!(stdout.contains("reason: date code"), "{stdout}");
+
+    let (code, json, _) = run_with_waivers(&old, &new, &w, &["--format", "json"]);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["gate"]["passed"], true);
+    assert_eq!(v["waivers"]["waived_regions"], 1);
+    assert_eq!(v["waivers"]["waivers"][0]["reason"], "date code");
+    assert!(v["waivers"]["waived_area_mm2"].as_f64().unwrap() > 0.19);
+    // The raw diff is still reported in full; waiving never hides a change.
+    assert_eq!(v["any_changes"], true);
+    assert_eq!(v["layers"][0]["added_regions"], 1);
+
+    let html = root.join("r.html");
+    let (code, md, _) = run_with_waivers(
+        &old,
+        &new,
+        &w,
+        &["--format", "md", "--html", html.to_str().unwrap()],
+    );
+    assert_eq!(code, 0);
+    assert!(md.contains("### Waivers"), "{md}");
+    assert!(md.contains("date code"), "{md}");
+    let html_text = fs::read_to_string(&html).unwrap();
+    assert!(html_text.contains("Waivers") && html_text.contains("date code"));
+
+    // With --fail-on-area the waived area does not count either.
+    let (code, _, _) = run_with_waivers(&old, &new, &w, &["--fail-on-area", "0.01"]);
+    assert_eq!(code, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn partially_overlapping_waiver_does_not_waive() {
+    let (root, old, new) = waiver_pair("waiver-partial");
+    // The box cuts the pad in half: not waived, and said so.
+    let w = waiver_file(
+        &root,
+        "[[waiver]]\nlayer = \"top-copper\"\nbox = [25, 24, 26, 26]\nreason = \"half\"\n",
+    );
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &[]);
+    assert_eq!(code, 1, "a partial overlap still fails: {stdout}");
+    assert!(stderr.contains("partially overlap waiver #1"), "{stderr}");
+    assert!(stdout.contains("partially overlaps waiver #1"), "{stdout}");
+    // The waiver matched nothing, so it is stale too.
+    assert!(stderr.contains("stale waiver #1"), "{stderr}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stale_waivers_are_reported_and_can_fail_ci() {
+    let (root, old, new) = waiver_pair("waiver-stale");
+    let w = waiver_file(
+        &root,
+        "[[waiver]]\nlayer = \"top-copper\"\nbox = [24, 24, 26, 26]\nreason = \"date code\"\n\n\
+         [[waiver]]\nlayer = \"top-silk\"\nbox = [0, 0, 10, 10]\nreason = \"old logo\"\n",
+    );
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &[]);
+    assert_eq!(code, 0, "a stale waiver is a warning by default");
+    assert!(stderr.contains("stale waiver #2"), "{stderr}");
+    assert!(stdout.contains("1 stale waiver(s)"), "{stdout}");
+
+    let (code, json, _) = run_with_waivers(&old, &new, &w, &["--format", "json"]);
+    assert_eq!(code, 0);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["waivers"]["stale_waivers"], 1);
+    assert_eq!(v["waivers"]["waivers"][1]["stale"], true);
+    assert!(v["warnings"].to_string().contains("stale waiver #2"));
+
+    let (code, stdout, stderr) = run_with_waivers(&old, &new, &w, &["--fail-on-stale-waivers"]);
+    assert_eq!(
+        code, 1,
+        "--fail-on-stale-waivers turns a stale waiver into a failure"
+    );
+    assert!(stderr.contains("stale"), "{stderr}");
+    assert!(
+        stdout.contains(
+            "result: differences found, waived or within the CI gate, but 1 stale waiver(s) — gate FAIL, exit 1"
+        ),
+        "{stdout}"
+    );
+
+    // An unchanged pair with a waiver: everything is stale.
+    let (code, stdout, _) = run_with_waivers(&old, &old, &w, &["--fail-on-stale-waivers"]);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains(
+            "result: no differences, but 2 stale waiver(s) — gate FAIL, exit 1 (--fail-on-stale-waivers)"
+        ),
+        "the result line must agree with exit 1: {stdout}"
+    );
+    assert!(!stdout.contains("result: no differences\n"), "{stdout}");
+    let (code, _, _) = run_with_waivers(&old, &old, &w, &[]);
+    assert_eq!(code, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn bad_waiver_files_exit_2() {
+    let (root, old, new) = waiver_pair("waiver-bad");
+    for (body, needle) in [
+        ("[[waiver]]\nlayer = \"top-slik\"\nbox = [0, 0, 1, 1]\nreason = \"r\"\n", "top-slik"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [0, 0, 1]\nreason = \"r\"\n", "box"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [1, 0, 0, 1]\nreason = \"r\"\n", "waiver #1"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [0, 0, 1, 1]\nreason = \"r\"\nnote = \"x\"\n", "note"),
+        ("[[waiver]]\nlayer = \"top-copper\"\nbox = [0, 0, 1, 1]\n", "reason"),
+        ("not toml [", "waiver"),
+    ] {
+        let w = waiver_file(&root, body);
+        let (code, _, stderr) = run_with_waivers(&old, &new, &w, &[]);
+        assert_eq!(code, 2, "{body:?} must exit 2: {stderr}");
+        assert!(stderr.contains(needle), "{body:?}: {stderr}");
+    }
+    // A missing file is exit 2 as well.
+    let (code, _, _) = run_with_waivers(&old, &new, &root.join("nope.toml"), &[]);
+    assert_eq!(code, 2);
+    let _ = fs::remove_dir_all(root);
 }
