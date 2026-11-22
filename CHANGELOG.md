@@ -17,6 +17,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   `--max-commits` (default 200) fails loud instead of truncating (#424).
   A commit with files but no fab layers on either side (say a first commit
   holding only a README) is listed with pack `absent`, not an error.
+- Release assets and the ghcr container image get a signed build provenance
+  attestation, checked with `gh attestation verify <file> --repo Cimos/etchy`.
+  Each release also ships CycloneDX SBOMs for the CLI and the viewer (#348).
+- Linux ARM64 CLI archive (`etchy-cli-<tag>-linux-aarch64.tar.gz`, static musl)
+  for ARM CI runners and 64-bit Raspberry Pi OS. The GitHub Action installs it
+  on `linux/arm64` runners (#455).
 - Filename classification covers the default output names of Eagle, OrCAD
   Layout, Allegro and EasyEDA, with Protel pinned alongside Altium. Each scheme
   has a corpus list under `corpus/naming/`; ambiguous names stay `other` (#426).

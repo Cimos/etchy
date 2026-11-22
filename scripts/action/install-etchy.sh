@@ -36,6 +36,7 @@ fi
 
 case "${RUNNER_OS:-}/${RUNNER_ARCH:-}" in
   Linux/X64)   plat=linux-x86_64;   ext=tar.gz; exe=etchy ;;
+  Linux/ARM64) plat=linux-aarch64;  ext=tar.gz; exe=etchy ;;
   macOS/ARM64) plat=macos-aarch64;  ext=tar.gz; exe=etchy ;;
   macOS/X64)   plat=macos-x86_64;   ext=tar.gz; exe=etchy ;;
   Windows/X64) plat=windows-x86_64; ext=zip;    exe=etchy.exe ;;
@@ -63,7 +64,7 @@ for name in "etchy-cli-$tag-$plat.$ext" "etchy-$tag-$plat.$ext"; do
   expected="$(awk -v f="$name" '$2 == f || $2 == "*" f { print $1; exit }' SHA256SUMS)"
   if [ -n "$expected" ]; then asset="$name"; break; fi
 done
-[ -n "$asset" ] || fail "SHA256SUMS for $tag lists no CLI archive for $plat"
+[ -n "$asset" ] || fail "SHA256SUMS for $tag lists no CLI archive for $plat; pick a later version or set build-from-source: true"
 
 curl -fsSL --retry 3 -o "$asset" "$base/download/$tag/$asset" \
   || fail "could not download $asset"
