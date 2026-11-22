@@ -3,7 +3,8 @@ name: Release
 # On a version tag, build the `etchy` command-line tool and the `etchy-gui`
 # desktop viewer, then attach everything plus SHA256SUMS to the GitHub Release.
 #
-#   etchy-cli-<tag>-<os>.{tar.gz,zip}     command-line tool + README-CLI.txt
+#   etchy-cli-<tag>-<os>-<arch>.{tar.gz,zip}   command-line tool + README-CLI.txt
+#     (linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64)
 #   etchy-viewer-<tag>-<os>.{msi,dmg,deb,AppImage}   desktop viewer installers
 #   etchy-{cli,viewer}-<tag>.cdx.json     CycloneDX SBOMs (all targets)
 #
@@ -88,6 +89,54 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux
+          path: dist/*
+
+  # The ARM64 CLI is built natively on GitHub's ARM runner with the same
+  # musl-tools recipe as x86_64, so the binary can be smoke-run before it ships
+  # (#455). CLI only: the viewer is not packaged for Linux ARM64.
+  linux-arm64:
+    name: build linux arm64
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Install Rust (stable) + musl target
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y musl-tools file
+
+      - name: Build the CLI (static musl)
+        run: cargo build --locked --release -p etchy-cli --features pdf --target aarch64-unknown-linux-musl
+
+      - name: Check the binary is a static ARM64 executable that runs
+        run: |
+          set -euo pipefail
+          bin=target/aarch64-unknown-linux-musl/release/etchy
+          info="$(file -b "$bin")"
+          echo "$info"
+          case "$info" in *ARM\ aarch64*) ;; *) echo "::error::etchy is not an ARM64 binary"; exit 1 ;; esac
+          case "$info" in *static*) ;; *) echo "::error::etchy is not statically linked"; exit 1 ;; esac
+          "$bin" --version
+
+      - name: Package
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          dir="etchy-cli-${TAG}-linux-aarch64"
+          mkdir "$dir"
+          cp target/aarch64-unknown-linux-musl/release/etchy "$dir/"
+          cp packaging/README-CLI.txt README.md LICENSE-MIT LICENSE-APACHE "$dir/"
+          tar czf "dist/$dir.tar.gz" "$dir"
+          ls -l dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-arm64
           path: dist/*
 
   windows:
@@ -203,7 +252,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [linux, windows, macos]
+    needs: [linux, linux-arm64, windows, macos]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     # Only this job creates the Release and uploads assets, so scope the write
