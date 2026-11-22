@@ -3,8 +3,9 @@
 Loads the real deploy/demo/index.html + feedback-widget.js in headless Chromium,
 served by etchy-server.py on 127.0.0.1, with the WASM bundle stubbed out (no
 build needed). Checks Ctrl/Cmd+Enter submit, paste with removable thumbnails,
-drag-drop, the file picker, the POST payload, and that nothing is sent without
-a user action.
+drag-drop, the file picker, the POST payload, that nothing is sent without
+a user action, and that the server's screenshot/body caps are refused
+client-side with a visible message.
 
 Needs Playwright:  pip install -r deploy/requirements-browser-test.txt
                    python3 -m playwright install chromium
@@ -58,8 +59,14 @@ PNG_B = base64.b64encode(bytes.fromhex(
 DISPATCH = """([kind, files]) => {
   const dt = new DataTransfer();
   for (const f of files) {
-    const bin = atob(f.b64), u = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    let u;
+    if (f.size !== undefined) {
+      u = new Uint8Array(f.size);  // zero-filled; only the size matters
+    } else {
+      const bin = atob(f.b64);
+      u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    }
     dt.items.add(new File([u], f.name, { type: f.type }));
   }
   if (kind === 'paste') {
@@ -127,6 +134,21 @@ class FeedbackWidgetBrowserTests(unittest.TestCase):
     def attach(self, kind, *files):
         self.page.evaluate(DISPATCH, [kind, [
             {"b64": b64, "name": name, "type": typ} for b64, name, typ in files]])
+
+    def attach_sized(self, kind, *files):
+        """Attach zero-filled images of the given byte sizes."""
+        self.page.evaluate(DISPATCH, [kind, [
+            {"size": size, "name": name, "type": "image/png"} for size, name in files]])
+
+    def error(self, *needles):
+        self.page.wait_for_selector("#etfb-err.show")
+        msg = self.page.text_content("#etfb-err")
+        for needle in needles:
+            self.assertIn(needle, msg)
+        return msg
+
+    def no_error(self):
+        self.assertFalse(self.page.is_visible("#etfb-err"))
 
     def thumbs(self, n):
         self.page.wait_for_function(
@@ -269,6 +291,140 @@ class FeedbackWidgetBrowserTests(unittest.TestCase):
         self.page.click("#etfb-gh")
         self.assertEqual(self.page.evaluate("window.__opened"), 1)
         self.assertEqual(self.posts, [])
+
+    # --- client-side caps: the server's MAX_* limits (#250), refused visibly ---
+
+    def shots(self, n, prefix="s"):
+        return [(PNG_A, "%s%d.png" % (prefix, i), "image/png") for i in range(n)]
+
+    def test_paste_caps_at_max_shots(self):
+        cap = self.srv.MAX_SHOTS
+        self.open_panel()
+        self.no_error()
+        self.attach("paste", *self.shots(cap + 1))
+        self.assertEqual(len(self.thumbs(cap)), cap)
+        self.error("Max %d screenshots" % cap, "s%d.png" % cap)
+        self.assertIn("%d attached (max %d)" % (cap, cap), self.page.text_content("#etfb-shot"))
+        # Still full: another paste is refused too, and says so.
+        self.attach("paste", (PNG_B, "extra.png", "image/png"))
+        self.thumbs(cap)
+        self.error("Max %d screenshots" % cap, "extra.png")
+        # Removing one clears the message and makes room again.
+        self.page.click("#etfb-shots .etfb-thumb:nth-child(1) .rm")
+        self.thumbs(cap - 1)
+        self.no_error()
+        self.attach("paste", (PNG_B, "extra.png", "image/png"))
+        self.thumbs(cap)
+        self.no_error()
+        body = self.submit()
+        self.assertEqual(len(body["screenshots"]), cap)
+        self.assertEqual(len(self.records()[0]["screenshots"]), cap)
+
+    def test_drop_caps_at_max_shots(self):
+        cap = self.srv.MAX_SHOTS
+        self.open_panel()
+        self.attach("paste", *self.shots(cap - 1))
+        self.thumbs(cap - 1)
+        self.attach("drop", (PNG_B, "d1.png", "image/png"), (PNG_B, "d2.png", "image/png"))
+        self.assertEqual(self.thumbs(cap)[-1], "d1.png")
+        msg = self.error("Max %d screenshots" % cap, "d2.png")
+        self.assertNotIn("d1.png", msg)
+        self.assertEqual(len(self.submit()["screenshots"]), cap)
+
+    def test_file_picker_caps_at_max_shots(self):
+        cap = self.srv.MAX_SHOTS
+        self.open_panel()
+        self.page.set_input_files("#etfb-file", [
+            {"name": "p%d.png" % i, "mimeType": "image/png", "buffer": base64.b64decode(PNG_B)}
+            for i in range(cap + 2)])
+        self.thumbs(cap)
+        self.error("Max %d screenshots" % cap, "p%d.png" % cap, "p%d.png" % (cap + 1))
+        self.assertEqual(len(self.submit()["screenshots"]), cap)
+
+    def test_oversized_shot_is_refused_on_every_path(self):
+        over = self.srv.MAX_SHOT_BYTES + 1
+        self.open_panel()
+        for kind in ("paste", "drop"):
+            self.attach_sized(kind, (over, kind + "-big.png"))
+            self.error("Image too large", kind + "-big.png")
+            self.thumbs(0)
+        self.page.set_input_files("#etfb-file", [
+            {"name": "picked-big.png", "mimeType": "image/png", "buffer": bytes(over)}])
+        self.error("Image too large", "picked-big.png")
+        self.thumbs(0)
+        # Only the oversized one is refused; the rest of the batch is kept.
+        self.attach("drop", (PNG_A, "ok.png", "image/png"))
+        self.attach_sized("drop", (over, "big.png"))
+        self.thumbs(1)
+        self.error("Image too large", "big.png")
+        self.assertEqual(self.posts, [])
+
+    def test_shot_at_the_size_limit_is_sent(self):
+        self.open_panel()
+        self.attach_sized("drop", (self.srv.MAX_SHOT_BYTES, "edge.png"))
+        self.assertEqual(self.thumbs(1), ["edge.png"])
+        self.no_error()
+        body = self.submit()
+        self.assertEqual([s["name"] for s in body["screenshots"]], ["edge.png"])
+
+    def test_attachments_over_the_body_budget_are_refused(self):
+        # Two 6 MiB images base64-encode to 16 MiB: the second can never fit.
+        size = 6 * 1024 * 1024
+        self.open_panel()
+        self.attach_sized("drop", (size, "one.png"))
+        self.thumbs(1)
+        self.attach_sized("paste", (size, "two.png"))
+        self.error("total limit", "two.png")
+        self.assertEqual(self.thumbs(1), ["one.png"])
+        self.assertEqual([s["name"] for s in self.submit()["screenshots"]], ["one.png"])
+
+    def test_body_over_the_limit_is_not_sent(self):
+        self.open_panel()
+        self.attach_sized("drop", (7 * 1024 * 1024, "big.png"))
+        self.thumbs(1)
+        # Long text pushes the whole body past MAX_BODY.
+        self.page.evaluate("n => { document.getElementById('etfb-text').value = 'x'.repeat(n); }",
+                           self.srv.MAX_BODY // 2)
+        self.page.click("#etfb-send")
+        self.error("too large to send", "remove a screenshot")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(self.posts, [])
+        self.assertTrue(self.page.is_visible("#etfb-panel.open"))
+        self.thumbs(1)
+        # Shortening the text lets it through.
+        self.page.fill("#etfb-text", "short now")
+        body = self.submit()
+        self.assertEqual([s["name"] for s in body["screenshots"]], ["big.png"])
+
+    def test_attach_while_sending_is_refused_visibly(self):
+        held = []
+        self.page.route("**/feedback", lambda r: held.append(r))
+        self.open_panel()
+        self.attach("paste", (PNG_A, "a.png", "image/png"))
+        self.thumbs(1)
+        self.page.click("#etfb-send")
+        for _ in range(100):
+            if held:
+                break
+            self.page.wait_for_timeout(50)
+        self.assertEqual(len(held), 1)
+        # The draft is reset when the send completes, so a late paste is refused.
+        self.attach("paste", (PNG_B, "late.png", "image/png"))
+        self.error("Sending")
+        self.thumbs(1)
+        held[0].continue_()
+        self.page.wait_for_selector("#etfb-toast.show")
+        self.assertIn("Thanks", self.page.text_content("#etfb-toast"))
+        self.assertEqual(len(self.records()), 1)
+
+    def test_oversized_canvas_capture_is_skipped_with_notice(self):
+        self.page.evaluate("n => { HTMLCanvasElement.prototype.toDataURL ="
+                           " () => 'data:image/png;base64,' + 'A'.repeat(n); }",
+                           (self.srv.MAX_SHOT_BYTES + 3) // 3 * 4 + 4)
+        self.open_panel()
+        body = self.submit()
+        self.assertEqual(body["screenshots"], [])
+        self.assertIn("too large to attach", self.page.text_content("#etfb-toast"))
 
 
 if __name__ == "__main__":
