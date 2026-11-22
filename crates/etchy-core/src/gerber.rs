@@ -64,9 +64,7 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
 }
 
 /// Resolve geometry and retain the X2 object attributes active at each drawing.
-pub fn resolve_layer_with_labels(
-    bytes: &[u8],
-) -> Result<(PolygonSet, Option<LabeledObjects>)> {
+pub fn resolve_layer_with_labels(bytes: &[u8]) -> Result<(PolygonSet, Option<LabeledObjects>)> {
     resolve_layer_detailed(bytes).map(|r| (r.geometry, r.labels))
 }
 
