@@ -248,3 +248,61 @@ fn log_names_an_unparseable_commit() {
     assert_eq!(out.status.code(), Some(2));
     let _ = fs::remove_dir_all(repo);
 }
+
+#[test]
+fn log_lists_a_commit_without_fab_layers() {
+    // A first commit holding only a README, then the pack, walked with no
+    // subdir: the README commit has files but no fab layers on either side.
+    let repo = std::env::temp_dir().join(format!("etchy-log-{}-readme", std::process::id()));
+    let _ = fs::remove_dir_all(&repo);
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(repo.join("README.md"), "readme\n").unwrap();
+    commit(&repo, "readme only", "r1");
+    copy_pack(&demo("old"), &repo.join("fab"));
+    commit(&repo, "add the pack", "r2");
+
+    let out = etchy(&repo).args(["log", "HEAD"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("readme only"), "{text}");
+    assert!(
+        text.contains("no fab layers at this commit or its parent"),
+        "{text}"
+    );
+    assert!(text.contains("pack added"), "{text}");
+
+    let out = etchy(&repo)
+        .args(["log", "HEAD", "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v = json(&out);
+    let commits = v["commits"].as_array().unwrap();
+    let packs: Vec<_> = commits
+        .iter()
+        .map(|c| c["pack"].as_str().unwrap())
+        .collect();
+    assert_eq!(packs, ["added", "absent"]);
+    assert_eq!(commits[1]["subject"], "readme only");
+    assert_eq!(commits[1]["report"]["any_changes"], false);
+
+    let out = etchy(&repo)
+        .args(["log", "HEAD", "--format", "md"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let md = String::from_utf8(out.stdout).unwrap();
+    assert!(md.contains("| `readme only` | absent | 0 |"), "{md}");
+    assert!(md.contains("`absent`: no fab layers"), "{md}");
+
+    // Only the README commit: no fab layers anywhere is not a difference.
+    let out = etchy(&repo).args(["log", "r1"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let _ = fs::remove_dir_all(repo);
+}

@@ -48,13 +48,15 @@ struct LogCli {
     max_commits: u32,
 }
 
-/// Is the fab pack present on both sides of a commit, or did it appear/vanish?
+/// Is the fab pack present on both sides of a commit, did it appear/vanish, or
+/// is there no fab layer on either side (only non-fab files, e.g. a README)?
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum PackChange {
     Present,
     Added,
     Removed,
+    Absent,
 }
 
 impl PackChange {
@@ -63,6 +65,7 @@ impl PackChange {
             PackChange::Present => "present",
             PackChange::Added => "added",
             PackChange::Removed => "removed",
+            PackChange::Absent => "absent",
         }
     }
 }
@@ -198,17 +201,32 @@ fn diff_commit(
         None => None,
     };
     let new = load_side(sha, subdir, cache).context("loading the commit")?;
-    let pack = match (&old, &new) {
-        (None, Some(_)) => PackChange::Added,
-        (Some(_), None) => PackChange::Removed,
-        _ => PackChange::Present,
+    // Whether a side exists is decided by its fab layers, not its file listing:
+    // the loader skips non-fab files (a README), so files alone are no pack.
+    let has_layers =
+        |side: &Option<Rc<Loaded>>| side.as_ref().is_some_and(|b| !b.0.layers.is_empty());
+    let pack = match (has_layers(&old), has_layers(&new)) {
+        (false, true) => PackChange::Added,
+        (true, false) => PackChange::Removed,
+        (true, true) => PackChange::Present,
+        (false, false) => PackChange::Absent,
     };
     let empty = Rc::new(BoardBuilder::new().finish());
     let old = old.unwrap_or_else(|| empty.clone());
     let new = new.unwrap_or(empty);
 
-    let diff = compare_detailed(&old.0, &new.0).context("comparing with the first parent")?;
-    let report = report_with_load_warnings(&diff, old.2.clone(), new.2.clone(), old.1, new.1);
+    let report = if pack == PackChange::Absent {
+        // No layers on either side: nothing to compare (`compare_detailed`
+        // would fail with NoLayers). Keep any load warnings; not a difference.
+        let warnings = [("old", &old.2), ("new", &new.2)]
+            .into_iter()
+            .flat_map(|(rev, ws)| ws.iter().map(move |w| format!("{rev} {w}")))
+            .collect();
+        DiffReport::new(Vec::new(), warnings)
+    } else {
+        let diff = compare_detailed(&old.0, &new.0).context("comparing with the first parent")?;
+        report_with_load_warnings(&diff, old.2.clone(), new.2.clone(), old.1, new.1)
+    };
     Ok(CommitEntry {
         commit: sha.to_string(),
         parent,
@@ -219,6 +237,7 @@ fn diff_commit(
 }
 
 /// Load the fab pack at `rev`, or `None` when `subdir` holds no files there.
+/// A `Some` board may still have zero layers (only non-fab files).
 /// The tree listing (blob ids included) keys a one-entry cache.
 fn load_side(
     rev: &str,
@@ -258,8 +277,12 @@ fn format_summary(log: &LogReport) -> String {
     for e in &log.commits {
         let _ = writeln!(s, "{}  {}", short(&e.commit), e.subject);
         match e.pack {
-            PackChange::Added => s.push_str("  pack added (no files at the parent)\n"),
-            PackChange::Removed => s.push_str("  pack removed (no files at this commit)\n"),
+            PackChange::Added => s.push_str("  pack added (no fab layers at the parent)\n"),
+            PackChange::Removed => s.push_str("  pack removed (no fab layers at this commit)\n"),
+            PackChange::Absent => {
+                s.push_str("  no fab layers at this commit or its parent\n\n");
+                continue;
+            }
             PackChange::Present => {}
         }
         if !e.report.any_changes() {
@@ -350,6 +373,9 @@ fn format_markdown(log: &LogReport) -> String {
             t.added_regions,
             t.removed_regions
         );
+    }
+    if log.commits.iter().any(|e| e.pack == PackChange::Absent) {
+        s.push_str("\n`absent`: no fab layers at that commit or its parent.\n");
     }
     for e in log.commits.iter().filter(|e| e.report.any_changes()) {
         let _ = writeln!(s, "\n### `{}` — changed layers\n", short(&e.commit));
