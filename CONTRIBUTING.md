@@ -74,8 +74,8 @@ fails instead. To run it locally the same way, see
 ## Cutting a release
 
 A release *is* a pushed tag: `.github/workflows/release.yml` fires on `v*`, builds
-the CLI for four targets and the viewer installers with `--features pdf`, and
-attaches the assets, two CycloneDX SBOMs and `SHA256SUMS` to the GitHub Release,
+the CLI for five targets (Linux x86_64 and aarch64, macOS x86_64 and aarch64,
+Windows x86_64) and the viewer installers with `--features pdf`, and attaches the assets, two CycloneDX SBOMs and `SHA256SUMS` to the GitHub Release,
 with a signed build provenance attestation over all of them
 (`.github/workflows/container.yml` attests the ghcr image). A tag with a `-` in
 it (`v0.1.0-rc1`) publishes as a pre-release. Before pushing the tag:
