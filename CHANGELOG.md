@@ -17,6 +17,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   `--max-commits` (default 200) fails loud instead of truncating (#424).
   A commit with files but no fab layers on either side (say a first commit
   holding only a README) is listed with pack `absent`, not an error.
+- Waivers: `--waivers FILE` accepts known changes, such as a bumped date code,
+  so CI gates still pass. Each waiver is a per-layer box in board mm with a
+  required reason. Only regions wholly inside a box are waived; partial overlaps
+  stay unwaived and are named. The gates count only unwaived changes, while the
+  summary, JSON, Markdown and HTML outputs list every waived region with its
+  count, area and reason. Stale waivers are reported, and
+  `--fail-on-stale-waivers` makes them exit 1. A bad waiver file exits 2 (#425).
 - Release assets and the ghcr container image get a signed build provenance
   attestation, checked with `gh attestation verify <file> --repo Cimos/etchy`.
   Each release also ships CycloneDX SBOMs for the CLI and the viewer (#348).

@@ -218,7 +218,7 @@ pub struct RegionReport {
     pub labels: Option<RegionLabels>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RegionChange {
     Added,
