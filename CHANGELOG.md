@@ -74,6 +74,8 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - Gerber X2 layers use less memory. Labelled objects are stored once in a
   compact form, not cloned beside the diff geometry. Region labels are
   unchanged (#443).
+- A pick-and-place file with a line holding only a quoted field (such as
+  `""`) now fails with a parse error instead of crashing.
 
 ## [0.2.0] — 2026-10-26
 
