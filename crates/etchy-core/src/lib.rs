@@ -136,6 +136,51 @@ pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
     })
 }
 
+/// One revision on its own, with no second revision to compare (#466): every
+/// layer becomes an unchanged [`LayerView`] whose old and new sides both share
+/// the layer's geometry and whose added/removed sets are empty, in the board
+/// stack order [`compare_detailed`] uses. This is the shape the viewer draws for
+/// either side of a diff, built without running the boolean diff of a board
+/// against itself. A board with no layers fails like an empty compare.
+pub fn view_single(board: &Board) -> Result<BoardDiff> {
+    if board.layers.is_empty() {
+        return Err(EngineError::NoLayers);
+    }
+    let mut layers: Vec<&Layer> = board.layers.iter().collect();
+    layers.sort_by_key(|l| l.kind.sort_key());
+    let change = LayerChange::default();
+    let (reports, views): (Vec<LayerReport>, Vec<LayerView>) = layers
+        .into_iter()
+        .map(|l| {
+            let label = Some(l.label.clone());
+            let mut report = LayerReport::new(
+                l.kind,
+                label.clone(),
+                label.clone(),
+                LayerStatus::Unchanged,
+                &change,
+            );
+            report.labels_available = l.x2_objects.is_some();
+            let view = LayerView {
+                kind: l.kind,
+                label_old: label.clone(),
+                label_new: label,
+                status: LayerStatus::Unchanged,
+                old: Arc::clone(&l.geometry),
+                new: Arc::clone(&l.geometry),
+                added: PolygonSet::default(),
+                removed: PolygonSet::default(),
+                change,
+            };
+            (report, view)
+        })
+        .unzip();
+    Ok(BoardDiff {
+        report: DiffReport::new(reports, Vec::new()),
+        layers: views,
+    })
+}
+
 /// Diff a single layer pairing into its (report, view). Pure and independent across
 /// layers, so `compare_detailed` can run it in parallel (perf) without affecting
 /// output order or determinism.
@@ -241,8 +286,8 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     report.set_drill_table(drill_table);
     // Index each side's labelled objects once per layer, not once per region:
     // a scan of every object for every region is quadratic on big changes.
-    let added_index = added_x2.as_deref().map(|o| LabelIndex::new(o));
-    let removed_index = removed_x2.as_deref().map(|o| LabelIndex::new(o));
+    let added_index = added_x2.as_deref().map(LabelIndex::new);
+    let removed_index = removed_x2.as_deref().map(LabelIndex::new);
     report.regions = added
         .iter()
         .map(|r| region_report(r, report::RegionChange::Added, added_index.as_ref()))
@@ -282,7 +327,7 @@ const LABEL_GRID_LARGE: usize = 64;
 /// box. It only narrows the candidates: every hit is still confirmed by the
 /// bounding-box test and the exact boolean overlap, so labels match a full scan.
 struct LabelIndex<'a> {
-    objects: &'a [gerber::LabeledContour],
+    objects: &'a gerber::LabeledObjects,
     /// `[min_x, min_y, max_x, max_y]` of each object's outline (first ring).
     boxes: Vec<[i64; 4]>,
     origin: [i64; 2],
@@ -294,16 +339,13 @@ struct LabelIndex<'a> {
 }
 
 impl<'a> LabelIndex<'a> {
-    fn new(objects: &'a [gerber::LabeledContour]) -> Self {
+    fn new(objects: &'a gerber::LabeledObjects) -> Self {
         // The outline bounds the object; holes lie inside it.
         let boxes: Vec<[i64; 4]> = objects
             .iter()
             .map(|o| {
-                let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
-                for p in o.shape.first().into_iter().flatten() {
-                    b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
-                }
-                b
+                o.outline_bbox()
+                    .unwrap_or([i64::MAX, i64::MAX, i64::MIN, i64::MIN])
             })
             .collect();
         let mut ext = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
@@ -397,8 +439,8 @@ fn region_report(
     let mut pins = BTreeSet::new();
     let mut nets = BTreeSet::new();
     for i in index.candidates(&region.bbox_nm) {
-        let object = &index.objects[i as usize];
-        if !boolean::overlaps(region.shape, &object.shape) {
+        let object = index.objects.object(i as usize);
+        if !boolean::overlaps(region.shape, &object.shape()) {
             continue;
         }
         if let Some(name) = &object.labels.refdes {
@@ -530,15 +572,15 @@ mod tests {
             centroid_nm: [500_000, 500_000],
             shape: &shape,
         };
-        let objects: Vec<_> = (0..25)
-            .map(|i| gerber::LabeledContour {
-                shape: vec![contour.clone()],
-                labels: gerber::ObjectLabels {
+        let objects = gerber::LabeledObjects::from_objects((0..25).map(|i| {
+            (
+                vec![contour.clone()],
+                gerber::ObjectLabels {
                     refdes: Some(format!("U{i}")),
                     ..Default::default()
                 },
-            })
-            .collect();
+            )
+        }));
         let index = LabelIndex::new(&objects);
         let report = region_report(&region, report::RegionChange::Added, Some(&index));
         let labels = report.labels.unwrap();
@@ -559,17 +601,13 @@ mod tests {
                 Pt::new(x, y + s),
             ]
         };
-        let mut objects: Vec<_> = (0..30)
-            .flat_map(|i| (0..30).map(move |j| (i, j)))
-            .map(|(i, j)| gerber::LabeledContour {
-                shape: vec![sq(i * 2_000_000, j * 2_000_000, 1_000_000)],
-                labels: gerber::ObjectLabels::default(),
-            })
-            .collect();
-        objects.push(gerber::LabeledContour {
-            shape: vec![sq(-5_000_000, -5_000_000, 70_000_000)],
-            labels: gerber::ObjectLabels::default(),
-        });
+        let objects = gerber::LabeledObjects::from_objects(
+            (0..30)
+                .flat_map(|i| (0..30).map(move |j| (i, j)))
+                .map(|(i, j)| sq(i * 2_000_000, j * 2_000_000, 1_000_000))
+                .chain([sq(-5_000_000, -5_000_000, 70_000_000)])
+                .map(|ring| (vec![ring], gerber::ObjectLabels::default())),
+        );
         let index = LabelIndex::new(&objects);
         assert_eq!(index.large, [900]);
         for bb in [
@@ -1036,5 +1074,50 @@ D10*\nX196850Y196850D03*\nD11*\nX1968504Y1968504D03*\nX787402Y787402D03*\nM02*\n
         // Same allocation, not a copy: the view points at the board's geometry.
         assert!(Arc::ptr_eq(&diff.layers[0].old, &ga));
         assert!(Arc::ptr_eq(&diff.layers[0].new, &gb));
+    }
+
+    #[test]
+    fn view_single_shows_every_layer_unchanged_in_stack_order() {
+        // #466: one revision on its own is a view with nothing added or removed,
+        // in the same stack order a compare would use, sharing the geometry.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let g = Arc::new(
+            polygonize_gerber(format!("{hdr}X5000000Y5000000D03*\nM02*\n").as_bytes()).unwrap(),
+        );
+        let layer = |kind, label: &str| Layer {
+            kind,
+            label: label.into(),
+            geometry: Arc::clone(&g),
+            negative: false,
+            x2_objects: None,
+            drill_tools: None,
+        };
+        let board = Board {
+            layers: vec![
+                layer(LayerKind::BottomCopper, "B_Cu"),
+                layer(LayerKind::TopCopper, "F_Cu"),
+            ],
+        };
+        let single = view_single(&board).unwrap();
+        let paired = compare_detailed(&board, &board).unwrap();
+        let kinds = |d: &BoardDiff| d.layers.iter().map(|l| l.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&single), kinds(&paired));
+        assert!(!single.report.any_changes());
+        assert_eq!(single.report.totals.layers_total, 2);
+        for l in &single.layers {
+            assert_eq!(l.status, LayerStatus::Unchanged);
+            assert!(l.added.is_empty() && l.removed.is_empty());
+            assert!(Arc::ptr_eq(&l.old, &g) && Arc::ptr_eq(&l.new, &g));
+            assert_eq!(l.label_old, l.label_new);
+        }
+        assert!(single.report.layers.iter().all(|r| r.regions.is_empty()));
+    }
+
+    #[test]
+    fn view_single_of_an_empty_board_errors() {
+        assert!(matches!(
+            view_single(&Board::default()),
+            Err(EngineError::NoLayers)
+        ));
     }
 }
