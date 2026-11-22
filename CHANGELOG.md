@@ -84,6 +84,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   instead of crashing the parser. Comments and attribute values may still
   hold UTF-8. Lines inside a multi-line `%` block are read as part of that
   block, not as commands of their own.
+- A Gerber file attribute (`%TF`, or a `G04 #@! TF` comment) with too few
+  values no longer crashes the parser. File attributes and comments carry no
+  geometry and are skipped when resolving a layer.
 
 ## [0.2.0] — 2026-10-26
 

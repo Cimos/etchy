@@ -517,7 +517,11 @@ fn normalize(bytes: &[u8]) -> Result<String> {
                 let block = joined.trim();
                 check_block(block)?;
                 // `%LN` only names the layer; it carries no geometry (#316).
-                if !block.starts_with("%LN") || !block.ends_with("*%") {
+                // Nor do `%TF` file attributes, which the parser can panic on
+                // (a short argument list is indexed unchecked); file metadata
+                // is read from the raw bytes elsewhere.
+                let metadata = block.starts_with("%LN") || block.starts_with("%TF");
+                if !metadata || !block.ends_with("*%") {
                     if identity_repeat(block) {
                         out.push_str("%SRX1Y1I0J0*%");
                     } else {
@@ -638,9 +642,14 @@ fn emit_command(tok: &str, out: &mut String) -> Result<()> {
         }
         _ => {}
     }
-    // Commands are ASCII; only a comment may carry other text. The parser
-    // slices commands by byte offset and panics inside a multi-byte character.
-    if !tok.is_ascii() && !tok.starts_with("G04") {
+    // Comments carry no geometry. The parser reads `G04 #@! TF…` comments as
+    // file attributes, with the same unchecked indexing as `%TF`, so drop them.
+    if tok.starts_with("G04") {
+        return Ok(());
+    }
+    // Commands are ASCII. The parser slices them by byte offset and panics
+    // inside a multi-byte character.
+    if !tok.is_ascii() {
         return Err(EngineError::Parse(format!(
             "non-ASCII character in command: {}",
             excerpt(tok)
@@ -1867,6 +1876,22 @@ mod tests {
         // A multi-line macro still reads as one block.
         let am = "%FSLAX46Y46*%\n%MOMM*%\n%AMBOX*\n21,1,1.0,1.0,\n0,0,0*\n%\n%ADD10BOX*%\nD10*\nX0Y0D03*\nM02*\n";
         assert!((area_mm2(am) - 1.0).abs() < 1e-6, "{}", area_mm2(am));
+    }
+
+    /// Fuzz find: a `%TF` attribute with too few arguments (for example
+    /// `.GenerationSoftware` with one) was indexed past its end by the parser.
+    /// File attributes carry no geometry, so these layers resolve.
+    #[test]
+    fn short_file_attributes_do_not_panic() {
+        for attr in [
+            "%TF.GenerationSoftware*%",
+            "%TF.GenerationSoftware,KiCadD*%",
+            "%TF.FileFunction,Soldermask*%",
+            "G04 #@! TF.GenerationSoftware*",
+        ] {
+            let g = format!("{attr}\n{HDR}X0Y0D03*\nM02*\n");
+            assert!(resolve_layer(g.as_bytes()).is_ok(), "{attr}");
+        }
     }
 
     /// A fuzz input must give a typed error, and not by way of the catch_unwind
