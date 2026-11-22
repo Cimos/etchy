@@ -89,6 +89,8 @@ struct Cli {
 
     /// CI gate: fail (exit 1) only when the changed area on the gated layers
     /// exceeds this many mm². Omitted ⇒ any change on the gated layers fails.
+    /// A drill hole or slot count change on a gated layer (the drill table)
+    /// fails whatever the thresholds: it has no area to measure.
     #[arg(long, value_name = "MM2")]
     fail_on_area: Option<f64>,
     /// CI gate: fail (exit 1) only when the changed region count on the gated
@@ -301,7 +303,17 @@ impl Gate {
             })
     }
 
-    /// Is the (unwaived) change on the gated layers over the gate?
+    /// Gated layers whose drill table counts changed (#456), by display name.
+    fn drill_count_layers(&self, report: &DiffReport) -> Vec<String> {
+        report
+            .layers
+            .iter()
+            .filter(|l| l.drill_counts_changed && self.filter.includes(l.kind))
+            .map(|l| l.name())
+            .collect()
+    }
+
+    /// Is the (unwaived) geometry change on the gated layers over the gate?
     fn over(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> bool {
         let (area, regions) = self.totals(report, waived);
         match (self.fail_on_area, self.fail_on_regions) {
@@ -316,9 +328,14 @@ impl Gate {
         self.fail_on_stale_waivers && waived.is_some_and(|w| w.stale_waivers > 0)
     }
 
-    /// Should this diff fail the gate (exit 1)?
+    /// Should this diff fail the gate (exit 1)? A hole-count change on a gated
+    /// layer always fails (#456), whatever the thresholds and the waivers: the
+    /// thresholds measure geometry, a hole drilled twice has none to measure,
+    /// and waivers cover geometry boxes, not hole counts.
     fn fails(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> bool {
-        self.over(report, waived) || self.stale_fails(waived)
+        !self.drill_count_layers(report).is_empty()
+            || self.over(report, waived)
+            || self.stale_fails(waived)
     }
 
     /// True when the gate is non-default (a threshold, a layer scope or
@@ -334,8 +351,12 @@ impl Gate {
         if self.filter.all {
             "all layers".to_string()
         } else {
-            self.filter.groups.join(",")
+            self.tokens_desc()
         }
+    }
+
+    fn tokens_desc(&self) -> String {
+        self.filter.groups.join(",")
     }
 
     /// Resolve this gate against a report into the verdict that drives both the
@@ -345,11 +366,14 @@ impl Gate {
         GateVerdict {
             configured: self.configured(),
             passed: !self.fails(report, waived),
-            stale_only: self.stale_fails(waived) && !self.over(report, waived),
+            stale_only: self.stale_fails(waived)
+                && !self.over(report, waived)
+                && self.drill_count_layers(report).is_empty(),
             differs: report.any_changes(),
             scope: self.scope(),
             changed_area_mm2: area,
             changed_regions: regions,
+            drill_count_layers: self.drill_count_layers(report),
             fail_on_area: self.fail_on_area,
             fail_on_regions: self.fail_on_regions,
             waivers: waived.map(|w| GateWaivers {
@@ -384,10 +408,11 @@ struct GateVerdict {
     /// when geometry differs (the change was within the gate, or waived).
     passed: bool,
     /// True when the gate fails only because of `--fail-on-stale-waivers`: the
-    /// unwaived change alone is within the gate.
+    /// unwaived change alone is within the gate and no hole counts changed.
     #[serde(skip)]
     stale_only: bool,
-    /// Whether any geometry changed at all, regardless of the gate.
+    /// Whether anything changed at all (geometry or drill counts), regardless
+    /// of the gate.
     #[serde(skip)]
     differs: bool,
     /// Human description of the gated layer scope (`all layers`, `copper`, …).
@@ -396,6 +421,10 @@ struct GateVerdict {
     /// when waivers are in use).
     changed_area_mm2: f64,
     changed_regions: u32,
+    /// Gated layers whose drill table hole or slot counts changed (#456).
+    /// Any entry fails the gate, whatever the thresholds. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    drill_count_layers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fail_on_area: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -420,6 +449,12 @@ impl GateVerdict {
             self.changed_area_mm2,
             self.changed_regions
         );
+        if !self.drill_count_layers.is_empty() {
+            s.push_str(&format!(
+                "; hole counts changed on {}",
+                self.drill_count_layers.join(", ")
+            ));
+        }
         if let Some(w) = &self.waivers {
             s.push_str(&format!(
                 "; waived {} regions, {:.*} mm²; {} stale waiver(s)",
@@ -472,8 +507,13 @@ impl GateVerdict {
                 },
                 self.measured(5)
             )
-        } else {
+        } else if self.drill_count_layers.is_empty() {
             "result: differences found".to_string()
+        } else {
+            format!(
+                "result: differences found — hole counts changed on {} (drill table)",
+                self.drill_count_layers.join(", ")
+            )
         }
     }
 
@@ -1020,6 +1060,12 @@ fn format_summary(
             text
         };
         let name = l.name();
+        if l.drill_counts_only() {
+            let _ = writeln!(
+                s,
+                "{name}: changed in the drill table only (hole or slot counts); geometry identical"
+            );
+        }
         for r in table
             .rows
             .iter()
@@ -1109,6 +1155,8 @@ mod tests {
             regions: Vec::new(),
             labels_available: false,
             drill_table: None,
+            drill_counts_changed: false,
+            geometry_changed: area_mm2 > 0.0 || regions > 0,
         }
     }
 
@@ -1401,6 +1449,95 @@ mod tests {
     fn default_gate_fails_on_any_change() {
         // No thresholds, all layers → any change fails (the 0/1 contract).
         assert!(gate(None, None, "all").fails(&report(), None));
+    }
+
+    /// A drill layer with identical geometry whose hole counts changed (#456).
+    fn drill_counts_only_report() -> DiffReport {
+        let mut drill = layer("drill-pth", 0.0, 0);
+        drill.status = LayerStatus::Changed;
+        drill.drill_counts_changed = true;
+        DiffReport::new(vec![drill, layer("top-silk", 0.02, 1)], Vec::new())
+    }
+
+    #[test]
+    fn hole_count_change_fails_every_gate_that_includes_the_layer() {
+        let r = drill_counts_only_report();
+        assert!(gate(None, None, "all").fails(&r, None));
+        assert!(gate(None, None, "drill").fails(&r, None));
+        assert!(gate(None, None, "pth").fails(&r, None));
+        // Thresholds measure geometry; a count change has none and still fails.
+        assert!(gate(Some(100.0), None, "all").fails(&r, None));
+        assert!(gate(None, Some(100), "drill").fails(&r, None));
+        // Out of scope: the gate ignores it like any other ungated layer.
+        assert!(!gate(None, None, "copper").fails(&r, None));
+        assert!(!gate(None, None, "npth").fails(&r, None));
+        assert!(!gate(Some(1.0), None, "all").fails(
+            &DiffReport::new(vec![layer("top-silk", 0.02, 1)], Vec::new()),
+            None
+        ));
+    }
+
+    #[test]
+    fn hole_count_change_is_named_in_every_output() {
+        let r = drill_counts_only_report();
+        let v = gate(None, None, "drill").verdict(&r, None);
+        assert!(!v.passed);
+        assert_eq!(v.drill_count_layers, ["drill-pth"]);
+        let summary = format_summary(&r, &v, None);
+        assert!(
+            summary.ends_with(
+                "result: differences found — hole counts changed on drill-pth (drill table)"
+            ),
+            "{summary}"
+        );
+        let json = board_json(&r, &v, None);
+        assert!(json.contains("\"drill_count_layers\""), "{json}");
+        assert!(json.contains("\"drill_counts_changed\": true"), "{json}");
+        let mut md = String::new();
+        v.append_markdown_note(&mut md);
+        assert!(md.contains("hole counts changed on drill-pth"), "{md}");
+        assert!(v.describe().ends_with("; hole counts changed on drill-pth"));
+        // No count change: the JSON gate object stays as before.
+        let plain = gate(None, None, "all").verdict(&report(), None);
+        assert!(!board_json(&report(), &plain, None).contains("drill_count_layers"));
+    }
+
+    /// A waiver report with nothing waived and `stale` stale waivers.
+    fn empty_waiver_report(stale: u32) -> WaiverReport {
+        WaiverReport {
+            waived_regions: 0,
+            waived_area_mm2: 0.0,
+            waived_area_nm2: "0".to_string(),
+            stale_waivers: stale,
+            partial_overlaps: Vec::new(),
+            waivers: Vec::new(),
+            layers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hole_count_change_fails_even_with_waivers() {
+        // Waivers cover geometry boxes, not hole counts: a count change on a
+        // gated layer still fails, and is not reported as a stale-waiver failure.
+        let r = drill_counts_only_report();
+        let w = empty_waiver_report(1);
+        let mut g = gate(None, None, "drill");
+        g.waivers = Some(Vec::new());
+        assert!(g.fails(&r, Some(&w)));
+        g.fail_on_stale_waivers = true;
+        let v = g.verdict(&r, Some(&w));
+        assert!(!v.passed);
+        assert!(
+            !v.stale_only,
+            "drill counts fail too, not stale waivers only"
+        );
+        let summary = format_summary(&r, &v, Some(&w));
+        assert!(
+            summary.ends_with(
+                "result: differences found — hole counts changed on drill-pth (drill table)"
+            ),
+            "{summary}"
+        );
     }
 
     #[test]
