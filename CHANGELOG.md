@@ -76,6 +76,8 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   unchanged (#443).
 - A pick-and-place file with a line holding only a quoted field (such as
   `""`) now fails with a parse error instead of crashing.
+- A Gerber `%FS` format with more than six decimal digits now fails with a
+  parse error instead of crashing the parser.
 
 ## [0.2.0] — 2026-10-26
 

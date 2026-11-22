@@ -511,6 +511,7 @@ fn normalize(bytes: &[u8]) -> Result<String> {
             buf.push(ch);
             if ch == '%' {
                 let block = buf.trim();
+                check_block(block)?;
                 // `%LN` only names the layer; it carries no geometry (#316).
                 if !block.starts_with("%LN") || !block.ends_with("*%") {
                     if identity_repeat(block) {
@@ -551,6 +552,28 @@ fn normalize(bytes: &[u8]) -> Result<String> {
     }
     check_terminated(&buf, "at end of file")?;
     Ok(out)
+}
+
+/// Reject an extended block the parser cannot read safely. The parser trusts
+/// some fields and panics or overflows on bad values, so they are checked here
+/// first and reported as a parse error.
+fn check_block(block: &str) -> Result<()> {
+    if let Some(spec) = block.strip_prefix("%FS") {
+        // The parser scales coordinates by 10^(6 - decimals): more than six
+        // decimal digits underflows that.
+        for axis in ['X', 'Y'] {
+            let digits = spec.split_once(axis).map(|(_, rest)| rest.chars().nth(1));
+            if let Some(Some(d)) = digits {
+                if d.to_digit(10).is_some_and(|d| d > 6) {
+                    return Err(EngineError::Parse(format!(
+                        "%FS declares {d} decimal digits for {axis}; at most 6 are allowed: {}",
+                        excerpt(block)
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// True for a `%SR` that repeats once with zero step, in any spelling that
@@ -1736,6 +1759,27 @@ mod tests {
 
     fn area_mm2(g: &str) -> f64 {
         resolve_layer(g.as_bytes()).unwrap().area_mm2()
+    }
+
+    /// Fuzz find: `%FSLAX57…` (7 decimals) underflowed the parser's scale
+    /// factor. It must be a parse error.
+    #[test]
+    fn format_with_more_than_six_decimals_is_a_parse_error() {
+        for fs in ["%FSLAX57Y46*%", "%FSLAX46Y47*%"] {
+            let g = format!("{fs}\n%MOMM*%\n%ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n");
+            let err = resolve_layer(g.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("decimal digits"), "{err}");
+        }
+        let fuzz = b"%FSLAX57Y46*%\n%MOMM*%\n%AMRoundRect*\n0 Recta,$9,0*\n\
+                     20,1,$1+$1,$8,$9,$2,$X-0.30X01140*%\nD10*\nX0Y0D03*\nM02*\n";
+        assert_parse_error_no_panic(fuzz);
+    }
+
+    /// A fuzz input must give a typed error, and not by way of the catch_unwind
+    /// net around the parser.
+    fn assert_parse_error_no_panic(bytes: &[u8]) {
+        let err = resolve_layer(bytes).unwrap_err().to_string();
+        assert!(!err.contains("panicked"), "parser panicked: {err}");
     }
 
     fn flash_table(g: &str) -> FlashTable {
