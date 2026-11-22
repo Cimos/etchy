@@ -9,6 +9,9 @@
 // Release builds on Windows open no console window behind the viewer.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// Web-only at runtime (#453); the pure batching logic stays unit-tested on native.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod dropbatch;
 mod exportio;
 #[cfg(feature = "gpu-transform")]
 mod gpu;
@@ -356,7 +359,7 @@ fn main() {
     wasm_bindgen_futures::spawn_local(async move {
         let canvas = web_sys::window()
             .and_then(|w| w.document())
-            .and_then(|d| d.get_element_by_id("the_canvas_id"))
+            .and_then(|d| d.get_element_by_id(WEB_CANVAS_ID))
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("canvas element #the_canvas_id");
         // The bundled demo board is the public Mad_RP2040 (v0.0.0 -> v0.0.1), from
@@ -1351,6 +1354,15 @@ const WEB_FOLDER_DROP_ERROR: &str =
 static WEB_FOLDER_DROPPED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Set by the web drop listener to the number of files a drop handed over;
+/// drained once per frame into the drop batch (#453).
+#[cfg(target_arch = "wasm32")]
+static WEB_DROP_FILE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The page's canvas that eframe runs in (and listens for drops on).
+#[cfg(target_arch = "wasm32")]
+const WEB_CANVAS_ID: &str = "the_canvas_id";
+
 /// The welcome screen's drag-and-drop hint. The web copy never offers a folder,
 /// since a browser can't deliver one (#331).
 fn welcome_drop_hint(web: bool) -> &'static str {
@@ -1378,6 +1390,9 @@ fn open_menu_drop_hint(web: bool) -> &'static str {
 /// eframe's own, and refuses any drop holding a folder: it stops the event so
 /// no partial set of loose files loads either, and flags the error for the
 /// next frame.
+///
+/// For any other drop it records how many files the browser handed over, so
+/// the frame loop can wait until eframe has read them all (#453).
 #[cfg(target_arch = "wasm32")]
 fn install_web_folder_drop_guard(ctx: egui::Context) {
     use eframe::wasm_bindgen::closure::Closure;
@@ -1386,9 +1401,10 @@ fn install_web_folder_drop_guard(ctx: egui::Context) {
         return;
     };
     let on_drop = Closure::<dyn FnMut(web_sys::DragEvent)>::new(move |ev: web_sys::DragEvent| {
-        let Some(items) = ev.data_transfer().map(|dt| dt.items()) else {
+        let Some(dt) = ev.data_transfer() else {
             return;
         };
+        let items = dt.items();
         let has_folder = (0..items.length()).any(|i| {
             items
                 .get(i)
@@ -1400,6 +1416,19 @@ fn install_web_folder_drop_guard(ctx: egui::Context) {
             ev.prevent_default();
             ev.stop_propagation();
             WEB_FOLDER_DROPPED.store(true, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+            return;
+        }
+        // eframe reads drops only on its canvas; a drop elsewhere loads
+        // nothing, so counting it would leave the batch waiting for files
+        // that never come.
+        let on_canvas = ev
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|el| el.id() == WEB_CANVAS_ID);
+        let count = dt.files().map_or(0, |f| f.length() as usize);
+        if on_canvas && count > 0 {
+            WEB_DROP_FILE_COUNT.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
             ctx.request_repaint();
         }
     });
@@ -1644,6 +1673,10 @@ struct ViewApp {
     file_tx: std::sync::mpsc::Sender<FilePick>,
     #[cfg(target_arch = "wasm32")]
     file_rx: std::sync::mpsc::Receiver<FilePick>,
+    /// Web only: a drop's files arrive over several frames; they gather here
+    /// until the whole drop is in (#453).
+    #[cfg(target_arch = "wasm32")]
+    drop_batch: dropbatch::DropBatch<egui::DroppedFile>,
 
     /// GPU base-transform (#106): the glow resources, present only when the
     /// `gpu-transform` feature is built and a GL context is available.
@@ -1767,6 +1800,8 @@ impl ViewApp {
             file_tx: file_tx_init,
             #[cfg(target_arch = "wasm32")]
             file_rx: file_rx_init,
+            #[cfg(target_arch = "wasm32")]
+            drop_batch: dropbatch::DropBatch::default(),
             // The feature is opt-in (off in normal builds), so defaulting the
             // runtime toggle on inside a feature build is safe and lets the GPU
             // path be exercised; the checkbox still turns it off.
@@ -2903,19 +2938,51 @@ impl ViewApp {
 
     /// Handle files dropped onto the window (both surfaces). Fills the first empty
     /// side (A then B); if both are already loaded, a drop replaces A.
+    #[cfg(not(target_arch = "wasm32"))]
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
             return;
         }
-        let side = if self.src_old.is_none() {
+        let side = self.drop_side();
+        self.load_dropped(side, dropped);
+    }
+
+    /// Web: eframe reads each dropped file in its own task, so one drop's files
+    /// can arrive over several frames (#453). Gather them until the whole drop
+    /// is in, then load them as one set.
+    #[cfg(target_arch = "wasm32")]
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        use dropbatch::DropPoll;
+        let now = ctx.input(|i| i.time);
+        let count = WEB_DROP_FILE_COUNT.swap(0, std::sync::atomic::Ordering::Relaxed);
+        self.drop_batch.on_drop(count, now);
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        self.drop_batch.on_files(dropped, now);
+        match self.drop_batch.poll(now) {
+            DropPoll::Idle => {}
+            DropPoll::Waiting => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            DropPoll::Ready(files) => {
+                let side = self.drop_side();
+                self.load_dropped(side, files);
+            }
+            DropPoll::Incomplete { got, expected } => {
+                self.load_error = Some(dropbatch::incomplete_message(got, expected));
+            }
+        }
+    }
+
+    /// The side a drop loads into: the first empty one (A then B), else A.
+    fn drop_side(&self) -> RevSide {
+        if self.src_old.is_none() {
             RevSide::Old
         } else if self.src_new.is_none() {
             RevSide::New
         } else {
             RevSide::Old
-        };
-        self.load_dropped(side, dropped);
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
