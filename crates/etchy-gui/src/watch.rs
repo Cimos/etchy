@@ -144,13 +144,18 @@ pub struct FileWatcher {
 }
 
 impl FileWatcher {
-    /// Start watching `roots`. The baseline is read here, on the caller's
-    /// thread, so a change made right after this call is never missed.
-    /// `wake` runs on the watcher thread whenever a reload becomes due.
-    pub fn spawn(roots: Vec<PathBuf>, wake: impl Fn() + Send + 'static) -> Self {
+    /// Start watching `roots` against `baseline`, the state the shown data
+    /// was read from. The loader takes that snapshot just before it reads the
+    /// files, so a re-export landing between the read and this call still
+    /// differs from the baseline and triggers a reload. `wake` runs on the
+    /// watcher thread whenever a reload becomes due.
+    pub fn spawn(
+        roots: Vec<PathBuf>,
+        baseline: Snapshot,
+        wake: impl Fn() + Send + 'static,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx): (Sender<()>, Receiver<()>) = std::sync::mpsc::channel();
-        let baseline = take(&roots);
         let thread_roots = roots.clone();
         let thread_stop = Arc::clone(&stop);
         let spawned = std::thread::Builder::new()
@@ -321,7 +326,8 @@ mod tests {
         std::fs::write(&f, b"one").unwrap();
         let woke = Arc::new(AtomicBool::new(false));
         let w = Arc::clone(&woke);
-        let watcher = FileWatcher::spawn(vec![dir.clone()], move || {
+        let roots = vec![dir.clone()];
+        let watcher = FileWatcher::spawn(roots.clone(), take(&roots), move || {
             w.store(true, Ordering::Relaxed);
         });
         assert_eq!(watcher.roots(), std::slice::from_ref(&dir));
@@ -338,6 +344,31 @@ mod tests {
         assert!(fired, "the watcher should report the rewrite");
         assert!(woke.load(Ordering::Relaxed), "and wake the UI");
         assert!(!watcher.take_change(), "one change, one signal");
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A change made after the load read the files but before the watcher
+    /// started is still reported, because the baseline is the load-time one.
+    #[test]
+    fn watcher_sees_a_change_made_before_it_started() {
+        let dir = scratch("early");
+        let f = dir.join("top.gtl");
+        std::fs::write(&f, b"one").unwrap();
+        let roots = vec![dir.clone()];
+        let at_load = take(&roots);
+        std::fs::write(&f, b"a longer body").unwrap();
+        let watcher = FileWatcher::spawn(roots, at_load, || {});
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut fired = false;
+        while Instant::now() < deadline {
+            if watcher.take_change() {
+                fired = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(fired, "the early rewrite must not be missed");
         drop(watcher);
         let _ = std::fs::remove_dir_all(&dir);
     }

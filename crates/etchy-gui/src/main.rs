@@ -152,23 +152,42 @@ mod native {
     /// What the command line loaded before the window opens.
     enum Seed {
         /// Two revisions and their computed diff, at the PDF DPI used, plus
-        /// the paths they came from (watched for reloads, #423).
-        Pair(LoadedSource, LoadedSource, ComputedDiff, f32, [PathBuf; 2]),
-        /// One Gerber set on its own (#466), its single-set view and its path.
-        Single(LoadedSource, BoardDiff, PathBuf),
+        /// where they came from (watched for reloads, #423).
+        Pair(
+            LoadedSource,
+            LoadedSource,
+            ComputedDiff,
+            f32,
+            [SeedOrigin; 2],
+        ),
+        /// One Gerber set on its own (#466), its single-set view and origin.
+        Single(LoadedSource, BoardDiff, SeedOrigin),
+    }
+
+    /// A CLI path and the state of its files just before the load read
+    /// them (#423). The watcher starts from that state, so a re-export
+    /// landing during a slow startup load still triggers a reload.
+    type SeedOrigin = (SourceOrigin, watch::Snapshot);
+
+    fn seed_origin(path: &Path) -> SeedOrigin {
+        let origin = SourceOrigin::Path(path.to_path_buf());
+        let baseline = origin.snapshot();
+        (origin, baseline)
     }
 
     /// Load one Gerber directory or `.zip` for the single-set view (#466),
     /// through the same loader as either side of a diff.
     fn load_single_seed(path: &Path) -> anyhow::Result<Seed> {
+        let origin = seed_origin(path);
         let src = load_source_any(path, label(path))?;
         let view = single_from_source(&src)?;
-        Ok(Seed::Single(src, view, path.to_path_buf()))
+        Ok(Seed::Single(src, view, origin))
     }
 
     /// Load both revisions from CLI paths — Gerber dirs/zips or schematic PDFs
     /// (#63) — into sources + their computed diff.
     fn load_seed(old_path: &Path, new_path: &Path) -> anyhow::Result<Seed> {
+        let origins = [seed_origin(old_path), seed_origin(new_path)];
         let old = load_source_any(old_path, label(old_path))?;
         let new = load_source_any(new_path, label(new_path))?;
         // Persisted settings aren't restored yet at this point — seed a PDF pair
@@ -184,13 +203,7 @@ mod native {
                 Err(_) => return Err(first),
             },
         };
-        Ok(Seed::Pair(
-            old,
-            new,
-            diff,
-            dpi,
-            [old_path.to_path_buf(), new_path.to_path_buf()],
-        ))
+        Ok(Seed::Pair(old, new, diff, dpi, origins))
     }
 
     /// Construct the app, restoring persisted settings. With a pair seed, both
@@ -198,16 +211,16 @@ mod native {
     /// single-set view (#466); without one, the welcome screen shows (empty diff).
     fn build_app(cc: &eframe::CreationContext<'_>, seed: Option<Seed>) -> ViewApp {
         match seed {
-            Some(Seed::Single(src, view, path)) => {
+            Some(Seed::Single(src, view, (origin, baseline))) => {
                 // Built straight from the view so persisted per-board settings
                 // (visible layers, #327) restore onto it like a diff's.
                 let l = src.label().to_string();
                 let mut app = ViewApp::from_cc(cc, view, l.clone(), l);
                 app.enter_single(src);
-                app.origin_new = Some(SourceOrigin::Path(path));
+                app.set_origin(RevSide::New, origin, baseline);
                 app
             }
-            Some(Seed::Pair(old, new, computed, seed_dpi, [old_path, new_path])) => {
+            Some(Seed::Pair(old, new, computed, seed_dpi, [(o_old, b_old), (o_new, b_new)])) => {
                 let (ol, nl) = (old.label().to_string(), new.label().to_string());
                 let mut app = match computed {
                     ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
@@ -219,8 +232,8 @@ mod native {
                 };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
-                app.origin_old = Some(SourceOrigin::Path(old_path));
-                app.origin_new = Some(SourceOrigin::Path(new_path));
+                app.set_origin(RevSide::Old, o_old, b_old);
+                app.set_origin(RevSide::New, o_new, b_new);
                 // The seed was rasterized before settings restore; honour a
                 // different persisted DPI now (#223). If that re-rasterize
                 // fails (caps), the setting must fall back to the DPI the
@@ -1769,8 +1782,17 @@ struct ViewApp {
     origin_old: Option<SourceOrigin>,
     #[cfg(not(target_arch = "wasm32"))]
     origin_new: Option<SourceOrigin>,
+    /// The state of each side's files just before the load read them (#423),
+    /// waiting to become the next watcher's baseline. Taken at load time, not
+    /// when the watcher starts a frame or more later, so a re-export landing
+    /// in between still triggers a reload.
+    #[cfg(not(target_arch = "wasm32"))]
+    baseline_old: Option<watch::Snapshot>,
+    #[cfg(not(target_arch = "wasm32"))]
+    baseline_new: Option<watch::Snapshot>,
     /// The running watchers, one per side (#423). Rebuilt when the origins or
-    /// the toggle change; dropping one stops its thread.
+    /// the toggle change, or when a new load leaves a fresh baseline;
+    /// dropping one stops its thread.
     #[cfg(not(target_arch = "wasm32"))]
     watch_old: Option<watch::FileWatcher>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1903,6 +1925,10 @@ impl ViewApp {
             origin_old: None,
             #[cfg(not(target_arch = "wasm32"))]
             origin_new: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            baseline_old: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            baseline_new: None,
             #[cfg(not(target_arch = "wasm32"))]
             watch_old: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -2935,17 +2961,18 @@ impl ViewApp {
         };
         match single_from_source(src) {
             Ok(view) => {
-                // The set becomes the new side; its origin moves with it so
-                // the reload watcher (#423) keeps covering it.
+                // The set becomes the new side; its origin, pending baseline
+                // and running watcher move with it, so the reload watcher
+                // (#423) keeps covering it without losing its baseline.
                 #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let origin = if self.src_old.is_some() {
-                        self.origin_old.take()
-                    } else {
-                        self.origin_new.take()
-                    };
+                if self.src_old.is_some() {
+                    self.origin_new = self.origin_old.take();
+                    self.baseline_new = self.baseline_old.take();
+                    self.watch_new = self.watch_old.take();
+                } else {
                     self.origin_old = None;
-                    self.origin_new = origin;
+                    self.baseline_old = None;
+                    self.watch_old = None;
                 }
                 let src = self.src_old.take().or_else(|| self.src_new.take());
                 if let Some(src) = src {
@@ -3102,29 +3129,40 @@ impl ViewApp {
         if let Some(parent) = path.parent() {
             self.last_dir = Some(parent.to_path_buf());
         }
+        // Snapshot before the read (#423): any change after it reloads.
+        let origin = SourceOrigin::Path(path.to_path_buf());
+        let baseline = origin.snapshot();
         match load_source_any(path, derive_label(path)) {
             Ok(src) => {
                 self.set_side(side, src);
                 if self.load_error.is_none() {
-                    self.set_origin(side, SourceOrigin::Path(path.to_path_buf()));
+                    self.set_origin(side, origin, baseline);
                 }
             }
             Err(e) => self.load_error = Some(format!("{e:#}")),
         }
     }
 
-    /// Record where a side now comes from (#423), after it loaded cleanly.
+    /// Record where a side now comes from (#423), after it loaded cleanly,
+    /// with the snapshot of its files taken just before they were read.
     #[cfg(not(target_arch = "wasm32"))]
-    fn set_origin(&mut self, side: RevSide, origin: SourceOrigin) {
+    fn set_origin(&mut self, side: RevSide, origin: SourceOrigin, baseline: watch::Snapshot) {
         match side {
-            RevSide::Old => self.origin_old = Some(origin),
-            RevSide::New => self.origin_new = Some(origin),
+            RevSide::Old => {
+                self.origin_old = Some(origin);
+                self.baseline_old = Some(baseline);
+            }
+            RevSide::New => {
+                self.origin_new = Some(origin);
+                self.baseline_new = Some(baseline);
+            }
         }
     }
 
     /// Start, stop or replace the per-side watchers (#423) so they cover
-    /// exactly the loaded sides' origins while the setting is on. Cheap when
-    /// nothing changed: it only compares path lists.
+    /// exactly the loaded sides' origins while the setting is on. A load
+    /// leaves a fresh baseline, which always starts a new watcher from it.
+    /// Cheap when nothing changed: it only compares path lists.
     #[cfg(not(target_arch = "wasm32"))]
     fn sync_watchers(&mut self, ctx: &egui::Context) {
         fn want(
@@ -3141,21 +3179,31 @@ impl ViewApp {
         fn sync(
             slot: &mut Option<watch::FileWatcher>,
             roots: Option<Vec<std::path::PathBuf>>,
+            baseline: &mut Option<watch::Snapshot>,
             ctx: &egui::Context,
         ) {
-            let current = slot.as_ref().map(|w| w.roots().to_vec());
-            if current == roots {
+            let Some(r) = roots else {
+                // Off or unloaded: stop. A pending baseline stays, so turning
+                // the setting back on still compares against the load.
+                *slot = None;
+                return;
+            };
+            let same = slot.as_ref().is_some_and(|w| w.roots() == r.as_slice());
+            if same && baseline.is_none() {
                 return;
             }
-            *slot = roots.map(|r| {
-                let ctx = ctx.clone();
-                watch::FileWatcher::spawn(r, move || ctx.request_repaint())
-            });
+            // Without a load-time snapshot (none was recorded) the best
+            // available baseline is the state right now.
+            let base = baseline.take().unwrap_or_else(|| watch::take(&r));
+            let ctx = ctx.clone();
+            *slot = Some(watch::FileWatcher::spawn(r, base, move || {
+                ctx.request_repaint()
+            }));
         }
         let old = want(self.watch_inputs, self.src_old.is_some(), &self.origin_old);
         let new = want(self.watch_inputs, self.src_new.is_some(), &self.origin_new);
-        sync(&mut self.watch_old, old, ctx);
-        sync(&mut self.watch_new, new, ctx);
+        sync(&mut self.watch_old, old, &mut self.baseline_old, ctx);
+        sync(&mut self.watch_new, new, &mut self.baseline_new, ctx);
     }
 
     /// Once per frame (#423): keep the watchers in step, and reload any side
@@ -3307,15 +3355,23 @@ impl ViewApp {
         if paths.is_empty() {
             return;
         }
+        // Snapshot before the read (#423): any change after it reloads.
+        let origins = drop_origins(&paths);
+        let mut baselines = match &origins {
+            DroppedOrigins::One(o) => vec![o.snapshot()],
+            DroppedOrigins::Pair { old, new } => vec![old.snapshot(), new.snapshot()],
+        }
+        .into_iter();
         match load_dropped_paths(&paths) {
             Ok(loaded) => {
                 self.adopt_sources(side, loaded);
                 if self.load_error.is_none() {
-                    match drop_origins(&paths) {
-                        DroppedOrigins::One(o) => self.set_origin(side, o),
+                    let mut next = || baselines.next().unwrap_or_default();
+                    match origins {
+                        DroppedOrigins::One(o) => self.set_origin(side, o, next()),
                         DroppedOrigins::Pair { old, new } => {
-                            self.origin_old = Some(old);
-                            self.origin_new = Some(new);
+                            self.set_origin(RevSide::Old, old, next());
+                            self.set_origin(RevSide::New, new, next());
                         }
                     }
                 }
@@ -3940,6 +3996,11 @@ impl SourceOrigin {
         }
     }
 
+    /// The current state of this side's files, for a watcher baseline.
+    fn snapshot(&self) -> watch::Snapshot {
+        watch::take(&self.roots())
+    }
+
     /// Read this side again, the same way it was first loaded.
     fn reload(&self) -> anyhow::Result<LoadedSource> {
         match self {
@@ -4014,12 +4075,17 @@ impl ViewApp {
     }
 
     /// Put back a kept view after a reload, if the layout still matches.
-    /// Returns whether it was restored.
+    /// Returns false only when the layer stack (or page counts) changed and
+    /// the view was reset. A camera that was never fitted (the welcome
+    /// screen, or a reload before the first frame) is not put back, so the
+    /// view still fits itself, but that is not a reset.
     fn restore_view(&mut self, kept: KeptView) -> bool {
-        if kept.key != self.view_key() || !kept.cam.fitted {
+        if kept.key != self.view_key() {
             return false;
         }
-        self.cam = kept.cam;
+        if kept.cam.fitted {
+            self.cam = kept.cam;
+        }
         if kept.selected < self.diff.layers.len() {
             self.selected = kept.selected;
         }
@@ -5510,8 +5576,9 @@ impl ViewApp {
         ui.checkbox(&mut self.watch_inputs, "Reload when files change")
             .on_hover_text(
                 "Re-read and re-diff an opened folder, zip, PDF or set of files when it \
-                 changes on disk, once it has been quiet for half a second. The camera, \
-                 selected layer and visibility are kept.",
+                 changes on disk, once it has been quiet for half a second. If the layers \
+                 are the same, the camera, selected layer and visibility are kept; if a \
+                 layer was added or removed, the view is reset.",
             );
     }
 
@@ -8559,6 +8626,63 @@ mod tests {
         app.watch_inputs = false;
         app.sync_watchers(&ctx);
         assert!(app.watch_old.is_none() && app.watch_new.is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A re-export that lands after the load read the files but before the
+    /// first frame starts the watcher is still picked up: the baseline is the
+    /// snapshot taken at load time, not when the watcher starts.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_change_between_load_and_watcher_start_still_reloads() {
+        use super::{RevSide, ViewApp};
+        let (root, old, new) = reload_fixture("early");
+        let ctx = egui::Context::default();
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::Old, &old);
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(app.baseline_new.is_some(), "the load records its snapshot");
+
+        std::fs::write(new.join("board-F_Cu.gtl"), GROWN_GERBER).unwrap();
+        app.sync_watchers(&ctx);
+        assert!(app.baseline_new.is_none(), "the watcher took the snapshot");
+        let watcher = app.watch_new.as_ref().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut fired = false;
+        while std::time::Instant::now() < deadline {
+            if watcher.take_change() {
+                fired = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(fired, "the early re-export must trigger a reload");
+        assert!(
+            !app.watch_old.as_ref().unwrap().take_change(),
+            "the untouched side stays quiet"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Reloading the one loaded side on the welcome screen (camera never
+    /// fitted, layers unchanged) must not claim the view was reset.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_reload_of_one_side_on_the_welcome_screen_is_not_a_reset() {
+        use super::{RevSide, ViewApp};
+        let (root, _old, new) = reload_fixture("welcome");
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        app.load_side_path(RevSide::New, &new);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(!app.cam.fitted, "nothing has been framed yet");
+
+        std::fs::write(new.join("board-F_Cu.gtl"), GROWN_GERBER).unwrap();
+        app.reload_sides(false, true, 3.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        let (note, _) = app.reload_note.clone().expect("a reload says so");
+        assert!(note.contains("after a file change"), "got: {note}");
+        assert!(!note.contains("reset"), "nothing was reset: {note}");
         std::fs::remove_dir_all(&root).ok();
     }
 

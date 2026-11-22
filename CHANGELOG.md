@@ -19,9 +19,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   loaded set alone, including in the web viewer (#466).
 - Desktop viewer reloads and re-diffs when the opened files change on disk,
   for example after a re-export, so it no longer has to be reopened. It waits
-  for half a second of quiet so a half-written fab pack is not read, keeps the
-  camera, selected layer and visibility, and briefly says it reloaded. A failed
-  reload keeps the previous result on screen with the error. Toggle in
+  for half a second of quiet so a half-written fab pack is not read, and
+  briefly says it reloaded. If the layers are the same as before, the camera,
+  selected layer and visibility are kept; if a layer was added or removed, the
+  view is reset and the notice says so. A failed reload keeps the previous
+  result on screen with the error. Toggle in
   Settings > Input, on by default (#423).
 
 ### Fixed
