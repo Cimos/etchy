@@ -526,6 +526,21 @@ impl PdfView {
     }
 }
 
+/// Page alignment is a DP matrix quadratic in the page count — refuse a
+/// document too big for it BEFORE rasterizing a single page (#249).
+#[cfg(feature = "pdf")]
+fn check_page_count(label: &str, pages: usize) -> anyhow::Result<()> {
+    if pages > etchy_core::MAX_ALIGN_PAGES {
+        anyhow::bail!(
+            "the {label} PDF has {pages} pages, over the {}-page limit etchy will align \
+             (page alignment cost grows with the square of the page count) — split \
+             the document, or diff it with the CLI",
+            etchy_core::MAX_ALIGN_PAGES
+        );
+    }
+    Ok(())
+}
+
 /// Rasterize both PDFs at `dpi` (#223: user-settable in Settings > Diff), diff
 /// paired pages, and assemble the view.
 ///
@@ -551,17 +566,7 @@ pub fn build_pdf_view(old: &[u8], new: &[u8], dpi: f32) -> anyhow::Result<PdfVie
         let dims = etchy_pdf::page_pixel_dims(bytes, dpi)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("reading the {label} PDF"))?;
-        // Page alignment is a DP matrix quadratic in the page count — refuse a
-        // document pair too big for it BEFORE rasterizing a single page (#249).
-        if dims.len() > etchy_core::MAX_ALIGN_PAGES {
-            anyhow::bail!(
-                "the {label} PDF has {} pages, over the {}-page limit etchy will align \
-                 (page alignment cost grows with the square of the page count) — split \
-                 the document, or diff it with the CLI",
-                dims.len(),
-                etchy_core::MAX_ALIGN_PAGES
-            );
-        }
+        check_page_count(label, dims.len())?;
         for (i, (w, h)) in dims.iter().enumerate() {
             let px = u64::from(*w) * u64::from(*h);
             if px == 0 {
@@ -731,6 +736,10 @@ pub fn build_pdf_view_fitted(old: &[u8], new: &[u8], requested: f32) -> anyhow::
             .with_context(|| format!("reading the {label} PDF"))
     };
     let (old_pt, new_pt) = (points("old", old)?, points("new", new)?);
+    // The page limit comes first: a pair over it gets that clearer message,
+    // not a raster-cap one from the fit below.
+    check_page_count("old", old_pt.len())?;
+    check_page_count("new", new_pt.len())?;
     let fit = fit_dpi(requested, &old_pt, &new_pt).map_err(|why| {
         anyhow::anyhow!(
             "this PDF pair will not fit the viewer's raster caps even at {MIN_FIT_DPI} DPI: \
@@ -1026,6 +1035,24 @@ mod pdf_tests {
             Ok(_) => panic!("an over-cap DPI must fail loud"),
         };
         assert!(err.contains("DPI"), "error names the DPI: {err}");
+    }
+
+    #[test]
+    fn the_page_limit_is_checked_before_the_dpi_fit() {
+        // Over the page limit AND over the document budget even at 72 DPI
+        // (1025 pages of 600x600 pt is ~369 MP): the page limit is what the
+        // user is told, not the raster caps (#223 review).
+        let sheet = || test_sized_sheet(600.0, 600.0, 10, 10);
+        let sheets: Vec<TestSheet> = (0..etchy_core::MAX_ALIGN_PAGES + 1)
+            .map(|_| sheet())
+            .collect();
+        let big = multi_page_pdf(&sheets);
+        let small = one_square_pdf(10, 10);
+        let err = match build_pdf_view_fitted(&big, &small, 200.0) {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("an over-limit page count must fail loud"),
+        };
+        assert!(err.contains("-page limit"), "page limit named: {err}");
     }
 
     // ---- DPI fitting (#223) -------------------------------------------------

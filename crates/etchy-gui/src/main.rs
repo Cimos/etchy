@@ -204,8 +204,9 @@ mod native {
                 // The seed was rasterized before settings restore; honour a
                 // different persisted DPI now (#223). A DPI over the caps is
                 // lowered to fit (with a warning); if the rebuild still fails,
-                // the setting falls back to the DPI the seed was requested at,
-                // so the setting matches the view on screen (#223 review).
+                // the setting falls back to the DPI the seed was requested at.
+                // The seed may itself have been lowered to fit, so the view can
+                // sit below that setting; its DPI note says so (#223 review).
                 if app.pdf.is_some() && app.pdf_dpi != seed_dpi {
                     app.rebuild_diff();
                     if app.load_error.is_some() {
@@ -1273,7 +1274,17 @@ fn input_rect(mode: Mode, full: Rect, px: f32) -> Rect {
     }
 }
 
+/// The PDF page view kept across a DPI re-render (#223).
+struct PdfViewState {
+    /// The selected row's (old page, new page), 1-based.
+    pages: (Option<usize>, Option<usize>),
+    cam: Camera,
+    measurements: Vec<Measurement>,
+    measure_pts: Vec<[f64; 2]>,
+}
+
 /// Pan/zoom camera in world (nm) space.
+#[derive(Clone)]
 struct Camera {
     center: [f64; 2], // world nm
     scale: f64,       // pixels per nm
@@ -2958,6 +2969,12 @@ impl ViewApp {
     /// pair that fits at no usable DPI fails loud (`load_error`) and reverts,
     /// leaving the previous view on screen. Without a PDF pair the setting
     /// simply takes effect on the next load.
+    ///
+    /// A successful re-render keeps the page, camera and rulers the user had.
+    /// The canvas world is nm (raster pixels map through each view's own DPI),
+    /// so the same camera frames the same part of the sheet at any DPI: raising
+    /// the DPI on a zoomed-in page sharpens it in place instead of jumping back
+    /// to the first changed page, zoomed out.
     fn set_pdf_dpi(&mut self, dpi: f32) {
         let prev = self.pdf_dpi;
         if dpi == prev {
@@ -2969,14 +2986,50 @@ impl ViewApp {
             (Some(LoadedSource::Pdf(_)), Some(LoadedSource::Pdf(_)))
         );
         if pdf_pair {
+            let kept = self.pdf_view_state();
             self.load_error = None;
             self.rebuild_diff();
             if self.load_error.is_some() {
                 // Fail loud AND revert: the error stays visible, the setting
                 // goes back to the DPI the on-screen view was built at.
                 self.pdf_dpi = prev;
+            } else if let Some(kept) = kept {
+                self.restore_pdf_view_state(kept);
             }
         }
+    }
+
+    /// The selected page (by its old/new page numbers) with the camera and
+    /// rulers on it, copied before a PDF re-render (#223).
+    fn pdf_view_state(&self) -> Option<PdfViewState> {
+        let pv = self.pdf.as_ref()?;
+        let row = pv.rows.get(pv.selected)?;
+        Some(PdfViewState {
+            pages: (row.old_page, row.new_page),
+            cam: self.cam.clone(),
+            measurements: self.measurements.clone(),
+            measure_pts: self.measure_pts.clone(),
+        })
+    }
+
+    /// Put back what [`Self::pdf_view_state`] copied, when the same page is
+    /// in the re-rendered view. If it is not, the fresh view stays as built
+    /// (first changed page, refit next frame).
+    fn restore_pdf_view_state(&mut self, kept: PdfViewState) {
+        let Some(pv) = self.pdf.as_mut() else {
+            return;
+        };
+        let Some(idx) = pv
+            .rows
+            .iter()
+            .position(|r| (r.old_page, r.new_page) == kept.pages)
+        else {
+            return;
+        };
+        pv.selected = idx;
+        self.cam = kept.cam;
+        self.measurements = kept.measurements;
+        self.measure_pts = kept.measure_pts;
     }
 
     /// Drain any completed async file picks (web) into the diff.
@@ -9260,6 +9313,53 @@ mod tests {
         let pv = build_pdf_view_fitted(&pdf, &pdf, 150.0).expect("fits");
         app.adopt_pdf(pv, "old".into(), "new".into());
         assert!(app.diff.report.warnings.is_empty());
+    }
+
+    /// #223 review: changing the DPI re-renders the pair but keeps the page
+    /// the user was on and the camera (world is nm, so it frames the same
+    /// spot at any DPI) instead of jumping to the first changed page, refit.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn a_dpi_change_keeps_the_page_and_camera() {
+        use super::{Camera, LoadedPdf, LoadedSource, ViewApp};
+        use crate::pdfview::{multi_page_pdf, test_sheet};
+        // Both pages change; page 2 changes more, so page 2 sorts first and
+        // the user moves to page 1.
+        let old = multi_page_pdf(&[test_sheet(10, 10), test_sheet(10, 10)]);
+        let new = multi_page_pdf(&[test_sheet(12, 10), test_sheet(60, 60)]);
+        let pdf = |label: &str, bytes: &[u8]| {
+            Some(LoadedSource::Pdf(LoadedPdf {
+                label: label.into(),
+                bytes: bytes.to_vec(),
+            }))
+        };
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.src_old = pdf("old", &old);
+        app.src_new = pdf("new", &new);
+        app.pdf_dpi = 150.0;
+        app.rebuild_diff();
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        let pv = app.pdf.as_ref().expect("pdf view");
+        let first = pv.order[0];
+        let other = pv.order[1];
+        assert_ne!(pv.rows[first].old_page, pv.rows[other].old_page);
+        let want_page = pv.rows[other].old_page;
+        app.select_pdf_page(other);
+        app.cam = Camera {
+            center: [1234.0, 5678.0],
+            scale: 3e-5,
+            fit_scale: 1e-5,
+            fitted: true,
+        };
+        app.set_pdf_dpi(300.0);
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        let pv = app.pdf.as_ref().expect("pdf view");
+        assert_eq!(pv.dpi, 300.0, "re-rendered at the new DPI");
+        assert_eq!(pv.rows[pv.selected].old_page, want_page, "same page");
+        assert!(app.cam.fitted, "no refit");
+        assert_eq!(app.cam.center, [1234.0, 5678.0]);
+        assert_eq!(app.cam.scale, 3e-5);
+        assert_eq!(app.cam.fit_scale, 1e-5);
     }
 
     /// #222 regression: a changed PDF pair yields a non-empty export set — the
