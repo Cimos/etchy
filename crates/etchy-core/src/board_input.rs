@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{
     classify, drill_kind, file_function, file_polarity, gerber_format, looks_like_excellon,
     looks_like_gerber, looks_like_placement, reconcile_kind, resolve_excellon_detailed,
-    resolve_layer_with_labels, resolve_placement, Board, EngineError, FilePolarity, GerberFormat,
+    resolve_layer_detailed, resolve_placement, Board, EngineError, FilePolarity, GerberFormat,
     Layer, LayerKind, Result,
 };
 
@@ -57,14 +57,33 @@ impl BoardBuilder {
             let (reconciled, warn) = reconcile_kind(kind, file_function(&bytes), &name);
             kind = reconciled;
             warnings.extend(warn);
-            let (resolved, labels) =
-                resolve_layer_with_labels(&bytes).map_err(|source| EngineError::Processing {
+            let resolved =
+                resolve_layer_detailed(&bytes).map_err(|source| EngineError::Processing {
                     kind: "layer",
                     name: name.clone(),
                     inner: Box::new(source),
                 })?;
-            x2_objects = labels.map(Arc::new);
-            Arc::new(resolved)
+            x2_objects = resolved.labels.map(Arc::new);
+            // A drill layer exported as Gerber gets a drill table from its circle
+            // flashes, so it compares with an Excellon revision (#457). Anything
+            // else on the layer (slots drawn as D01, regions, other apertures)
+            // can't be counted, so the layer gets no table, and says why.
+            if matches!(kind, LayerKind::Drill(_)) {
+                if negative {
+                    warnings.push(format!(
+                        "{name}: negative-polarity Gerber drill layer — no drill table for it"
+                    ));
+                } else {
+                    match resolved.flashes.into_drill_tools() {
+                        Ok(tools) => drill_tools = Some(tools),
+                        Err(why) => warnings.push(format!(
+                            "{name}: Gerber drill layer has {why}, which a drill table can't \
+                             count (only circle flashes are holes) — no drill table for it"
+                        )),
+                    }
+                }
+            }
+            Arc::new(resolved.geometry)
         } else if looks_like_excellon(&bytes) {
             // Content wins over the filename: an Excellon file named e.g. Board.TXT
             // must land on the Drill layer, not "other", or `--gate-layers drill`
@@ -141,6 +160,44 @@ mod tests {
         let (board, _, warnings) = board_from_bytes([("board-PTH.drl".into(), bytes)]).unwrap();
         assert!(board.layers[0].drill_tools.is_some());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn gerber_drill_layer_gets_a_table_from_its_flashes() {
+        // #457: X2 says plated drill, so the circle flashes become holes.
+        let bytes = b"%FSLAX46Y46*%\n%MOMM*%\n%TF.FileFunction,Plated,1,2,PTH,Drill*%\n\
+%ADD10C,0.3*%\nD10*\nX0Y0D03*\nX1000000Y0D03*\nM02*\n"
+            .to_vec();
+        let (board, _, warnings) = board_from_bytes([("board-PTH-drl.gbr".into(), bytes)]).unwrap();
+        let tools = board.layers[0].drill_tools.as_ref().unwrap();
+        assert_eq!(tools.by_diameter_um[&300].holes, 2);
+        assert!(
+            warnings.iter().all(|w| !w.contains("drill table")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn gerber_drill_layer_with_a_slot_warns_and_has_no_table() {
+        let bytes = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.8*%\nD10*\nX0Y0D03*\n\
+X0Y0D02*\nX2000000Y0D01*\nM02*\n"
+            .to_vec();
+        let (board, _, warnings) = board_from_bytes([("board-drill.gbr".into(), bytes)]).unwrap();
+        assert!(matches!(board.layers[0].kind, LayerKind::Drill(_)));
+        assert!(board.layers[0].drill_tools.is_none());
+        assert!(
+            warnings.iter().any(|w| w.starts_with("board-drill.gbr: ")
+                && w.contains("1 draw (slot or route)")
+                && w.contains("no drill table")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn gerber_copper_layer_has_no_drill_table() {
+        let bytes = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.3*%\nD10*\nX0Y0D03*\nM02*\n".to_vec();
+        let (board, _, _) = board_from_bytes([("board-F_Cu.gbr".into(), bytes)]).unwrap();
+        assert!(board.layers[0].drill_tools.is_none());
     }
 
     #[test]

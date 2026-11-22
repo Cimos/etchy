@@ -265,7 +265,9 @@ pub struct ToolCount {
 /// whole micrometres, rounded from the unit-normalised nm value, so a tool
 /// written in inches and its metric equivalent land on the same key
 /// (0.0315 in = 800.1 µm → 800, same as 0.8 mm). Tools that are defined but
-/// never used are not listed; tool numbers are not kept, only sizes.
+/// never used are not listed; tool numbers are not kept, only sizes. A
+/// Gerber-format drill layer fills the same table from its circle flashes
+/// ([`crate::gerber::FlashTable`], #457).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DrillTools {
     pub by_diameter_um: BTreeMap<i64, ToolCount>,
