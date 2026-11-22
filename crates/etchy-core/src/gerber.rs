@@ -1889,6 +1889,21 @@ mod tests {
         assert!((area_mm2(am) - 1.0).abs() < 1e-6, "{}", area_mm2(am));
     }
 
+    /// Attribute values and comments are free text and may hold UTF-8 (X2
+    /// spec): only commands are ASCII. These must resolve with their geometry
+    /// unchanged, X2 labels included.
+    #[test]
+    fn utf8_in_attributes_and_comments_resolves() {
+        let g = "%TF.ProjectId,Pröjekt-Ω,4d61645f,A*%\n%TF.Ersteller,Jürgen*%\n\
+                 %FSLAX46Y46*%\n%MOMM*%\n\
+                 %AMBOX*\n0 Größe µm*\n21,1,1.0,1.0,0,0,0*%\n\
+                 %TA.Größe,µm*%\n%ADD10BOX*%\n%TD*%\n\
+                 G04 Kommentar äöü*\nG04 #@! TO.N,Net-(µ2)*\n\
+                 %TO.N,Net-(µ1)*%\n%TO.C,Ω1*%\n%TO.P,Ω1,1,Fünktion*%\n\
+                 D10*\nX0Y0D03*\nM02*\n";
+        assert!((area_mm2(g) - 1.0).abs() < 1e-6, "{}", area_mm2(g));
+    }
+
     /// Fuzz find: a `%TF` attribute with too few arguments (for example
     /// `.GenerationSoftware` with one) was indexed past its end by the parser.
     /// File attributes carry no geometry, so these layers resolve.
