@@ -83,7 +83,9 @@ etchy old.pdf new.pdf --dpi 300         # crisper rasterization (default 150 DPI
 The **desktop viewer** is a separate binary — `etchy-gui <old> <new>` — with a
 changed-first layer list, Overlay / Old / New / Split / Swipe modes, pan /
 zoom / fit, a settings panel, an Open-A / Open-B loader (folder, `.zip`, or
-drag-and-drop), and a Help menu. A **web viewer** build also exists (see `deploy/`).
+drag-and-drop), and a Help menu. `etchy-gui <dir|zip>` opens one Gerber set on
+its own, with no diff, for a first look at fresh fab output; opening or dropping
+an old revision onto it turns it into a normal diff. A **web viewer** build also exists (see `deploy/`).
 
 **Install the viewer** from the [Releases](../../releases) page: `etchy-viewer-…`
 as a Windows `.msi`, a macOS `.dmg` (Apple Silicon), or a Linux `.AppImage` /

@@ -2,7 +2,8 @@
 //!
 //! `etchy-gui <old> <new>` diffs two Gerber revision directories and shows the
 //! result: a changed-first layer list and a pan/zoom canvas overlaying the diff
-//! (added copper green, removed red, base muted). The geometry + diff come from
+//! (added copper green, removed red, base muted). `etchy-gui <dir|zip>` shows a
+//! single Gerber set on its own, with no diff (#466). The geometry + diff come from
 //! the pure `etchy-core` engine via `compare_detailed`; this crate only does I/O
 //! and rendering. M1 scope: flash-only geometry (the engine fails loud otherwise).
 
@@ -70,19 +71,22 @@ mod native {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let owd = std::env::var_os("OWD").map(PathBuf::from);
         let arg_path = |a: &str| resolve_arg(owd.as_deref(), a);
-        // 0 args → start on the welcome screen; 2 args → load both up front (keeps
-        // the `etchy-gui <old> <new>` contract and fails loud on a bad path).
-        let seed = match args.len() {
-            0 => None,
-            2 => match load_seed(&arg_path(&args[0]), &arg_path(&args[1])) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    eprintln!("etchy-gui: error: {e:#}");
-                    return ExitCode::from(2);
-                }
-            },
-            _ => {
-                eprintln!("usage: etchy-gui [<old-dir> <new-dir>]");
+        // 0 args → start on the welcome screen; 1 arg → one set on its own
+        // (#466); 2 args → load both up front (keeps the `etchy-gui <old> <new>`
+        // contract). Either load fails loud on a bad path.
+        let loaded = match parse_cli_args(&args) {
+            CliArgs::Welcome => Ok(None),
+            CliArgs::Single(p) => load_single_seed(&arg_path(&p)).map(Some),
+            CliArgs::Pair(o, n) => load_seed(&arg_path(&o), &arg_path(&n)).map(Some),
+            CliArgs::Usage => {
+                eprintln!("{CLI_USAGE}");
+                return ExitCode::from(2);
+            }
+        };
+        let seed = match loaded {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("etchy-gui: error: {e:#}");
                 return ExitCode::from(2);
             }
         };
@@ -139,12 +143,25 @@ mod native {
         derive_label(p)
     }
 
+    /// What the command line loaded before the window opens.
+    enum Seed {
+        /// Two revisions and their computed diff, at the PDF DPI used.
+        Pair(LoadedSource, LoadedSource, ComputedDiff, f32),
+        /// One Gerber set on its own (#466) and its single-set view.
+        Single(LoadedSource, BoardDiff),
+    }
+
+    /// Load one Gerber directory or `.zip` for the single-set view (#466),
+    /// through the same loader as either side of a diff.
+    fn load_single_seed(path: &Path) -> anyhow::Result<Seed> {
+        let src = load_source_any(path, label(path))?;
+        let view = single_from_source(&src)?;
+        Ok(Seed::Single(src, view))
+    }
+
     /// Load both revisions from CLI paths — Gerber dirs/zips or schematic PDFs
     /// (#63) — into sources + their computed diff.
-    fn load_seed(
-        old_path: &Path,
-        new_path: &Path,
-    ) -> anyhow::Result<(LoadedSource, LoadedSource, ComputedDiff, f32)> {
+    fn load_seed(old_path: &Path, new_path: &Path) -> anyhow::Result<Seed> {
         let old = load_source_any(old_path, label(old_path))?;
         let new = load_source_any(new_path, label(new_path))?;
         // Persisted settings aren't restored yet at this point — seed a PDF pair
@@ -160,18 +177,23 @@ mod native {
                 Err(_) => return Err(first),
             },
         };
-        Ok((old, new, diff, dpi))
+        Ok(Seed::Pair(old, new, diff, dpi))
     }
 
-    /// Construct the app, restoring persisted settings. With a seed, both sources
-    /// are set so either can be reopened; without one, the welcome screen shows
-    /// (empty diff).
-    fn build_app(
-        cc: &eframe::CreationContext<'_>,
-        seed: Option<(LoadedSource, LoadedSource, ComputedDiff, f32)>,
-    ) -> ViewApp {
+    /// Construct the app, restoring persisted settings. With a pair seed, both
+    /// sources are set so either can be reopened; a single seed opens the
+    /// single-set view (#466); without one, the welcome screen shows (empty diff).
+    fn build_app(cc: &eframe::CreationContext<'_>, seed: Option<Seed>) -> ViewApp {
         match seed {
-            Some((old, new, computed, seed_dpi)) => {
+            Some(Seed::Single(src, view)) => {
+                // Built straight from the view so persisted per-board settings
+                // (visible layers, #327) restore onto it like a diff's.
+                let l = src.label().to_string();
+                let mut app = ViewApp::from_cc(cc, view, l.clone(), l);
+                app.enter_single(src);
+                app
+            }
+            Some(Seed::Pair(old, new, computed, seed_dpi)) => {
                 let (ol, nl) = (old.label().to_string(), new.label().to_string());
                 let mut app = match computed {
                     ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
@@ -256,6 +278,17 @@ mod native {
         #[test]
         fn garbage_png_yields_no_icon_without_panicking() {
             assert!(decode_icon_rgba(b"not a png").is_none());
+        }
+
+        // #466: `etchy-gui <dir>` on a missing path fails loud before the
+        // window opens, exactly like the two-path form.
+        #[test]
+        fn single_seed_fails_loud_on_a_bad_path() {
+            let missing =
+                std::env::temp_dir().join(format!("etchy-no-such-set-{}", std::process::id()));
+            assert!(super::load_single_seed(&missing).is_err());
+            let pair = super::load_seed(&missing, &missing);
+            assert!(pair.is_err(), "the two-path form fails the same way");
         }
 
         #[test]
@@ -1519,6 +1552,11 @@ struct ViewApp {
     /// (#114) doesn't reshoelace every frame. Denominator for "how much changed".
     new_area_mm2: Vec<f64>,
     mode: Mode,
+    /// One Gerber set on its own, not a diff (#466). The set lives in `src_new`
+    /// with `src_old` empty and the canvas forced to `Mode::New`; diff-only
+    /// controls are hidden or disabled. Loading an old revision beside it turns
+    /// the view into a normal diff and clears this.
+    single_set: bool,
     /// Opacity of the always-available base copper behind the diff (G3), 0..=1
     /// (#12/#6). 0 hides the base; the old off/faint/strong stops are 0.0/0.4/0.8.
     /// Driven by the slider at the top of the Layers panel.
@@ -1715,6 +1753,7 @@ impl ViewApp {
             visible_layers,
             new_area_mm2,
             mode: Mode::Overlay,
+            single_set: false,
             base_opacity: BASE_OPACITY_FAINT,
             col_added: C_ADDED,
             col_removed: C_REMOVED,
@@ -2742,6 +2781,12 @@ impl ViewApp {
         self.warning_shown_at = None;
         self.warning_expanded = false;
         self.load_error = None;
+        // Any board or PDF diff leaves the single-set view (#466) and returns
+        // the canvas to the overlay it opens on.
+        if self.single_set {
+            self.single_set = false;
+            self.mode = Mode::Overlay;
+        }
         // A board load leaves PDF mode (#63): the page rasters/textures are
         // per-pair state and must never linger behind a board diff.
         self.pdf = None;
@@ -2758,6 +2803,53 @@ impl ViewApp {
     fn adopt_pdf(&mut self, view: PdfView, old_label: String, new_label: String) {
         self.adopt_diff(empty_diff(), old_label, new_label);
         self.pdf = Some(view);
+    }
+
+    /// Show one set on its own (#466): the same full reset as `adopt_diff`,
+    /// then the single-set state.
+    fn adopt_single(&mut self, view: BoardDiff, src: LoadedSource) {
+        let label = src.label().to_string();
+        self.adopt_diff(view, label.clone(), label);
+        self.enter_single(src);
+    }
+
+    /// Mark the shown view as one set, not a diff (#466): the set is the new
+    /// side, there is no old side, and the canvas draws it as the New view —
+    /// full-opacity copper with no added/removed colouring.
+    fn enter_single(&mut self, src: LoadedSource) {
+        self.src_old = None;
+        self.src_new = Some(src);
+        self.single_set = true;
+        self.mode = Mode::New;
+        self.navigating_change = false;
+    }
+
+    /// The loaded source to show alone from the welcome screen (#466), when
+    /// exactly one side holds a Gerber set and the other is empty.
+    fn lone_board_source(&self) -> Option<&LoadedSource> {
+        match (&self.src_old, &self.src_new) {
+            (Some(s @ LoadedSource::Board(_)), None) | (None, Some(s @ LoadedSource::Board(_))) => {
+                Some(s)
+            }
+            _ => None,
+        }
+    }
+
+    /// Open the one loaded set on its own (#466). A failure fails loud and
+    /// leaves the loaded side where it was.
+    fn view_alone(&mut self) {
+        let Some(src) = self.lone_board_source() else {
+            return;
+        };
+        match single_from_source(src) {
+            Ok(view) => {
+                let src = self.src_old.take().or_else(|| self.src_new.take());
+                if let Some(src) = src {
+                    self.adopt_single(view, src);
+                }
+            }
+            Err(e) => self.load_error = Some(format!("{e:#}")),
+        }
     }
 
     /// Store a freshly loaded source on one side and re-diff if both sides are set.
@@ -2788,14 +2880,34 @@ impl ViewApp {
         match sources {
             DroppedSources::One(src) => self.set_side(side, src),
             DroppedSources::Pair { old, new } => {
-                self.src_old = Some(old);
+                // Restore the old side too if the pair fails to diff (#330), so
+                // the stored sources keep describing what is on screen.
+                let prev_old = self.src_old.replace(old);
                 self.set_side(RevSide::New, new);
+                if self.load_error.is_some() {
+                    self.src_old = prev_old;
+                }
             }
         }
     }
 
-    /// Recompute the comparison from the two sources, if both are present.
+    /// Recompute the comparison from the two sources, if both are present; in
+    /// the single-set view (#466) the one set is rebuilt on its own.
     fn rebuild_diff(&mut self) {
+        if self.single_set && self.src_old.is_none() {
+            let Some(src) = self.src_new.as_ref() else {
+                return;
+            };
+            match single_from_source(src) {
+                Ok(view) => {
+                    if let Some(src) = self.src_new.take() {
+                        self.adopt_single(view, src);
+                    }
+                }
+                Err(e) => self.load_error = Some(format!("{e:#}")),
+            }
+            return;
+        }
         let (Some(o), Some(n)) = (self.src_old.as_ref(), self.src_new.as_ref()) else {
             return;
         };
@@ -3037,6 +3149,21 @@ impl ViewApp {
                     ui.add_space(10.0);
                     self.side_open_row(ui, RevSide::New, "New revision");
                 });
+                // #466: one set is enough to look at; a second one turns it
+                // into a diff later (drop it, or Open › Old revision).
+                if self.lone_board_source().is_some() {
+                    ui.add_space(10.0);
+                    if ui
+                        .button("View this set alone")
+                        .on_hover_text(
+                            "Show the loaded Gerber set on its own, without a diff. \
+                             Loading a second set later turns it into a diff.",
+                        )
+                        .clicked()
+                    {
+                        self.view_alone();
+                    }
+                }
                 ui.add_space(12.0);
                 ui.label(
                     egui::RichText::new(welcome_drop_hint(cfg!(target_arch = "wasm32")))
@@ -3122,7 +3249,51 @@ fn diff_from_sources(old: &LoadedBoard, new: &LoadedBoard) -> anyhow::Result<Boa
     Ok(d)
 }
 
-/// Derive a human-meaningful old/new label from an input path (#177), shared by
+/// The single-set view of one loaded source (#466): every layer unchanged,
+/// nothing added or removed, with the set's load notices in the report so the
+/// warning banner surfaces them exactly as it does for either side of a diff.
+/// A schematic PDF has no single view; it fails loud and asks for a pair.
+fn single_from_source(src: &LoadedSource) -> anyhow::Result<BoardDiff> {
+    match src {
+        LoadedSource::Board(b) => {
+            let mut d = etchy_core::view_single(&b.board)?;
+            d.report.warnings.splice(0..0, b.warnings.iter().cloned());
+            Ok(d)
+        }
+        LoadedSource::Pdf(p) => anyhow::bail!(
+            "{} is a schematic PDF; a PDF can only be compared, so open two of them",
+            p.label
+        ),
+    }
+}
+
+/// What the command line asks the native viewer to open (#466).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum CliArgs {
+    /// No arguments: the welcome screen.
+    Welcome,
+    /// One Gerber directory or `.zip`, shown on its own.
+    Single(String),
+    /// Two revisions, diffed.
+    Pair(String, String),
+    /// Anything else: print [`CLI_USAGE`] and exit 2.
+    Usage,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const CLI_USAGE: &str = "usage: etchy-gui [<dir|zip> | <old-dir> <new-dir>]";
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn parse_cli_args(args: &[String]) -> CliArgs {
+    match args {
+        [] => CliArgs::Welcome,
+        [one] if one.starts_with('-') => CliArgs::Usage,
+        [one] => CliArgs::Single(one.clone()),
+        [old, new] => CliArgs::Pair(old.clone(), new.clone()),
+        _ => CliArgs::Usage,
+    }
+}
 /// the native (dir args / drops) and web (demo) surfaces so both present the same
 /// old->new text. A bare basename is often generic — "old"/"new"/"a" or a plain
 /// version like "v0.0.1" — and carries no board identity; when it is, prefix the
@@ -3714,25 +3885,28 @@ impl eframe::App for ViewApp {
         if fit {
             self.cam.fitted = false;
         }
-        if next_change {
+        // The single-set view (#466) has no second revision: no changes to
+        // step through and only the New view to show, so those keys stand down.
+        let single = self.single_set;
+        if next_change && !single {
             self.step_change(1);
         }
-        if prev_change {
+        if prev_change && !single {
             self.step_change(-1);
         }
-        if mode_overlay {
+        if mode_overlay && !single {
             self.mode = Mode::Overlay;
         }
-        if mode_before {
+        if mode_before && !single {
             self.mode = Mode::Old;
         }
         if mode_after {
             self.mode = Mode::New;
         }
-        if mode_split {
+        if mode_split && !single {
             self.mode = Mode::Split;
         }
-        if mode_swipe {
+        if mode_swipe && !single {
             self.mode = Mode::Swipe;
         }
         if next {
@@ -3766,17 +3940,29 @@ impl eframe::App for ViewApp {
                     env!("CARGO_PKG_VERSION")
                 ));
                 ui.add_space(8.0);
-                ui.label(
-                    // ASCII "->" — egui's default font has no arrow glyph (→ renders
-                    // as tofu, #30).
-                    egui::RichText::new(format!("{}  ->  {}", self.old_label, self.new_label))
-                        .size(15.0)
-                        .color(C_CREAM),
-                );
+                // ASCII "->" — egui's default font has no arrow glyph (→ renders
+                // as tofu, #30). A single set (#466) names the one set and says
+                // plainly that it is not a diff.
+                let title = if self.single_set {
+                    format!("{}  (single set, not a diff)", self.new_label)
+                } else {
+                    format!("{}  ->  {}", self.old_label, self.new_label)
+                };
+                ui.label(egui::RichText::new(title).size(15.0).color(C_CREAM));
                 // Totals pushed to the right. PDF mode has no layers or mm² —
                 // headline the page tallies instead (#63).
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(pv) = &self.pdf {
+                    if self.single_set {
+                        // No added/removed areas exist without a second set.
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} layers",
+                                self.diff.report.totals.layers_total
+                            ))
+                            .size(14.0)
+                            .strong(),
+                        );
+                    } else if let Some(pv) = &self.pdf {
                         if pv.old_pages != pv.new_pages {
                             // Trust: an added/removed sheet must be legible in
                             // the headline, not folded into a count.
@@ -3848,18 +4034,30 @@ impl eframe::App for ViewApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().button_padding = egui::vec2(12.0, 8.0);
                 ui.spacing_mut().item_spacing.x = 8.0;
-                // Mode picker — the core control, never collapses.
-                segmented(
-                    ui,
-                    &mut self.mode,
-                    &[
-                        (Mode::Overlay, "Overlay"),
-                        (Mode::Old, "Old"),
-                        (Mode::New, "New"),
-                        (Mode::Split, "Split"),
-                        (Mode::Swipe, "Swipe"),
-                    ],
-                );
+                // Mode picker — the core control, never collapses. A single set
+                // (#466) has nothing to overlay, split or swipe, so the picker
+                // gives way to one labelled chip saying why.
+                if self.single_set {
+                    segmented_frame(ui, |ui| {
+                        ui.selectable_label(
+                            true,
+                            egui::RichText::new("Single set").color(C_CANVAS).strong(),
+                        )
+                        .on_hover_text(SINGLE_SET_MODE_TIP);
+                    });
+                } else {
+                    segmented(
+                        ui,
+                        &mut self.mode,
+                        &[
+                            (Mode::Overlay, "Overlay"),
+                            (Mode::Old, "Old"),
+                            (Mode::New, "New"),
+                            (Mode::Split, "Split"),
+                            (Mode::Swipe, "Swipe"),
+                        ],
+                    );
+                }
                 // Right-aligned action cluster. RTL adds in reverse, so the visual
                 // order is Open · Fit · Help. Measure/Export/Settings moved to the rail
                 // (ruler toggle, Export tab, Settings cog — #57/#211).
@@ -4077,6 +4275,7 @@ impl eframe::App for ViewApp {
             None => self.diff.layers[self.selected].name().to_string(),
         };
         let mode = match self.mode {
+            _ if self.single_set => "Single",
             Mode::Overlay => "Overlay",
             Mode::Old => "Old",
             Mode::New => "New",
@@ -4333,7 +4532,18 @@ impl ViewApp {
                         }
                     });
             }
-            if let Some(layer) = self.diff.report.layers.get(self.selected) {
+            if self.single_set {
+                // #466: no second revision, so no changes to list.
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(
+                        "Single set, not a diff: no changes to list. \
+                         Open or drop an old revision to compare.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            } else if let Some(layer) = self.diff.report.layers.get(self.selected) {
                 ui.separator();
                 let total = layer.regions.len();
                 egui::CollapsingHeader::new(format!("Changes ({total})"))
@@ -4437,6 +4647,15 @@ impl ViewApp {
 
         let mut exp_current = false;
         let mut exp_all = false;
+        // #466: the exports write the diff, which a single set doesn't have.
+        let can_export = !self.single_set;
+        let diff_only = |r: egui::Response| {
+            if can_export {
+                r
+            } else {
+                r.on_disabled_hover_text(SINGLE_SET_DIFF_ONLY_TIP)
+            }
+        };
 
         // One panel-level scroll (#196): the file lists render at full height and
         // the whole tab overflows here, instead of nested per-list scroll boxes.
@@ -4448,6 +4667,14 @@ impl ViewApp {
                     .weak()
                     .small(),
             );
+            if !can_export {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Single set, not a diff: there is nothing to export yet.")
+                        .color(C_COPPER)
+                        .small(),
+                );
+            }
 
             ui.add_space(12.0);
             ui.label(
@@ -4469,13 +4696,12 @@ impl ViewApp {
                     ui.label(egui::RichText::new("No layer selected.").weak().small());
                 }
             }
-            if ui
-                .add_enabled(
-                    !current_names.is_empty(),
-                    egui::Button::new("Export current layer"),
-                )
-                .on_hover_text("Write the selected layer's SVG plus areas.csv.")
-                .clicked()
+            if diff_only(ui.add_enabled(
+                can_export && !current_names.is_empty(),
+                egui::Button::new("Export current layer"),
+            ))
+            .on_hover_text("Write the selected layer's SVG plus areas.csv.")
+            .clicked()
             {
                 exp_current = true;
             }
@@ -4493,8 +4719,7 @@ impl ViewApp {
                     .small(),
             );
             Self::export_file_list(ui, &all_files);
-            if ui
-                .button("Export all changed layers")
+            if diff_only(ui.add_enabled(can_export, egui::Button::new("Export all changed layers")))
                 .on_hover_text("Write an SVG for every changed layer plus areas.csv.")
                 .clicked()
             {
@@ -5381,6 +5606,9 @@ impl ViewApp {
         // noise filter — spell that out so a filtered Overlay and a raw Split aren't
         // read as disagreeing about "what changed" (#91).
         let mode_note = match self.mode {
+            // #466: one set, labelled on the canvas too so a screenshot of it is
+            // never mistaken for a diff with no changes.
+            _ if self.single_set => Some("single set, not a diff"),
             Mode::Old => Some("showing OLD board"),
             Mode::New => Some("showing NEW board"),
             Mode::Split => {
@@ -6375,6 +6603,14 @@ fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(
 // fold into "More" and Open/Fit/Help never clip.
 /// Below this window width (pt) the right action cluster collapses into "More".
 const TIER_MORE_PX: f32 = 660.0;
+
+/// Hover text for the single-set chip that stands in for the mode picker (#466).
+const SINGLE_SET_MODE_TIP: &str = "One Gerber set on its own, not a diff. Overlay, Old, \
+     Split and Swipe need two revisions: open or drop an old revision to compare.";
+
+/// Hover text on diff-only controls disabled in the single-set view (#466).
+const SINGLE_SET_DIFF_ONLY_TIP: &str =
+    "Needs two revisions. Open or drop an old revision to compare.";
 
 /// Running under WSL? WSL sets `WSL_DISTRO_NAME`, and the kernel release contains
 /// "microsoft". On real Windows/macOS/Linux this is always false (the /proc read
@@ -7722,6 +7958,174 @@ mod tests {
         assert!(app.load_error.is_none(), "{:?}", app.load_error);
         assert_eq!(app.old_label, "old2");
         assert_eq!(app.new_label, "new");
+    }
+
+    /// A one-layer Gerber set for the single-set tests (#466).
+    fn single_board(label: &str, warnings: Vec<String>) -> super::LoadedSource {
+        let (board, fmt, _) = crate::loader::board_from_bytes(vec![(
+            "board-F_Cu.gtl".to_string(),
+            MIN_GERBER.to_vec(),
+        )])
+        .unwrap();
+        super::LoadedSource::Board(super::LoadedBoard {
+            label: label.into(),
+            board,
+            fmt,
+            warnings,
+        })
+    }
+
+    #[test]
+    fn cli_args_pick_welcome_single_pair_or_usage() {
+        // #466: 0 args is the welcome screen, 1 a single set, 2 a diff; any
+        // other count, or a lone flag, prints the usage text.
+        use super::{parse_cli_args, CliArgs};
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_cli_args(&args(&[])), CliArgs::Welcome);
+        assert_eq!(
+            parse_cli_args(&args(&["gerbers"])),
+            CliArgs::Single("gerbers".into())
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["old", "new"])),
+            CliArgs::Pair("old".into(), "new".into())
+        );
+        assert_eq!(parse_cli_args(&args(&["a", "b", "c"])), CliArgs::Usage);
+        assert_eq!(parse_cli_args(&args(&["--help"])), CliArgs::Usage);
+        assert!(super::CLI_USAGE.contains("<dir|zip>"));
+        assert!(super::CLI_USAGE.contains("<old-dir> <new-dir>"));
+    }
+
+    #[test]
+    fn single_set_view_has_no_changes_and_keeps_load_warnings() {
+        // #466: a single set shows every layer unchanged, with its load
+        // notices surfaced unprefixed (there is no old/new side to name).
+        let src = single_board("gerbers", vec!["x.drl: skipped".into()]);
+        let view = super::single_from_source(&src).unwrap();
+        assert!(!view.report.any_changes());
+        assert!(view
+            .layers
+            .iter()
+            .all(|l| l.added.is_empty() && l.removed.is_empty()));
+        assert_eq!(view.report.warnings[..1], ["x.drl: skipped"]);
+    }
+
+    #[test]
+    fn single_set_of_a_pdf_fails_loud() {
+        let pdf = super::LoadedSource::Pdf(super::LoadedPdf {
+            label: "sch.pdf".into(),
+            bytes: b"%PDF-1.7".to_vec(),
+        });
+        let err = match super::single_from_source(&pdf) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a lone PDF has no single-set view"),
+        };
+        assert!(err.contains("open two of them"), "got: {err}");
+    }
+
+    #[test]
+    fn adopt_single_enters_the_single_set_view() {
+        use super::{Mode, ViewApp};
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        let src = single_board("gerbers", Vec::new());
+        let view = super::single_from_source(&src).unwrap();
+        app.adopt_single(view, src);
+        assert!(app.single_set);
+        assert_eq!(app.mode, Mode::New, "drawn as the board, no diff colours");
+        assert!(app.src_old.is_none());
+        assert_eq!(app.src_new.as_ref().map(|s| s.label()), Some("gerbers"));
+        assert_eq!(app.new_label, "gerbers");
+        assert!(!app.diff.layers.is_empty(), "not the welcome screen");
+    }
+
+    #[test]
+    fn opening_an_old_revision_turns_a_single_set_into_a_diff() {
+        // #466: a second set (drop or Open › Old) becomes a normal diff.
+        use super::{Mode, RevSide, ViewApp};
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        let src = single_board("new", Vec::new());
+        app.adopt_single(super::single_from_source(&src).unwrap(), src);
+        app.set_side(RevSide::Old, single_board("old", Vec::new()));
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(!app.single_set);
+        assert_eq!(app.mode, Mode::Overlay);
+        assert_eq!(app.old_label, "old");
+        assert_eq!(app.new_label, "new");
+    }
+
+    #[test]
+    fn a_rejected_second_set_keeps_the_single_set_view() {
+        // #466 + #330: a second set that cannot be diffed fails loud and
+        // leaves the single set on screen and in the stored sources.
+        use super::{LoadedPdf, LoadedSource, Mode, RevSide, ViewApp};
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        let src = single_board("gerbers", Vec::new());
+        app.adopt_single(super::single_from_source(&src).unwrap(), src);
+        app.set_side(
+            RevSide::Old,
+            LoadedSource::Pdf(LoadedPdf {
+                label: "a.pdf".into(),
+                bytes: b"%PDF-1.7".to_vec(),
+            }),
+        );
+        assert!(app.load_error.is_some());
+        assert!(app.single_set);
+        assert_eq!(app.mode, Mode::New);
+        assert!(app.src_old.is_none());
+    }
+
+    #[test]
+    fn replacing_the_single_set_stays_a_single_set() {
+        // Open › New revision over a single set swaps the set shown alone.
+        use super::{RevSide, ViewApp};
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        let src = single_board("first", Vec::new());
+        app.adopt_single(super::single_from_source(&src).unwrap(), src);
+        app.set_side(RevSide::New, single_board("second", Vec::new()));
+        assert!(app.load_error.is_none(), "{:?}", app.load_error);
+        assert!(app.single_set);
+        assert_eq!(app.new_label, "second");
+    }
+
+    #[test]
+    fn view_alone_shows_the_one_loaded_side() {
+        // #466: from the welcome screen, one loaded set (either side) can be
+        // shown on its own; it moves to the new side.
+        use super::{RevSide, ViewApp};
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        assert!(app.lone_board_source().is_none());
+        app.set_side(RevSide::Old, single_board("only", Vec::new()));
+        assert!(app.diff.layers.is_empty(), "still the welcome screen");
+        assert!(app.lone_board_source().is_some());
+        app.view_alone();
+        assert!(app.single_set);
+        assert!(app.src_old.is_none());
+        assert_eq!(app.src_new.as_ref().map(|s| s.label()), Some("only"));
+        assert!(!app.diff.layers.is_empty());
+    }
+
+    #[test]
+    fn a_failed_pair_drop_restores_the_old_side() {
+        // A dropped pair that cannot be diffed must not leave its old half
+        // behind in the stored sources (#330).
+        use super::{DroppedSources, LoadedPdf, LoadedSource, RevSide, ViewApp};
+        let mut app = ViewApp::new(empty_diff(), "x".into(), "y".into());
+        let src = single_board("gerbers", Vec::new());
+        app.adopt_single(super::single_from_source(&src).unwrap(), src);
+        app.adopt_sources(
+            RevSide::Old,
+            DroppedSources::Pair {
+                old: single_board("old", Vec::new()),
+                new: LoadedSource::Pdf(LoadedPdf {
+                    label: "b.pdf".into(),
+                    bytes: b"%PDF-1.7".to_vec(),
+                }),
+            },
+        );
+        assert!(app.load_error.is_some());
+        assert!(app.src_old.is_none());
+        assert!(app.single_set);
+        assert_eq!(app.src_new.as_ref().map(|s| s.label()), Some("gerbers"));
     }
 
     #[test]

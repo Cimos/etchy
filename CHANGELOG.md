@@ -11,6 +11,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ### Added
 - Viewer change navigator with per-layer region lists, X2 labels, framing, highlight, and rebindable N/P keys (#419).
+- Viewer single-set view: `etchy-gui <dir|zip>` opens one Gerber/Excellon set
+  on its own, labelled as a single set and not a diff, with the layer list,
+  visibility, pan/zoom and drill layers but no added/removed colouring.
+  Diff-only controls are hidden or disabled. Opening or dropping an old
+  revision turns it into a normal diff, and the welcome screen can show one
+  loaded set alone, including in the web viewer (#466).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
