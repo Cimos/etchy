@@ -11,6 +11,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 
 ### Added
 - Viewer change navigator with per-layer region lists, X2 labels, framing, highlight, and rebindable N/P keys (#419).
+- Drill table diffs cover drill layers exported as Gerber: each circle flash
+  counts as a hole of its aperture diameter, so an Excellon revision and a
+  Gerber revision compare by size. A Gerber drill layer with slots, regions or
+  other apertures gets no table and a warning saying what it could not count
+  (#457).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as

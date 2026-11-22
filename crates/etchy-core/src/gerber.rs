@@ -11,7 +11,7 @@
 //! silently dropped or wrong-but-quiet result (the trust bar).
 
 use gerber_parser::gerber_types::{AttributeDeletionCriterion, Net, ObjectAttribute};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufReader, Cursor};
 
 use gerber_parser::gerber_types::{
@@ -24,6 +24,7 @@ use gerber_parser::parse;
 
 use crate::boolean;
 use crate::error::{EngineError, Result};
+use crate::excellon::{DrillTools, ToolCount};
 use crate::geo::{quantize_mm, shoelace_2x_nm2, snap_nm, Contour, PolygonSet, Pt, Shape};
 use crate::geom;
 
@@ -66,6 +67,108 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
 pub fn resolve_layer_with_labels(
     bytes: &[u8],
 ) -> Result<(PolygonSet, Option<Vec<LabeledContour>>)> {
+    resolve_layer_detailed(bytes).map(|r| (r.geometry, r.labels))
+}
+
+/// Everything one walk of a Gerber layer produces.
+#[derive(Debug, Clone)]
+pub struct ResolvedGerber {
+    /// Filled geometry (`dark − clear`, in paint order).
+    pub geometry: PolygonSet,
+    /// X2 object labels, when the file carries any object attributes.
+    pub labels: Option<Vec<LabeledContour>>,
+    /// Dark circle flashes counted per diameter, plus everything else drawn, so
+    /// a drill layer exported as Gerber can get a drill table (#457).
+    pub flashes: FlashTable,
+}
+
+/// What a Gerber layer drew, in the terms of a drill table: dark circle
+/// flashes per diameter ([`DrillTools`], keyed like Excellon tools so the two
+/// formats compare), and a count of every other object, which a drill table
+/// cannot hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlashTable {
+    /// Dark circle flashes per diameter, as holes. `slots` is always 0.
+    pub tools: DrillTools,
+    /// Objects that are not dark circle flashes.
+    pub untabled: UntabledContent,
+}
+
+/// Counts of Gerber objects that are not dark circle flashes (#457).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UntabledContent {
+    /// Flashes of a rectangle, obround, polygon or macro aperture.
+    pub non_circle_flashes: u32,
+    /// Circle flashes whose diameter rounds to 0 µm.
+    pub zero_size_flashes: u32,
+    /// Stroked `D01` draws (slots, routes), one per segment command.
+    pub draws: u32,
+    /// `G36`/`G37` region fills.
+    pub regions: u32,
+    /// Flashes inside an open `G36`…`G37` region (invalid in RS-274X).
+    pub region_flashes: u32,
+    /// Flashes under clear polarity (`%LPC`), which erase rather than drill.
+    pub clear_flashes: u32,
+}
+
+impl UntabledContent {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// A human list of the counts, e.g. `2 draws (slots or routes), 1 region`.
+    pub fn describe(&self) -> String {
+        let parts: Vec<String> = [
+            (
+                self.draws,
+                "draw (slot or route)",
+                "draws (slots or routes)",
+            ),
+            (self.regions, "region fill", "region fills"),
+            (
+                self.region_flashes,
+                "flash inside a region",
+                "flashes inside regions",
+            ),
+            (
+                self.non_circle_flashes,
+                "non-circle aperture flash",
+                "non-circle aperture flashes",
+            ),
+            (
+                self.zero_size_flashes,
+                "zero-diameter flash",
+                "zero-diameter flashes",
+            ),
+            (
+                self.clear_flashes,
+                "clear-polarity flash",
+                "clear-polarity flashes",
+            ),
+        ]
+        .into_iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
+        .collect();
+        parts.join(", ")
+    }
+}
+
+impl FlashTable {
+    /// The drill tool table, or — when the layer drew anything other than dark
+    /// circle flashes — a description of what could not be counted. A partial
+    /// table would understate the layer, so there is none.
+    pub fn into_drill_tools(self) -> std::result::Result<DrillTools, String> {
+        if self.untabled.is_empty() {
+            Ok(self.tools)
+        } else {
+            Err(self.untabled.describe())
+        }
+    }
+}
+
+/// Parse + resolve one Gerber layer: geometry, X2 labels and the flash table.
+pub fn resolve_layer_detailed(bytes: &[u8]) -> Result<ResolvedGerber> {
     let normalized = normalize(bytes)?;
     // The third-party parser is the first code to touch attacker-controlled bytes.
     // Contain a panic in it as a loud typed error instead of unwinding through the
@@ -131,7 +234,16 @@ pub fn resolve_layer_with_labels(
         };
         acc = boolean::flatten(&result);
     }
-    Ok((result, m.x2_seen.then_some(m.labeled_contours)))
+    Ok(ResolvedGerber {
+        geometry: result,
+        labels: m.x2_seen.then_some(m.labeled_contours),
+        flashes: FlashTable {
+            tools: DrillTools {
+                by_diameter_um: m.flash_counts,
+            },
+            untabled: m.untabled,
+        },
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -429,6 +541,11 @@ struct Machine<'a> {
     /// Boolean passes spent resolving mixed-exposure macro images (#306). Each is
     /// the same kind of pass as a polarity span, so they share `MAX_SPANS_PER_LAYER`.
     macro_passes: usize,
+
+    /// Dark circle flashes per diameter in whole µm (#457).
+    flash_counts: BTreeMap<i64, ToolCount>,
+    /// Everything drawn that is not a dark circle flash (#457).
+    untabled: UntabledContent,
 }
 
 impl<'a> Machine<'a> {
@@ -461,6 +578,8 @@ impl<'a> Machine<'a> {
             total_points: 0,
             region_points: 0,
             macro_passes: 0,
+            flash_counts: BTreeMap::new(),
+            untabled: UntabledContent::default(),
         }
     }
 
@@ -644,6 +763,7 @@ impl<'a> Machine<'a> {
             self.region_loops.push(std::mem::take(&mut self.cur_loop));
         }
         if !self.region_loops.is_empty() {
+            self.untabled.regions = self.untabled.regions.saturating_add(1);
             // Even-odd fill normalizes winding/holes; result joins the layer set.
             let filled = boolean::fill_even_odd(&self.region_loops);
             for c in filled {
@@ -702,6 +822,7 @@ impl<'a> Machine<'a> {
 
     fn draw_segment(&mut self, to: Pt, offset: &Option<CoordinateOffset>) -> Result<()> {
         let r = self.stroke_radius_nm()?;
+        self.untabled.draws = self.untabled.draws.saturating_add(1);
         if self.is_arc(offset) {
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
             let center = self.arc_center(to, offset, ccw)?;
@@ -803,6 +924,7 @@ impl<'a> Machine<'a> {
     fn flash(&mut self, at: Pt) -> Result<()> {
         let ap = self.current_aperture()?;
         let (ax, ay) = (at.x as f64, at.y as f64);
+        self.tally_flash(ap)?;
         match ap {
             GtAperture::Circle(c) => {
                 if c.hole_diameter.is_some() {
@@ -851,6 +973,33 @@ impl<'a> Machine<'a> {
                     .ok_or_else(|| unsupported(&format!("undefined macro {name}")))?;
                 self.flash_macro(am, args.as_deref().unwrap_or(&[]), at)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Count one flash for the drill table (#457): a dark circle flash is a hole
+    /// of its diameter, rounded to whole µm exactly as an Excellon tool is, so
+    /// the two formats key the same size identically. Anything else is counted
+    /// as content a drill table cannot hold.
+    fn tally_flash(&mut self, ap: &GtAperture) -> Result<()> {
+        if self.in_region {
+            self.untabled.region_flashes = self.untabled.region_flashes.saturating_add(1);
+            return Ok(());
+        }
+        if !self.polarity_dark {
+            self.untabled.clear_flashes = self.untabled.clear_flashes.saturating_add(1);
+            return Ok(());
+        }
+        let GtAperture::Circle(c) = ap else {
+            self.untabled.non_circle_flashes = self.untabled.non_circle_flashes.saturating_add(1);
+            return Ok(());
+        };
+        let um = (self.dim(c.diameter)? / 1000.0).round() as i64;
+        if um <= 0 {
+            self.untabled.zero_size_flashes = self.untabled.zero_size_flashes.saturating_add(1);
+        } else {
+            let count = self.flash_counts.entry(um).or_default();
+            count.holes = count.holes.saturating_add(1);
         }
         Ok(())
     }
@@ -1376,6 +1525,76 @@ mod tests {
 
     fn area_mm2(g: &str) -> f64 {
         resolve_layer(g.as_bytes()).unwrap().area_mm2()
+    }
+
+    fn flash_table(g: &str) -> FlashTable {
+        resolve_layer_detailed(g.as_bytes()).unwrap().flashes
+    }
+
+    #[test]
+    fn flash_table_counts_circle_flashes_by_whole_micrometre() {
+        // Two 0.3 mm holes and one 0.8 mm, in inches: 0.0118 in = 299.72 µm
+        // and 0.0315 in = 800.1 µm round onto the same keys as Excellon tools.
+        let t = flash_table(
+            "%FSLAX26Y26*%\n%MOIN*%\n%ADD10C,0.0118*%\n%ADD11C,0.0315*%\n\
+             D10*\nX100000Y100000D03*\nX200000Y200000D03*\nD11*\nX300000Y300000D03*\nM02*\n",
+        );
+        assert!(t.untabled.is_empty(), "{:?}", t.untabled);
+        let tools = t.into_drill_tools().unwrap();
+        let rows: Vec<_> = tools
+            .by_diameter_um
+            .iter()
+            .map(|(d, c)| (*d, c.holes, c.slots))
+            .collect();
+        assert_eq!(rows, [(300, 2, 0), (800, 1, 0)]);
+    }
+
+    #[test]
+    fn flash_table_counts_what_it_cannot_hold() {
+        let t = flash_table(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\n%ADD11R,1X1*%\n%ADD12C,0.0001*%\n\
+             D10*\nX0Y0D03*\nX1000000Y0D02*\nX2000000Y0D01*\nX3000000Y0D01*\n\
+             D11*\nX5000000Y5000000D03*\nD12*\nX6000000Y6000000D03*\n\
+             %LPC*%\nD10*\nX0Y0D03*\n%LPD*%\n\
+             G36*\nX0Y0D02*\nX1000000Y0D01*\nX1000000Y1000000D01*\nX0Y0D01*\nG37*\nM02*\n",
+        );
+        assert_eq!(
+            t.untabled,
+            UntabledContent {
+                non_circle_flashes: 1,
+                zero_size_flashes: 1,
+                draws: 2,
+                regions: 1,
+                region_flashes: 0,
+                clear_flashes: 1,
+            }
+        );
+        assert_eq!(t.tools.by_diameter_um[&500].holes, 1);
+        let why = t.into_drill_tools().unwrap_err();
+        assert_eq!(
+            why,
+            "2 draws (slots or routes), 1 region fill, 1 non-circle aperture flash, \
+             1 zero-diameter flash, 1 clear-polarity flash"
+        );
+    }
+
+    #[test]
+    fn flash_table_does_not_count_a_flash_inside_a_region() {
+        let t = flash_table(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\nG36*\nX0Y0D03*\nG37*\nM02*\n",
+        );
+        assert_eq!(t.untabled.region_flashes, 1);
+        assert!(t.tools.by_diameter_um.is_empty());
+        assert_eq!(t.into_drill_tools().unwrap_err(), "1 flash inside a region");
+    }
+
+    #[test]
+    fn flash_table_counts_macro_flashes_as_non_circle() {
+        let t = flash_table(
+            "%FSLAX46Y46*%\n%MOMM*%\n%AMDOT*1,1,0.5,0,0*%\n%ADD10DOT*%\nD10*\nX0Y0D03*\nM02*\n",
+        );
+        assert_eq!(t.untabled.non_circle_flashes, 1);
+        assert!(t.tools.by_diameter_um.is_empty());
     }
 
     #[test]

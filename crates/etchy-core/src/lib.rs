@@ -47,8 +47,8 @@ pub use geo::{
 };
 pub use geom::CIRCLE_SEGMENTS;
 pub use gerber::{
-    coordinate_mismatch_warning, gerber_format, resolve_layer, resolve_layer_with_labels,
-    GerberFormat, Units,
+    coordinate_mismatch_warning, gerber_format, resolve_layer, resolve_layer_detailed,
+    resolve_layer_with_labels, FlashTable, GerberFormat, ResolvedGerber, Units, UntabledContent,
 };
 pub use imagediff::{
     classify_pair_size, crop_top_left, diff_images, Image, ImageDiffOptions, ImageDiffResult,
@@ -149,9 +149,10 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     // fan-out doesn't multiply peak memory (#81). `empty` is the shared placeholder
     // for a one-sided layer's absent side.
     let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
-    // The tool table compares only when every present side has one: an Excellon
-    // file paired with a Gerber-format drill file would otherwise read as every
-    // size added or removed.
+    // The tool table compares only when every present side has one: a drill
+    // layer whose Gerber export drew more than circle flashes has no table
+    // (#457), and pairing it with a tabled side would read as every size added
+    // or removed. Excellon and Gerber tables key sizes alike, so they compare.
     let drill_table = match &pairing {
         LayerPairing::Both { old, new, .. } => match (&old.drill_tools, &new.drill_tools) {
             (Some(o), Some(n)) => report::DrillTableReport::compare(Some(o), Some(n)),
@@ -843,9 +844,51 @@ mod tests {
     }
 
     #[test]
+    fn excellon_and_gerber_drill_layers_compare_by_diameter() {
+        // #457: old is Excellon (metric), new is the same drill as Gerber
+        // flashes in inches plus one more 0.8 mm hole. 0.0118 in rounds to the
+        // 0.3 mm key and 0.0315 in to the 0.8 mm key.
+        let old = drill_layer(
+            "M48\nMETRIC,TZ\nT1C0.300\nT2C0.800\n%\nT1\nX5.0Y5.0\nT2\nX50.0Y50.0\nM30\n",
+        );
+        let resolved = resolve_layer_detailed(
+            b"%FSLAX26Y26*%\n%MOIN*%\n%ADD10C,0.0118*%\n%ADD11C,0.0315*%\n\
+D10*\nX196850Y196850D03*\nD11*\nX1968504Y1968504D03*\nX787402Y787402D03*\nM02*\n",
+        )
+        .unwrap();
+        let new = Layer {
+            geometry: Arc::new(resolved.geometry),
+            drill_tools: Some(resolved.flashes.into_drill_tools().unwrap()),
+            ..old.clone()
+        };
+        let report = compare(&Board { layers: vec![old] }, &Board { layers: vec![new] }).unwrap();
+        let table = report.layers[0].drill_table.as_ref().unwrap();
+        let rows: Vec<_> = table
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.diameter_um,
+                    r.change,
+                    r.counts.old_holes,
+                    r.counts.new_holes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (300, DrillRowChange::Unchanged, 1, 1),
+                (800, DrillRowChange::Changed, 1, 2),
+            ]
+        );
+    }
+
+    #[test]
     fn drill_table_needs_a_tool_table_on_every_present_side() {
-        // An Excellon file paired with a Gerber-format drill file: no table,
-        // rather than every size reading as added or removed.
+        // An Excellon file paired with a drill layer that has no table (a
+        // Gerber export with slots, #457): no table, rather than every size
+        // reading as added or removed.
         let excellon = drill_layer("M48\nMETRIC,TZ\nT1C0.300\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nM30\n");
         let mut gerber = excellon.clone();
         gerber.drill_tools = None;
