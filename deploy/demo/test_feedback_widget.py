@@ -1,6 +1,10 @@
 """Checks the default shell and staged demo feedback assets."""
 
+import math
 import pathlib
+import re
+import sys
+import tempfile
 import unittest
 from html.parser import HTMLParser
 
@@ -49,6 +53,18 @@ class FeedbackWidgetTests(unittest.TestCase):
         self.assertNotIn("userAgent", script)
         self.assertNotIn("clientIp", script)
         self.assertNotIn("c.ua", script)
+
+    def test_widget_limits_match_the_server(self):
+        # The widget refuses what the server would 413 (#250), so the caps must agree.
+        sys.path.insert(0, str(ROOT / "deploy/demo"))
+        from test_etchy_server import _load_server
+        with tempfile.TemporaryDirectory() as tmp:
+            srv = _load_server(tmp, str(pathlib.Path(tmp) / "f.jsonl"))
+        script = (ROOT / "deploy/demo/feedback-widget.js").read_text()
+        for name in ("MAX_SHOTS", "MAX_SHOT_BYTES", "MAX_BODY"):
+            m = re.search(r"\b" + name + r"=([0-9*]+)[,;]", script)
+            self.assertIsNotNone(m, name + " missing from the widget")
+            self.assertEqual(math.prod(int(x) for x in m.group(1).split("*")), getattr(srv, name), name)
 
 
 if __name__ == "__main__":
