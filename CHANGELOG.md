@@ -28,6 +28,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   page and the cap; Settings › Diff shows the lower DPI next to the chips. A
   pair that does not fit even at 72 DPI still fails loud (#223).
 
+### Fixed
+- Site download links and release status now point to the published v0.3.0 release (#483).
+
 ## [0.3.0] - 2026-11-23
 
 ### Added
