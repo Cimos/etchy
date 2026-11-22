@@ -21,7 +21,7 @@ etchy-diff:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
       changes: ["fab/**/*"]
   variables:
-    ETCHY_VERSION: v0.2.0
+    ETCHY_VERSION: v0.3.0
     OLD_DIR: fab/rev-a
     NEW_DIR: fab/rev-b
   script:
@@ -107,7 +107,7 @@ set and falls back to `CI_JOB_TOKEN` otherwise.
 
 ## ARM64 runners
 
-Releases after v0.2.0 also ship `etchy-cli-<tag>-linux-aarch64.tar.gz`. On an
+Releases from v0.3.0 also ship `etchy-cli-<tag>-linux-aarch64.tar.gz`. On an
 ARM64 runner, use `linux-aarch64` in place of `linux-x86_64` in the two lines
 that name the archive and its folder.
 

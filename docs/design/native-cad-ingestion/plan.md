@@ -8,8 +8,8 @@ tool is introduced.
 
 | Release | Content |
 |---|---|
-| 0.3.0 | Stable direct KiCad 6–10 `.kicad_pcb` parsing, native geometry projection, object change list, CLI/JSON v2/Markdown/HTML/native viewer/wasm viewer, pinned-oracle evidence. Recommended single release. |
-| Later patch | Corpus expansion and corrections only; no new format promise. If the owner stages UI work, 0.3.0 ships geometry plus JSON object data and a later patch completes human/viewer object surfaces. |
+| 0.4.0 | Stable direct KiCad 6–10 `.kicad_pcb` parsing, native geometry projection, object change list, CLI/JSON v2/Markdown/HTML/native viewer/wasm viewer, pinned-oracle evidence. Recommended single release. |
+| Later patch | Corpus expansion and corrections only; no new format promise. If the owner stages UI work, 0.4.0 ships geometry plus JSON object data and a later patch completes human/viewer object surfaces. |
 | Later minor | Experimental Altium `.PcbDoc` behind `native-altium-experimental`, only after the pure-Rust reader spike passes. |
 | Later minor | Stable Altium only after parity, licence, format-span, resource and adversarial gates. The version is not promised in advance. |
 
@@ -292,7 +292,7 @@ Crates: all affected; corpus and CI.
 Tests: full matrix plus extended fuzz/property/resource jobs. Exit criterion:
 zero unexplained oracle differences and zero unresolved silent-miss findings.
 
-### PR 20 — documentation and 0.3.0
+### PR 20 — documentation and 0.4.0
 
 Files: README, CLI help/reference, requirements, trust, developer guide, website,
 Action docs, schema, notices, changelog and release workflow.
@@ -361,7 +361,7 @@ tests pass; feature-gated absence must fail clearly.
 | Licence contamination | CC0 font provenance, permissive dependencies, `cargo deny`; AGPL oracle stays separate and test-only. |
 | Altium reader is incomplete or unstable | Experimental exact pin, complete record accounting, independent exports, no stable deadline. |
 
-## Definition of done for KiCad 0.3.0
+## Definition of done for KiCad 0.4.0
 
 1. All numbered stable requirements selected by the owner are implemented.
 2. Every supported record/token has a disposition and every unknown-material
