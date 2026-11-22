@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::{EngineError, Result};
-use crate::geo::{snap_nm, Contour, PolygonSet};
+use crate::geo::{snap_nm, Contour, PolygonSet, NM_PER_MM};
 use crate::geom;
 use crate::gerber::{MAX_CONTOURS_PER_LAYER, MAX_POINTS_PER_LAYER};
 
@@ -36,6 +36,11 @@ use crate::gerber::{MAX_CONTOURS_PER_LAYER, MAX_POINTS_PER_LAYER};
 /// typo or a crafted header (`3:99999999999` asked `format!` for ~100 GB of padding
 /// per coordinate and aborted the process, #308). Fail loud instead.
 const MAX_FORMAT_DIGITS: usize = 9;
+
+/// Furthest a drill hit, slot end or tool size may reach from the origin, in
+/// nm (10 m). Far beyond any panel, so it only stops nonsense: repeat codes
+/// that walked 53,000 holes 3.5 km down one column (a fuzz find).
+const MAX_EXTENT_NM: f64 = 1.0e10;
 
 /// Which zeros a coordinate field keeps (the other side is suppressed). Named for
 /// what's *present* in the file, matching the header keywords `LZ`/`TZ`.
@@ -662,6 +667,14 @@ impl Body {
     /// coordinate is exactly what the unguarded path would have used.
     fn nm(&self, v: f64) -> Result<f64> {
         snap_nm(v)?;
+        if v.abs() > MAX_EXTENT_NM {
+            return Err(EngineError::Parse(format!(
+                "drill coordinate or size {:.3} mm is more than {} m from the origin; \
+                 no board is that large",
+                v / NM_PER_MM as f64,
+                MAX_EXTENT_NM / 1.0e9
+            )));
+        }
         Ok(v)
     }
 
@@ -1304,11 +1317,26 @@ mod tests {
             Err(EngineError::Geometry(_))
         ));
         // Repeats accumulating past the range fail at the hit that crosses it.
+        // The first repeat lands 60 km out: past the board extent, inside the grid.
         let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX0.0Y0.0\nR3X60000000.0\nM30\n";
         assert!(matches!(
             resolve_excellon(src.as_bytes()),
-            Err(EngineError::Geometry(_))
+            Err(EngineError::Parse(_))
         ));
+    }
+
+    /// Fuzz find: `R53123Y-25797` in a 2.4 inch file steps 65.5 mm per hole, so
+    /// the repeat walked 3.5 km. Hits beyond 10 m are an error (200 repeats here,
+    /// under the test contour cap).
+    #[test]
+    fn hits_beyond_ten_metres_fail_loud() {
+        let src = "M48\nINCH,TZ\nT1C0.0098\n%\nT1\nX48202Y-21663\nR200Y-25797\nM30\n";
+        let err = resolve_excellon(src.as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("no board is that large"), "{err}");
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX9999.0Y-9999.0\nM30\n";
+        assert!(resolve_excellon(src.as_bytes()).is_ok());
+        let src = "M48\nMETRIC,TZ\nT1C0.500\n%\nT1\nX10001.0Y0.0\nM30\n";
+        assert!(resolve_excellon(src.as_bytes()).is_err());
     }
 
     #[test]

@@ -96,6 +96,9 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   and with less memory: objects that cannot touch are merged in small groups
   instead of one pass. A drill file whose repeat code laid 50,000 holes in one
   column took over five minutes and 13 GB; it now takes seconds.
+- An Excellon hit, slot end or tool size more than 10 m from the origin now
+  fails with a parse error. A repeat code with a huge count and step walked
+  53,000 holes 3.5 km down one column and took over a minute to load.
 
 ## [0.2.0] — 2026-10-26
 
