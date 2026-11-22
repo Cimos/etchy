@@ -168,6 +168,26 @@ never re-sizes it (#212):
   below the opacity floor a real diff renders as a fixed marker dot. Genuine
   noise (below the min-area filter) is culled *and counted* in the hidden chip.
 
+### Single-set view (#466, VIEW-18)
+
+`etchy-gui <dir|zip>` shows one Gerber/Excellon set with no diff. Everything
+above applies unchanged except:
+
+- **Title** reads `<label>  (single set, not a diff)`; the right side shows the
+  layer count instead of the `+/− mm²` and `n/m layers changed` totals.
+- **Mode picker** is replaced by one selected `Single set` chip whose tooltip
+  says Overlay/Old/Split/Swipe need two revisions. The canvas draws the set as
+  the New view (full-opacity layer colours, no added/removed colour, no legend)
+  with a top-right `single set, not a diff` note.
+- **Diff-only controls stand down**: the mode keys other than New and N/P do
+  nothing; the Changes list becomes a one-line note; Export's buttons are
+  disabled with a "needs two revisions" tooltip.
+- **Becoming a diff**: opening or dropping an old revision diffs it against the
+  set and returns to Overlay; a second set that can't be diffed fails loud and
+  leaves the single set on screen. Opening a new revision replaces the set.
+- **Welcome screen**: with exactly one set loaded, a `View this set alone`
+  button opens it as a single set (native and web). A lone PDF fails loud.
+
 ## 4. Hotkeys
 
 Defaults (KEY-4); all rebindable in Settings › Hotkeys except the fixed aliases:

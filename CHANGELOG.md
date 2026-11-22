@@ -17,6 +17,12 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   `--max-commits` (default 200) fails loud instead of truncating (#424).
   A commit with files but no fab layers on either side (say a first commit
   holding only a README) is listed with pack `absent`, not an error.
+- Viewer single-set view: `etchy-gui <dir|zip>` opens one Gerber/Excellon set
+  on its own, labelled as a single set and not a diff, with the layer list,
+  visibility, pan/zoom and drill layers but no added/removed colouring.
+  Diff-only controls are hidden or disabled. Opening or dropping an old
+  revision turns it into a normal diff, and the welcome screen can show one
+  loaded set alone, including in the web viewer (#466).
 
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
@@ -26,7 +32,14 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   declared format (#429) warns there as it does in the CLI, and a web demo layer
   that fails to parse is named in a warning instead of silently missing from
   the diff (#449).
+- Web viewer: the files of one drag-and-drop now load as one set. The browser
+  reads each file on its own, so they could arrive over several frames and load
+  as a partial board or split across sides. If a file can't be read, the drop
+  now fails with a message instead of loading the rest (#453).
 - Site download links and release status now point to the published v0.2.0 release (#458).
+- Gerber X2 layers use less memory. Labelled objects are stored once in a
+  compact form, not cloned beside the diff geometry. Region labels are
+  unchanged (#443).
 
 ## [0.2.0] — 2026-10-26
 
