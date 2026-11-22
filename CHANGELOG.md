@@ -80,6 +80,10 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   parse error instead of crashing the parser.
 - A Gerber coordinate with more digits than any format allows (over 12
   significant digits) now fails with a parse error instead of overflowing.
+- A Gerber command holding a non-ASCII byte now fails with a parse error
+  instead of crashing the parser. Comments and attribute values may still
+  hold UTF-8. Lines inside a multi-line `%` block are read as part of that
+  block, not as commands of their own.
 
 ## [0.2.0] — 2026-10-26
 

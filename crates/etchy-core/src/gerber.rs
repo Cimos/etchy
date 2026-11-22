@@ -510,7 +510,11 @@ fn normalize(bytes: &[u8]) -> Result<String> {
         if in_ext {
             buf.push(ch);
             if ch == '%' {
-                let block = buf.trim();
+                // One block per line: the parser reads lines, so a line inside a
+                // multi-line block would be parsed as a command of its own. The
+                // parser trims and concatenates a multi-line `%AM` the same way.
+                let joined: String = buf.split(['\n', '\r']).map(str::trim).collect();
+                let block = joined.trim();
                 check_block(block)?;
                 // `%LN` only names the layer; it carries no geometry (#316).
                 if !block.starts_with("%LN") || !block.ends_with("*%") {
@@ -633,6 +637,14 @@ fn emit_command(tok: &str, out: &mut String) -> Result<()> {
             })
         }
         _ => {}
+    }
+    // Commands are ASCII; only a comment may carry other text. The parser
+    // slices commands by byte offset and panics inside a multi-byte character.
+    if !tok.is_ascii() && !tok.starts_with("G04") {
+        return Err(EngineError::Parse(format!(
+            "non-ASCII character in command: {}",
+            excerpt(tok)
+        )));
     }
     // Deprecated combined select, e.g. "G54D10" → "D10".
     if let Some(rest) = tok.strip_prefix("G54").filter(|r| r.starts_with('D')) {
@@ -1826,6 +1838,35 @@ mod tests {
         assert!(
             resolve_layer(format!("{HDR}X0000000000000001000000Y0D03*\nM02*\n").as_bytes()).is_ok()
         );
+    }
+
+    /// Fuzz find: `G0` followed by a non-ASCII byte made the parser slice
+    /// inside a multi-byte character. It must be a parse error.
+    #[test]
+    fn non_ascii_in_a_command_is_a_parse_error() {
+        for op in [&b"G0\xC0"[..], b"X0\xE2\x82\xACY0D03", "G0µ".as_bytes()] {
+            let mut g = HDR.as_bytes().to_vec();
+            g.extend_from_slice(op);
+            g.extend_from_slice(b"*\nM02*\n");
+            let err = resolve_layer(&g).unwrap_err();
+            assert!(err.to_string().contains("non-ASCII"), "{err}");
+        }
+        assert_parse_error_no_panic(b"G0\xC0*");
+        // Comments and attribute values may hold UTF-8.
+        let ok = format!("G04 µ-via 0.2 mm*\n{HDR}%TO.N,Net-(µ1)*%\nX0Y0D03*\nM02*\n");
+        assert!(resolve_layer(ok.as_bytes()).is_ok());
+    }
+
+    /// Fuzz find: a line inside a multi-line extended block was parsed as a
+    /// command of its own, so a bare `G0` line sliced past its end.
+    #[test]
+    fn lines_inside_an_extended_block_are_not_commands() {
+        // Joined, this is one (user-defined) file attribute with no geometry.
+        let g = format!("{HDR}%TF.Project10-03*\nG0\nX*1*%\nX0Y0D03*\nM02*\n");
+        assert!(resolve_layer(g.as_bytes()).is_ok());
+        // A multi-line macro still reads as one block.
+        let am = "%FSLAX46Y46*%\n%MOMM*%\n%AMBOX*\n21,1,1.0,1.0,\n0,0,0*\n%\n%ADD10BOX*%\nD10*\nX0Y0D03*\nM02*\n";
+        assert!((area_mm2(am) - 1.0).abs() < 1e-6, "{}", area_mm2(am));
     }
 
     /// A fuzz input must give a typed error, and not by way of the catch_unwind
