@@ -30,3 +30,8 @@ multiple-versions = "warn"
 [advisories]
 version = 2
 yanked = "deny"
+# chrono comes in through gerber-types and gerber_parser. It was marked
+# unmaintained with no safe upgrade yet. Drop this once those crates move off it.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; pulled in by gerber-types, no safe upgrade yet" },
+]
