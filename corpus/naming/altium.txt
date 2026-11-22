@@ -1,0 +1,29 @@
+# Altium Designer default fab-pack names (baseline; must not change).
+# Format: <filename> => <kind>. See corpus/naming/README.md.
+Board.GTL => top-copper
+Board.GBL => bottom-copper
+Board.G1 => inner-copper-1
+Board.G2 => inner-copper-2
+Board.GTS => top-mask
+Board.GBS => bottom-mask
+Board.GTO => top-silk
+Board.GBO => bottom-silk
+Board.GTP => top-paste
+Board.GBP => bottom-paste
+Board.GKO => outline
+Board.GM1 => outline
+Board.GM => outline
+Board.GD1 => documentation
+Board.GG1 => documentation
+Board.GPT => documentation
+Board.GPB => documentation
+Board-Plated.drl => drill-pth
+Board-NonPlated.drl => drill-npth
+# Internal planes number separately from mid layers (.GP1 and .G1 can both be
+# "inner 1"), so the stack position is unknown.
+Board.GP1 => other
+Board.GM2 => other
+# Excellon .TXT drills are routed to Drill by content, not by name.
+Board.TXT => other
+Board.DRR => other
+Pick Place for Board.txt => placement
