@@ -13,9 +13,10 @@ ground-up in **Rust**. Successor to the Python tool gerber-diff (frozen at
 `Cimos/Gerber-Diff-Tool` v0.11). `etchy old/ new/` → crisp SVG overlay + change
 heatmap + JSON magnitudes, on any Gerber/Excellon fab pack.
 
-**Status (2026-10-26):** v0.2.0 is released with changed-region
-lists, X2 labels, drill table diffs and updated CI recipes.
-Native KiCad input is planned for v0.3.0.
+**Status (2026-11-23):** v0.3.0 is prepared (tag pending) with `etchy log`,
+waivers, Gerber drill tables, the single-set viewer, a Linux ARM64 CLI and
+signed build provenance. v0.2.0 was released 2026-10-26.
+Native KiCad input is planned for v0.4.0.
 
 ## Decisions that constrain the work (from `docs/PRODUCT_DISCOVERY.md`)
 
@@ -28,7 +29,7 @@ Native KiCad input is planned for v0.3.0.
 - **Trust bar is top-tier: no silent misses.** Golden corpus + property + fuzz
   tests; fail-loud over wrong-but-quiet.
 - **Inputs:** Gerber RS-274X/X2, Excellon, schematic PDF (pixel); native KiCad
-  `.kicad_pcb` (then Altium `.PcbDoc`) parsed directly is planned for 0.3.0 — see
+  `.kicad_pcb` (then Altium `.PcbDoc`) parsed directly is planned for 0.4.0 — see
   `docs/design/native-cad-ingestion/`. **Non-goals:** IPC-2581/ODB++, native
   schematics, net/connectivity diff, BOM/component diff, DRC. The native object
   change list shows net names as labels only. Hold this line — don't drift into
@@ -44,7 +45,7 @@ Native KiCad input is planned for v0.3.0.
 | `etchy-cli` | binary `etchy` — primary CLI/CI surface. Exit codes: 0 no diff · 1 diff · 2 error. |
 | `etchy-gui` | native egui viewer (separate binary; never compiled headless). |
 | `etchy-pdf` | schematic-PDF pixel diff (feature-gated; uses pure-Rust `hayro`). |
-| `etchy-kicad` | bounded `.kicad_pcb` S-expression parser (0.3.0 work in progress). |
+| `etchy-kicad` | bounded `.kicad_pcb` S-expression parser (0.4.0 work in progress). |
 
 ## Conventions
 
@@ -59,5 +60,5 @@ Native KiCad input is planned for v0.3.0.
 ## Next work
 
 See `docs/ROADMAP.md` "Where we are" and `docs/REQUIREMENTS.md` for statuses.
-Current front: native KiCad parsing (0.3.0 plan in `docs/design/native-cad-ingestion/plan.md`); WSLg clicks (#203).
-v0.2.0 is released (2026-10-26); the container is on ghcr and the repo is public.
+Current front: native KiCad parsing (0.4.0 plan in `docs/design/native-cad-ingestion/plan.md`); WSLg clicks (#203).
+v0.3.0 is prepared and v0.2.0 is released (2026-10-26); the container is on ghcr and the repo is public.
