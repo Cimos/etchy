@@ -10,7 +10,7 @@
 //! up as a board does (SVG Y grows downward; board Y grows upward).
 
 use crate::geo::{PolygonSet, NM_PER_MM};
-use crate::report::{DrillTableReport, LayerStatus};
+use crate::report::{DrillTableReport, LayerReport};
 use crate::view::{BoardDiff, LayerView};
 
 /// Base (unchanged board) fill — faint grey so the diff colours read on top.
@@ -225,28 +225,40 @@ pub fn board_report_html_with_limit(
             continue;
         }
         any = true;
-        let c = &layer.change;
-        s.push_str(&format!(
-            "<section><h2>{}</h2><div class=\"mag\">\
-             <span class=\"add\">+{:.4} mm&sup2;</span> \
-             <span class=\"rem\">&minus;{:.4} mm&sup2;</span> &middot; \
-             +{} / &minus;{} regions</div>\n<div class=\"diff\">\n",
-            xml_escape(&layer.name()),
-            c.added_area_mm2(),
-            c.removed_area_mm2(),
-            c.added_region_count,
-            c.removed_region_count,
-        ));
-        s.push_str(&layer_svg(layer));
-        s.push_str("\n</div>");
         // Match on the labels too: a pack can hold two layers of one kind (two
         // generic drill files), and each must get its own tables.
-        if let Some(report) = diff.report.layers.iter().find(|r| {
+        let report = diff.report.layers.iter().find(|r| {
             r.kind == layer.kind.kind_str()
                 && r.inner_index == layer.kind.inner_index()
                 && r.label_old == layer.label_old
                 && r.label_new == layer.label_new
-        }) {
+        });
+        // A drill layer whose geometry is identical but whose hole counts
+        // differ (a hole drilled twice at one spot, #456) has an empty
+        // overlay; say where the change is and show only its table.
+        if report.is_some_and(LayerReport::drill_counts_only) {
+            s.push_str(&format!(
+                "<section><h2>{}</h2><div class=\"mag\">geometry unchanged; \
+                 changed in the drill table only (hole or slot counts)</div>\n",
+                xml_escape(&layer.name())
+            ));
+        } else {
+            let c = &layer.change;
+            s.push_str(&format!(
+                "<section><h2>{}</h2><div class=\"mag\">\
+                 <span class=\"add\">+{:.4} mm&sup2;</span> \
+                 <span class=\"rem\">&minus;{:.4} mm&sup2;</span> &middot; \
+                 +{} / &minus;{} regions</div>\n<div class=\"diff\">\n",
+                xml_escape(&layer.name()),
+                c.added_area_mm2(),
+                c.removed_area_mm2(),
+                c.added_region_count,
+                c.removed_region_count,
+            ));
+            s.push_str(&layer_svg(layer));
+            s.push_str("\n</div>");
+        }
+        if let Some(report) = report {
             if let Some(table) = report.shown_drill_table() {
                 s.push_str(&drill_table_html(table));
             }
@@ -267,23 +279,6 @@ pub fn board_report_html_with_limit(
             }
         }
         s.push_str("</section>\n");
-    }
-    // A drill layer whose geometry is unchanged but whose hole counts differ
-    // (a hole drilled twice at one spot) has no overlay, only its table.
-    for report in &diff.report.layers {
-        if report.status != LayerStatus::Unchanged {
-            continue;
-        }
-        if let Some(table) = report.shown_drill_table() {
-            any = true;
-            s.push_str(&format!(
-                "<section><h2>{}</h2><div class=\"mag\">geometry unchanged; \
-                 hole counts differ</div>\n",
-                xml_escape(&report.name())
-            ));
-            s.push_str(&drill_table_html(table));
-            s.push_str("</section>\n");
-        }
     }
     if !any {
         s.push_str(
@@ -478,23 +473,43 @@ mod tests {
             &drill.change,
         );
         changed.drill_table = DrillTableReport::compare(Some(&tools(2)), Some(&tools(3)));
-        // Unchanged geometry, different count: a section with only the table.
+        // Unchanged geometry, different count (#456): the layer is changed, but
+        // its section has no overlay, only the table.
+        let twice_view = LayerView {
+            kind: LayerKind::Drill(crate::model::DrillKind::NonPlated),
+            label_old: Some("old-NPTH.drl".into()),
+            label_new: Some("new-NPTH.drl".into()),
+            status: LayerStatus::Changed,
+            old: std::sync::Arc::new(PolygonSet::default()),
+            new: std::sync::Arc::new(PolygonSet::default()),
+            added: PolygonSet::default(),
+            removed: PolygonSet::default(),
+            change: crate::diff::LayerChange::default(),
+        };
         let mut twice = LayerReport::new(
-            LayerKind::Drill(crate::model::DrillKind::NonPlated),
-            Some("old-NPTH.drl".into()),
-            Some("new-NPTH.drl".into()),
-            LayerStatus::Unchanged,
-            &crate::diff::LayerChange::default(),
+            twice_view.kind,
+            twice_view.label_old.clone(),
+            twice_view.label_new.clone(),
+            twice_view.status,
+            &twice_view.change,
         );
-        twice.drill_table = DrillTableReport::compare(Some(&tools(1)), Some(&tools(2)));
+        twice.set_drill_table(DrillTableReport::compare(Some(&tools(1)), Some(&tools(2))));
         let diff = crate::view::BoardDiff {
             report: DiffReport::new(vec![changed, twice], Vec::new()),
-            layers: vec![drill],
+            layers: vec![drill, twice_view],
         };
         let html = board_report_html(&diff, "revA", "revB");
         assert_eq!(html.matches("<h3>Drill table</h3>").count(), 2, "{html}");
+        assert_eq!(
+            html.matches("<svg").count(),
+            1,
+            "no overlay for counts only"
+        );
         assert!(html.contains("<tr><td>0.300</td><td>2</td><td>3</td><td>changed</td></tr>"));
-        assert!(html.contains("<h2>drill-npth</h2><div class=\"mag\">geometry unchanged"));
+        assert!(html.contains(
+            "<h2>drill-npth</h2><div class=\"mag\">geometry unchanged; \
+             changed in the drill table only"
+        ));
         assert!(html.contains("<tr><td>total</td><td>1</td><td>2</td><td></td></tr>"));
     }
 }

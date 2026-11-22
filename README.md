@@ -42,6 +42,11 @@ Gate CI on the **magnitude** and **location** of change:
 etchy old/ new/ --gate-layers copper --fail-on-area 0.5
 ```
 
+A change in a drill layer's hole or slot counts per tool size is a diff too
+(exit 1), even when the drilled geometry is identical — say a hole drilled
+twice at one spot. It fails any gate that includes that drill layer, whatever
+the thresholds.
+
 **Every PR that touches Gerbers gets a layer-by-layer diff comment** — five lines
 add the Action to a repo (full recipe in
 [`docs/ci-recipes/etchy-pr-diff.yml`](docs/ci-recipes/etchy-pr-diff.yml)):

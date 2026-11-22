@@ -165,7 +165,12 @@ top-paste        unchanged          0.00000      0.00000         0         0
 outline          unchanged          0.00000      0.00000         0         0
 
 10 of 13 layer(s) changed; total <span class="add">+213.29638</span> mm² / <span class="rem">-448.70036</span> mm² (967+/863- regions)
-result: differences found</pre>
+drill-npth 2.200 mm: 6 -&gt; 0 holes (removed)
+drill-npth 3.200 mm: 0 -&gt; 6 holes (added)
+drill-npth total: 88 -&gt; 88 holes
+drill 0.249 mm: 208 -&gt; 222 holes, 0 -&gt; 0 slots (changed)
+drill total: 218 -&gt; 232 holes, 27 -&gt; 27 slots
+result: differences found — hole counts changed on drill-npth, drill (drill table)</pre>
 
     <h3 style="font-size:17px;margin:22px 0 4px">Every flag</h3>
     <table>
@@ -177,7 +182,7 @@ result: differences found</pre>
       <tr><td><code>--json</code></td><td>Deprecated alias for <code>--format json</code>. Still works.</td></tr>
       <tr><td><code>--svg &lt;DIR&gt;</code></td><td>Write one SVG overlay per changed layer into this directory (<code>00-top-copper.svg</code>, <code>01-inner-copper1.svg</code>, …). Created if missing.</td></tr>
       <tr><td><code>--html &lt;FILE&gt;</code></td><td>Write a single self-contained HTML report: totals, warnings, and every changed layer's overlay inlined. No external assets, so it travels as one file.</td></tr>
-      <tr><td><code>--fail-on-area &lt;MM2&gt;</code></td><td>CI gate: exit 1 only when the changed area on the gated layers exceeds this many mm². With neither threshold set, any change on the gated layers fails.</td></tr>
+      <tr><td><code>--fail-on-area &lt;MM2&gt;</code></td><td>CI gate: exit 1 only when the changed area on the gated layers exceeds this many mm². With neither threshold set, any change on the gated layers fails. A drill hole or slot count change on a gated layer fails whatever the thresholds — it has no area to measure.</td></tr>
       <tr><td><code>--fail-on-regions &lt;N&gt;</code></td><td>CI gate on the changed region count instead. Set both and either one being exceeded fails.</td></tr>
       <tr><td><code>--gate-layers &lt;SPEC&gt;</code></td><td>Which layers the gate looks at: <code>all</code> (default), or a comma list of <code>copper</code>, <code>mask</code>, <code>silk</code>, <code>paste</code>, <code>drill</code> (all drill files), <code>pth</code> (plated drill only), <code>npth</code> (non-plated drill only), <code>outline</code>, <code>documentation</code> (alias <code>docs</code>), <code>placement</code>, <code>other</code>. Group names match exactly. An unknown name is a loud error, never a silently disarmed gate.</td></tr>
       <tr><td><code>--dpi &lt;DPI&gt;</code></td><td>PDF inputs only: rasterization resolution, default 150. Higher is crisper but costs memory and time (per-page pixel area is capped).</td></tr>
@@ -209,7 +214,7 @@ result: differences found</pre>
     <table>
       <tr><th>Code</th><th>Meaning</th></tr>
       <tr><td><code>0</code></td><td>Nothing to block on — either the two revisions are identical, or a gate is configured and the change came in under it</td></tr>
-      <tr><td><code>1</code></td><td>Differences found — the revisions differ (the normal “what changed” result)</td></tr>
+      <tr><td><code>1</code></td><td>Differences found — the revisions differ (the normal “what changed” result). A drill hole or slot count change per tool size counts, even with identical geometry</td></tr>
       <tr><td><code>2</code></td><td>Error — a comparison couldn't be made: the inputs aren't the <strong>same board</strong> (extents mismatch — etchy compares revisions of one board, not two different boards), a layer failed to parse, or files are missing</td></tr>
     </table>
   </section>
