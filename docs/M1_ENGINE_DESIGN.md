@@ -101,10 +101,18 @@ revision compare; draws, regions, other apertures or clear flashes on it leave
 it with no table and a warning naming what could not be counted. Two tool
 numbers of one size share a row; a changed diameter is one size removed and
 another added. Markdown and HTML show the whole table for a changed drill
-layer, and for an unchanged one whose counts differ (a hole drilled twice at
-one spot); the terminal summary lists only the sizes that differ, plus the
-layer total. Counts do not change the layer status or the exit
-code; the geometry diff still decides those.
+layer; the terminal summary lists only the sizes that differ, plus the
+layer total.
+
+A count change is a change (#456): when any size is added, removed, or has a
+different hole or slot count, the layer carries `drill_counts_changed: true`
+(omitted when false) and its status is changed even if the geometry is
+identical (a hole drilled twice at one spot), so the CLI exits 1. Its areas and
+region counts stay zero; Markdown, HTML and the terminal summary say the change
+is in the drill table only. Renumbering tools of one size with the same counts
+is not a change, because rows key on diameter. The CLI gate fails on a count
+change on any gated layer whatever `--fail-on-area`/`--fail-on-regions` say,
+and lists those layers in `gate.drill_count_layers`.
 
 Markdown and HTML show the largest 10 regions per changed layer by default;
 `--top-regions N` selects 1–100. JSON contains every reported region, independently

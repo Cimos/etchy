@@ -89,6 +89,8 @@ struct Cli {
 
     /// CI gate: fail (exit 1) only when the changed area on the gated layers
     /// exceeds this many mm². Omitted ⇒ any change on the gated layers fails.
+    /// A drill hole or slot count change on a gated layer (the drill table)
+    /// fails whatever the thresholds: it has no area to measure.
     #[arg(long, value_name = "MM2")]
     fail_on_area: Option<f64>,
     /// CI gate: fail (exit 1) only when the changed region count on the gated
@@ -263,8 +265,23 @@ impl Gate {
             })
     }
 
-    /// Should this diff fail the gate (exit 1)?
+    /// Gated layers whose drill table counts changed (#456), by display name.
+    fn drill_count_layers(&self, report: &DiffReport) -> Vec<String> {
+        report
+            .layers
+            .iter()
+            .filter(|l| l.drill_counts_changed && self.filter.includes(l.kind))
+            .map(|l| l.name())
+            .collect()
+    }
+
+    /// Should this diff fail the gate (exit 1)? A hole-count change on a gated
+    /// layer always fails (#456): the area and region thresholds measure
+    /// geometry, and a hole drilled twice has none to measure.
     fn fails(&self, report: &DiffReport) -> bool {
+        if !self.drill_count_layers(report).is_empty() {
+            return true;
+        }
         let (area, regions) = self.totals(report);
         match (self.fail_on_area, self.fail_on_regions) {
             // No threshold set → any change on the gated layers fails.
@@ -287,13 +304,18 @@ impl Gate {
         } else {
             self.tokens_desc()
         };
-        format!(
+        let mut line = format!(
             "etchy: gate {} — {}: changed {:.4} mm², {} regions",
             if fails { "FAIL" } else { "PASS" },
             scope,
             area,
             regions,
-        )
+        );
+        let drill = self.drill_count_layers(report);
+        if !drill.is_empty() {
+            line.push_str(&format!("; hole counts changed on {}", drill.join(", ")));
+        }
+        line
     }
 
     fn tokens_desc(&self) -> String {
@@ -315,6 +337,7 @@ impl Gate {
             },
             changed_area_mm2: area,
             changed_regions: regions,
+            drill_count_layers: self.drill_count_layers(report),
             fail_on_area: self.fail_on_area,
             fail_on_regions: self.fail_on_regions,
         }
@@ -331,7 +354,8 @@ struct GateVerdict {
     /// True ⇔ the process exits 0. With a configured gate this can be true even
     /// when geometry differs (the change was within the gate).
     passed: bool,
-    /// Whether any geometry changed at all, regardless of the gate.
+    /// Whether anything changed at all (geometry or drill counts), regardless
+    /// of the gate.
     #[serde(skip)]
     differs: bool,
     /// Human description of the gated layer scope (`all layers`, `copper`, …).
@@ -339,6 +363,10 @@ struct GateVerdict {
     /// Changed area / region count summed over the gated layers.
     changed_area_mm2: f64,
     changed_regions: u32,
+    /// Gated layers whose drill table hole or slot counts changed (#456).
+    /// Any entry fails the gate, whatever the thresholds. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    drill_count_layers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fail_on_area: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -360,8 +388,13 @@ impl GateVerdict {
                  ({}: {:.5} mm², {} regions)",
                 self.scope, self.changed_area_mm2, self.changed_regions
             )
-        } else {
+        } else if self.drill_count_layers.is_empty() {
             "result: differences found".to_string()
+        } else {
+            format!(
+                "result: differences found — hole counts changed on {} (drill table)",
+                self.drill_count_layers.join(", ")
+            )
         }
     }
 
@@ -371,13 +404,22 @@ impl GateVerdict {
         if !self.configured {
             return;
         }
+        let drill = if self.drill_count_layers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; hole counts changed on {}",
+                self.drill_count_layers.join(", ")
+            )
+        };
         s.push_str(&format!(
-            "\n> **Gate {}** (exit {}) — {}: {:.4} mm², {} regions.\n",
+            "\n> **Gate {}** (exit {}) — {}: {:.4} mm², {} regions{}.\n",
             if self.passed { "PASS" } else { "FAIL" },
             if self.passed { 0 } else { 1 },
             self.scope,
             self.changed_area_mm2,
             self.changed_regions,
+            drill,
         ));
     }
 }
@@ -833,6 +875,12 @@ fn format_summary(report: &DiffReport, verdict: &GateVerdict) -> String {
             text
         };
         let name = l.name();
+        if l.drill_counts_only() {
+            let _ = writeln!(
+                s,
+                "{name}: changed in the drill table only (hole or slot counts); geometry identical"
+            );
+        }
         for r in table
             .rows
             .iter()
@@ -919,6 +967,8 @@ mod tests {
             regions: Vec::new(),
             labels_available: false,
             drill_table: None,
+            drill_counts_changed: false,
+            geometry_changed: area_mm2 > 0.0 || regions > 0,
         }
     }
 
@@ -1209,6 +1259,60 @@ mod tests {
     fn default_gate_fails_on_any_change() {
         // No thresholds, all layers → any change fails (the 0/1 contract).
         assert!(gate(None, None, "all").fails(&report()));
+    }
+
+    /// A drill layer with identical geometry whose hole counts changed (#456).
+    fn drill_counts_only_report() -> DiffReport {
+        let mut drill = layer("drill-pth", 0.0, 0);
+        drill.status = LayerStatus::Changed;
+        drill.drill_counts_changed = true;
+        DiffReport::new(vec![drill, layer("top-silk", 0.02, 1)], Vec::new())
+    }
+
+    #[test]
+    fn hole_count_change_fails_every_gate_that_includes_the_layer() {
+        let r = drill_counts_only_report();
+        assert!(gate(None, None, "all").fails(&r));
+        assert!(gate(None, None, "drill").fails(&r));
+        assert!(gate(None, None, "pth").fails(&r));
+        // Thresholds measure geometry; a count change has none and still fails.
+        assert!(gate(Some(100.0), None, "all").fails(&r));
+        assert!(gate(None, Some(100), "drill").fails(&r));
+        // Out of scope: the gate ignores it like any other ungated layer.
+        assert!(!gate(None, None, "copper").fails(&r));
+        assert!(!gate(None, None, "npth").fails(&r));
+        assert!(!gate(Some(1.0), None, "all").fails(&DiffReport::new(
+            vec![layer("top-silk", 0.02, 1)],
+            Vec::new()
+        )));
+    }
+
+    #[test]
+    fn hole_count_change_is_named_in_every_output() {
+        let r = drill_counts_only_report();
+        let v = gate(None, None, "drill").verdict(&r);
+        assert!(!v.passed);
+        assert_eq!(v.drill_count_layers, ["drill-pth"]);
+        let summary = format_summary(&r, &v);
+        assert!(
+            summary.ends_with(
+                "result: differences found — hole counts changed on drill-pth (drill table)"
+            ),
+            "{summary}"
+        );
+        let json = board_json(&r, &v);
+        assert!(json.contains("\"drill_count_layers\""), "{json}");
+        assert!(json.contains("\"drill_counts_changed\": true"), "{json}");
+        let mut md = String::new();
+        v.append_markdown_note(&mut md);
+        assert!(md.contains("hole counts changed on drill-pth"), "{md}");
+        let g = gate(None, None, "drill");
+        assert!(g
+            .describe(&r, true)
+            .ends_with("; hole counts changed on drill-pth"));
+        // No count change: the JSON gate object stays as before.
+        let plain = gate(None, None, "all").verdict(&report());
+        assert!(!board_json(&report(), &plain).contains("drill_count_layers"));
     }
 
     #[test]

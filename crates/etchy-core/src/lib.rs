@@ -220,7 +220,13 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     }
     let (added, removed) = d.reported_regions();
     let change = d.measure_regions(&added, &removed);
-    let status = if change.is_unchanged() {
+    // A hole-count change is a change even when the geometry is identical (a
+    // hole drilled twice at one spot, #456). The table keys sizes by diameter,
+    // so renumbering tools of one size with the same counts is not one.
+    let drill_counts_changed = drill_table
+        .as_ref()
+        .is_some_and(report::DrillTableReport::has_changes);
+    let status = if change.is_unchanged() && !drill_counts_changed {
         LayerStatus::Unchanged
     } else {
         default_status
@@ -232,7 +238,7 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         (&new_x2, &old_x2)
     };
     report.labels_available = old_x2.is_some() || new_x2.is_some();
-    report.drill_table = drill_table;
+    report.set_drill_table(drill_table);
     // Index each side's labelled objects once per layer, not once per region:
     // a scan of every object for every region is quadratic on big changes.
     let added_index = added_x2.as_deref().map(|o| LabelIndex::new(o));
@@ -882,6 +888,71 @@ D10*\nX196850Y196850D03*\nD11*\nX1968504Y1968504D03*\nX787402Y787402D03*\nM02*\n
                 (800, DrillRowChange::Changed, 1, 2),
             ]
         );
+    }
+
+    fn drill_status(old: Layer, new: Layer) -> (LayerStatus, bool, bool) {
+        let report = compare(&Board { layers: vec![old] }, &Board { layers: vec![new] }).unwrap();
+        let l = &report.layers[0];
+        (l.status, l.drill_counts_changed, report.any_changes())
+    }
+
+    #[test]
+    fn hole_drilled_twice_changes_the_layer() {
+        // #456: identical geometry, one more hit at the same spot.
+        let old = drill_layer("M48\nMETRIC,TZ\nT1C0.300\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nM30\n");
+        let new =
+            drill_layer("M48\nMETRIC,TZ\nT1C0.300\n%\nT1\nX5.0Y5.0\nX5.0Y5.0\nX50.0Y50.0\nM30\n");
+        assert_eq!(
+            drill_status(old.clone(), new),
+            (LayerStatus::Changed, true, true)
+        );
+        let report = compare(
+            &Board {
+                layers: vec![old.clone()],
+            },
+            &Board { layers: vec![old] },
+        )
+        .unwrap();
+        assert_eq!(report.layers[0].status, LayerStatus::Unchanged);
+    }
+
+    #[test]
+    fn same_size_tool_renumbering_is_not_a_change() {
+        // #456: T1 and T2 are both 0.3 mm and swap holes; every size keeps its
+        // count, so nothing changed.
+        let old = drill_layer(
+            "M48\nMETRIC,TZ\nT1C0.300\nT2C0.300\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\nM30\n",
+        );
+        let new = drill_layer(
+            "M48\nMETRIC,TZ\nT1C0.300\nT2C0.300\n%\nT1\nX20.0Y20.0\nT2\nX5.0Y5.0\nX50.0Y50.0\nM30\n",
+        );
+        assert_eq!(
+            drill_status(old, new),
+            (LayerStatus::Unchanged, false, false)
+        );
+    }
+
+    #[test]
+    fn gerber_drill_flash_twice_changes_the_layer() {
+        // #456 applies to the tables built from Gerber drill layers (#457).
+        let gerber = |body: &str| {
+            let resolved = resolve_layer_detailed(
+                format!("%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.3*%\nD10*\n{body}M02*\n").as_bytes(),
+            )
+            .unwrap();
+            Layer {
+                kind: LayerKind::Drill(DrillKind::Plated),
+                label: "PTH-drl.gbr".into(),
+                geometry: Arc::new(resolved.geometry),
+                negative: false,
+                x2_objects: None,
+                drill_tools: Some(resolved.flashes.into_drill_tools().unwrap()),
+            }
+        };
+        let corners = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let old = gerber(corners);
+        let new = gerber(&format!("{corners}X5000000Y5000000D03*\n"));
+        assert_eq!(drill_status(old, new), (LayerStatus::Changed, true, true));
     }
 
     #[test]

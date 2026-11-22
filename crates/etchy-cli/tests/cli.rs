@@ -274,6 +274,83 @@ fn gerber_drill_layer_compares_with_excellon_in_the_drill_table() {
 }
 
 #[test]
+fn hole_count_change_sets_the_exit_code() {
+    // #456: a drill-table count change is a diff even with identical geometry;
+    // renumbering tools of one size is not.
+    let root = scratch("drill-count-exit");
+    let drill = |name: &str, body: &str| {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("board-PTH.drl"),
+            format!("M48\nMETRIC,TZ\nT1C0.300\nT2C0.300\n%\n{body}M30\n"),
+        )
+        .unwrap();
+        dir
+    };
+    let old = drill("old", "T1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\n");
+    let twice = drill(
+        "twice",
+        "T1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\nX20.0Y20.0\n",
+    );
+    let swapped = drill("swapped", "T1\nX20.0Y20.0\nT2\nX5.0Y5.0\nX50.0Y50.0\n");
+    let moved = drill("moved", "T1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX30.0Y30.0\n");
+    let code = |new: &Path, extra: &[&str]| {
+        let out = etchy().args(extra).arg(&old).arg(new).output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+
+    let (exit, text, _) = code(&twice, &[]);
+    assert_eq!(exit, Some(1), "a hole drilled twice is a diff: {text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("drill-pth ") && l.contains(" changed ")),
+        "{text}"
+    );
+    assert!(
+        text.contains("drill-pth: changed in the drill table only"),
+        "{text}"
+    );
+    assert!(text.contains("hole counts changed on drill-pth (drill table)"));
+
+    let (exit, json, _) = code(&twice, &["--format", "json"]);
+    assert_eq!(exit, Some(1));
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["any_changes"], true);
+    assert_eq!(value["layers"][0]["status"], "changed");
+    assert_eq!(value["layers"][0]["drill_counts_changed"], true);
+    assert_eq!(value["layers"][0]["added_regions"], 0);
+    assert_eq!(value["gate"]["passed"], false);
+    assert_eq!(value["gate"]["drill_count_layers"][0], "drill-pth");
+
+    let (exit, md, _) = code(&twice, &["--format", "md"]);
+    assert_eq!(exit, Some(1));
+    assert!(md.contains("**drill-pth** changed in the drill table only"));
+
+    // Gating: thresholds don't wave it through; a scope without drill does.
+    let (exit, _, err) = code(&twice, &["--fail-on-area", "100"]);
+    assert_eq!(exit, Some(1));
+    assert!(err.contains("hole counts changed on drill-pth"), "{err}");
+    assert_eq!(code(&twice, &["--gate-layers", "pth"]).0, Some(1));
+    assert_eq!(code(&twice, &["--gate-layers", "copper"]).0, Some(0));
+
+    // Same-size tool swap: every size keeps its count, so no diff.
+    let (exit, text, _) = code(&swapped, &[]);
+    assert_eq!(exit, Some(0), "{text}");
+    assert!(text.contains("result: no differences"), "{text}");
+
+    // A geometry change still exits 1, and is not "drill table only".
+    let (exit, text, _) = code(&moved, &[]);
+    assert_eq!(exit, Some(1), "{text}");
+    assert!(!text.contains("drill table only"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn passing_gate_output_matches_exit_0() {
     // #258: a change smaller than --fail-on-area exits 0, but the summary/JSON
     // used to say "differences found" / any_changes:true with no hint that the
