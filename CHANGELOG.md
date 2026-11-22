@@ -14,6 +14,11 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - Filename classification covers the default output names of Eagle, OrCAD
   Layout, Allegro and EasyEDA, with Protel pinned alongside Altium. Each scheme
   has a corpus list under `corpus/naming/`; ambiguous names stay `other` (#426).
+- Drill table diffs cover drill layers exported as Gerber: each circle flash
+  counts as a hole of its aperture diameter, so an Excellon revision and a
+  Gerber revision compare by size. A Gerber drill layer with slots, regions or
+  other apertures gets no table and a warning saying what it could not count
+  (#457).
 - Viewer single-set view: `etchy-gui <dir|zip>` opens one Gerber/Excellon set
   on its own, labelled as a single set and not a diff, with the layer list,
   visibility, pan/zoom and drill layers but no added/removed colouring.
@@ -25,6 +30,15 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - An Allegro `DRILL.art` film is classified as documentation (a drill drawing)
   instead of the drill layer (#426).
 
+- **Behaviour change:** a drill-table count change is now a diff (#456). When a
+  drill layer's hole or slot count changes for any tool size, the layer is
+  `changed` and the CLI exits 1, even if the geometry is identical (a hole
+  drilled twice at one spot). Renumbering tools of one size with the same
+  counts is not a change. The summary, Markdown and HTML say the change is in
+  the drill table only. JSON adds `drill_counts_changed` on the layer and
+  `gate.drill_count_layers`. A count change on a gated layer fails the CI gate
+  whatever `--fail-on-area`/`--fail-on-regions` say. This applies to tables
+  built from Excellon and from Gerber drill layers.
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
   "gerber parse failed". The message now reads "parse failed", after the
