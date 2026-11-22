@@ -294,7 +294,7 @@ mod tests {
         let gerber = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n%TO.C,U7*%\nX10000000Y10000000D03*\nM02*\n";
         let (board, _, _) = board_from_bytes(vec![("board.gtl".into(), gerber.to_vec())]).unwrap();
         let objects = board.layers[0].x2_objects.as_ref().unwrap();
-        assert_eq!(objects[0].labels.refdes.as_deref(), Some("U7"));
+        assert_eq!(objects.object(0).labels.refdes.as_deref(), Some("U7"));
     }
 
     #[test]

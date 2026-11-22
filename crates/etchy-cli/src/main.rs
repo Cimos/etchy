@@ -1301,7 +1301,7 @@ mod tests {
         let (board, _, _) = load_board(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let objects = board.layers[0].x2_objects.as_ref().unwrap();
-        assert_eq!(objects[0].labels.refdes.as_deref(), Some("U7"));
+        assert_eq!(objects.object(0).labels.refdes.as_deref(), Some("U7"));
     }
 
     #[test]
