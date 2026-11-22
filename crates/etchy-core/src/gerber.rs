@@ -11,7 +11,7 @@
 //! silently dropped or wrong-but-quiet result (the trust bar).
 
 use gerber_parser::gerber_types::{AttributeDeletionCriterion, Net, ObjectAttribute};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufReader, Cursor};
 
 use gerber_parser::gerber_types::{
@@ -24,6 +24,7 @@ use gerber_parser::parse;
 
 use crate::boolean;
 use crate::error::{EngineError, Result};
+use crate::excellon::{DrillTools, ToolCount};
 use crate::geo::{quantize_mm, shoelace_2x_nm2, snap_nm, Contour, PolygonSet, Pt, Shape};
 use crate::geom;
 
@@ -63,9 +64,109 @@ pub fn resolve_layer(bytes: &[u8]) -> Result<PolygonSet> {
 }
 
 /// Resolve geometry and retain the X2 object attributes active at each drawing.
-pub fn resolve_layer_with_labels(
-    bytes: &[u8],
-) -> Result<(PolygonSet, Option<Vec<LabeledContour>>)> {
+pub fn resolve_layer_with_labels(bytes: &[u8]) -> Result<(PolygonSet, Option<LabeledObjects>)> {
+    resolve_layer_detailed(bytes).map(|r| (r.geometry, r.labels))
+}
+
+/// Everything one walk of a Gerber layer produces.
+#[derive(Debug, Clone)]
+pub struct ResolvedGerber {
+    /// Filled geometry (`dark − clear`, in paint order).
+    pub geometry: PolygonSet,
+    /// X2 object labels, when the file carries any object attributes.
+    pub labels: Option<LabeledObjects>,
+    /// Dark circle flashes counted per diameter, plus everything else drawn, so
+    /// a drill layer exported as Gerber can get a drill table (#457).
+    pub flashes: FlashTable,
+}
+
+/// What a Gerber layer drew, in the terms of a drill table: dark circle
+/// flashes per diameter ([`DrillTools`], keyed like Excellon tools so the two
+/// formats compare), and a count of every other object, which a drill table
+/// cannot hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlashTable {
+    /// Dark circle flashes per diameter, as holes. `slots` is always 0.
+    pub tools: DrillTools,
+    /// Objects that are not dark circle flashes.
+    pub untabled: UntabledContent,
+}
+
+/// Counts of Gerber objects that are not dark circle flashes (#457).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UntabledContent {
+    /// Flashes of a rectangle, obround, polygon or macro aperture.
+    pub non_circle_flashes: u32,
+    /// Circle flashes whose diameter rounds to 0 µm.
+    pub zero_size_flashes: u32,
+    /// Stroked `D01` draws (slots, routes), one per segment command.
+    pub draws: u32,
+    /// `G36`/`G37` region fills.
+    pub regions: u32,
+    /// Flashes inside an open `G36`…`G37` region (invalid in RS-274X).
+    pub region_flashes: u32,
+    /// Flashes under clear polarity (`%LPC`), which erase rather than drill.
+    pub clear_flashes: u32,
+}
+
+impl UntabledContent {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// A human list of the counts, e.g. `2 draws (slots or routes), 1 region`.
+    pub fn describe(&self) -> String {
+        let parts: Vec<String> = [
+            (
+                self.draws,
+                "draw (slot or route)",
+                "draws (slots or routes)",
+            ),
+            (self.regions, "region fill", "region fills"),
+            (
+                self.region_flashes,
+                "flash inside a region",
+                "flashes inside regions",
+            ),
+            (
+                self.non_circle_flashes,
+                "non-circle aperture flash",
+                "non-circle aperture flashes",
+            ),
+            (
+                self.zero_size_flashes,
+                "zero-diameter flash",
+                "zero-diameter flashes",
+            ),
+            (
+                self.clear_flashes,
+                "clear-polarity flash",
+                "clear-polarity flashes",
+            ),
+        ]
+        .into_iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
+        .collect();
+        parts.join(", ")
+    }
+}
+
+impl FlashTable {
+    /// The drill tool table, or — when the layer drew anything other than dark
+    /// circle flashes — a description of what could not be counted. A partial
+    /// table would understate the layer, so there is none.
+    pub fn into_drill_tools(self) -> std::result::Result<DrillTools, String> {
+        if self.untabled.is_empty() {
+            Ok(self.tools)
+        } else {
+            Err(self.untabled.describe())
+        }
+    }
+}
+
+/// Parse + resolve one Gerber layer: geometry, X2 labels and the flash table.
+pub fn resolve_layer_detailed(bytes: &[u8]) -> Result<ResolvedGerber> {
     let normalized = normalize(bytes)?;
     // The third-party parser is the first code to touch attacker-controlled bytes.
     // Contain a panic in it as a loud typed error instead of unwinding through the
@@ -131,10 +232,22 @@ pub fn resolve_layer_with_labels(
         };
         acc = boolean::flatten(&result);
     }
-    Ok((result, m.x2_seen.then_some(m.labeled_contours)))
+    drop(acc);
+    let flashes = FlashTable {
+        tools: DrillTools {
+            by_diameter_um: std::mem::take(&mut m.flash_counts),
+        },
+        untabled: m.untabled,
+    };
+    let labels = m.x2_seen.then(|| m.take_labeled());
+    Ok(ResolvedGerber {
+        geometry: result,
+        labels,
+        flashes,
+    })
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ObjectLabels {
     pub refdes: Option<String>,
     pub pin_refdes: Option<String>,
@@ -142,13 +255,158 @@ pub struct ObjectLabels {
     pub nets: Vec<String>,
 }
 
-/// One labelled dark object: its outline plus any holes. A region fill keeps its
-/// clearance cut-outs, so a change inside a pour hole is not tagged with the
-/// pour's net.
-#[derive(Debug, Clone)]
-pub struct LabeledContour {
-    pub shape: Shape,
-    pub labels: ObjectLabels,
+/// The labelled dark objects of one layer, each an outline plus any holes. A
+/// region fill keeps its clearance cut-outs, so a change inside a pour hole is
+/// not tagged with the pour's net.
+///
+/// Stored compactly (#443): the drawn rings are moved here once the layer is
+/// resolved (never cloned), their points live in one arena as `i32` offsets from
+/// each ring's first point (exact `i64` points for a ring wider than that), and
+/// equal label sets are stored once. [`LabeledObject::shape`] decodes a ring
+/// back to the exact points that were drawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LabeledObjects {
+    labels: Vec<ObjectLabels>,
+    /// `(first ring, label index)` per object; its rings end where the next
+    /// object's begin.
+    objects: Vec<(u32, u32)>,
+    rings: Vec<RingSpan>,
+    narrow: Vec<[i32; 2]>,
+    wide: Vec<Pt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RingSpan {
+    origin: Pt,
+    start: u32,
+    len: u32,
+    wide: bool,
+}
+
+/// One labelled object, borrowed from [`LabeledObjects`].
+#[derive(Debug, Clone, Copy)]
+pub struct LabeledObject<'a> {
+    pub labels: &'a ObjectLabels,
+    store: &'a LabeledObjects,
+    rings: (usize, usize),
+}
+
+impl LabeledObjects {
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    /// The `i`-th object in drawing order. Panics if `i >= len()`, like indexing.
+    pub fn object(&self, i: usize) -> LabeledObject<'_> {
+        let (first, label) = self.objects[i];
+        let end = self
+            .objects
+            .get(i + 1)
+            .map_or(self.rings.len(), |&(next, _)| next as usize);
+        LabeledObject {
+            labels: &self.labels[label as usize],
+            store: self,
+            rings: (first as usize, end),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = LabeledObject<'_>> + '_ {
+        (0..self.len()).map(|i| self.object(i))
+    }
+
+    /// Append a ring to the object `object` (in `0..=len()`): a new index starts
+    /// a new object with that label, the current one gains a hole.
+    fn push_ring(&mut self, object: usize, label: u32, ring: &[Pt]) {
+        if object == self.objects.len() {
+            self.objects.push((self.rings.len() as u32, label));
+        }
+        let origin = ring.first().copied().unwrap_or(Pt::new(0, 0));
+        let offsets: Option<Vec<[i32; 2]>> = ring
+            .iter()
+            .map(|p| {
+                Some([
+                    i32::try_from(p.x - origin.x).ok()?,
+                    i32::try_from(p.y - origin.y).ok()?,
+                ])
+            })
+            .collect();
+        let (start, wide) = match offsets {
+            Some(offsets) => {
+                let start = self.narrow.len();
+                self.narrow.extend(offsets);
+                (start, false)
+            }
+            None => {
+                let start = self.wide.len();
+                self.wide.extend_from_slice(ring);
+                (start, true)
+            }
+        };
+        self.rings.push(RingSpan {
+            origin,
+            start: start as u32,
+            len: ring.len() as u32,
+            wide,
+        });
+    }
+
+    fn ring_points(&self, ring: &RingSpan) -> impl Iterator<Item = Pt> + '_ {
+        let (start, end) = (ring.start as usize, (ring.start + ring.len) as usize);
+        let (narrow, wide) = if ring.wide {
+            (&[][..], &self.wide[start..end])
+        } else {
+            (&self.narrow[start..end], &[][..])
+        };
+        let origin = ring.origin;
+        narrow
+            .iter()
+            .map(move |d| Pt::new(origin.x + i64::from(d[0]), origin.y + i64::from(d[1])))
+            .chain(wide.iter().copied())
+    }
+
+    /// Build a store from whole objects, for tests.
+    #[cfg(test)]
+    pub(crate) fn from_objects(objects: impl IntoIterator<Item = (Shape, ObjectLabels)>) -> Self {
+        let mut out = Self::default();
+        for (i, (shape, labels)) in objects.into_iter().enumerate() {
+            out.labels.push(labels);
+            let label = out.labels.len() as u32 - 1;
+            for ring in &shape {
+                out.push_ring(i, label, ring);
+            }
+        }
+        out
+    }
+}
+
+impl LabeledObject<'_> {
+    /// Number of rings: the outline plus its holes.
+    pub fn ring_count(&self) -> usize {
+        self.rings.1 - self.rings.0
+    }
+
+    /// The outline then its holes, exactly as drawn.
+    pub fn shape(&self) -> Shape {
+        self.store.rings[self.rings.0..self.rings.1]
+            .iter()
+            .map(|r| self.store.ring_points(r).collect())
+            .collect()
+    }
+
+    /// `[min_x, min_y, max_x, max_y]` of the outline (first ring); `None` when
+    /// the object has no rings.
+    pub fn outline_bbox(&self) -> Option<[i64; 4]> {
+        let ring = self.store.rings[self.rings.0..self.rings.1].first()?;
+        let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+        for p in self.store.ring_points(ring) {
+            b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
+        }
+        (b[0] <= b[2]).then_some(b)
+    }
 }
 
 /// Coordinate units a Gerber declares via `%MO`.
@@ -396,7 +654,18 @@ struct Machine<'a> {
     spans: Vec<(bool, Vec<Contour>)>,
     x2_seen: bool,
     labels: ObjectLabels,
-    labeled_contours: Vec<LabeledContour>,
+    /// Distinct label sets seen on dark objects, and the index of `labels` in
+    /// it (`None` until the next labelled object after an attribute change).
+    label_sets: Vec<ObjectLabels>,
+    label_ids: HashMap<ObjectLabels, u32>,
+    label_id: Option<u32>,
+    /// Labelled rings as `(drawn contour number, object number)`: indices into
+    /// `spans`, not copies (#443). Moved out by [`Machine::take_labeled`].
+    labeled_rings: Vec<(usize, usize)>,
+    /// Label index of each labelled object.
+    labeled_objects: Vec<u32>,
+    /// Contours pushed into `spans` so far.
+    drawn: usize,
 
     cur: Pt,
     ap: Option<i32>,
@@ -429,6 +698,11 @@ struct Machine<'a> {
     /// Boolean passes spent resolving mixed-exposure macro images (#306). Each is
     /// the same kind of pass as a polarity span, so they share `MAX_SPANS_PER_LAYER`.
     macro_passes: usize,
+
+    /// Dark circle flashes per diameter in whole µm (#457).
+    flash_counts: BTreeMap<i64, ToolCount>,
+    /// Everything drawn that is not a dark circle flash (#457).
+    untabled: UntabledContent,
 }
 
 impl<'a> Machine<'a> {
@@ -448,7 +722,12 @@ impl<'a> Machine<'a> {
             spans: Vec::new(),
             x2_seen: false,
             labels: ObjectLabels::default(),
-            labeled_contours: Vec::new(),
+            label_sets: Vec::new(),
+            label_ids: HashMap::new(),
+            label_id: None,
+            labeled_rings: Vec::new(),
+            labeled_objects: Vec::new(),
+            drawn: 0,
             cur: Pt::new(0, 0),
             ap: None,
             interp: InterpolationMode::Linear,
@@ -461,6 +740,8 @@ impl<'a> Machine<'a> {
             total_points: 0,
             region_points: 0,
             macro_passes: 0,
+            flash_counts: BTreeMap::new(),
+            untabled: UntabledContent::default(),
         }
     }
 
@@ -532,6 +813,7 @@ impl<'a> Machine<'a> {
             }
             ExtendedCode::ObjectAttribute(attr) => {
                 self.x2_seen = true;
+                self.label_id = None;
                 match attr {
                     ObjectAttribute::Component(name) => self.labels.refdes = Some(name.clone()),
                     ObjectAttribute::Pin(pin) => {
@@ -546,21 +828,26 @@ impl<'a> Machine<'a> {
                     _ => {}
                 }
             }
-            ExtendedCode::DeleteAttribute(criterion) => match criterion {
-                AttributeDeletionCriterion::AllApertureAndObjectAttributes => {
-                    self.labels = ObjectLabels::default()
-                }
-                AttributeDeletionCriterion::SingleObjectAttribute(name) => match name.as_str() {
-                    ".C" => self.labels.refdes = None,
-                    ".P" => {
-                        self.labels.pin_refdes = None;
-                        self.labels.pin = None;
+            ExtendedCode::DeleteAttribute(criterion) => {
+                self.label_id = None;
+                match criterion {
+                    AttributeDeletionCriterion::AllApertureAndObjectAttributes => {
+                        self.labels = ObjectLabels::default()
                     }
-                    ".N" => self.labels.nets.clear(),
-                    _ => {}
-                },
-                AttributeDeletionCriterion::SingleApertureAttribute(_) => {}
-            },
+                    AttributeDeletionCriterion::SingleObjectAttribute(name) => {
+                        match name.as_str() {
+                            ".C" => self.labels.refdes = None,
+                            ".P" => {
+                                self.labels.pin_refdes = None;
+                                self.labels.pin = None;
+                            }
+                            ".N" => self.labels.nets.clear(),
+                            _ => {}
+                        }
+                    }
+                    AttributeDeletionCriterion::SingleApertureAttribute(_) => {}
+                }
+            }
             ExtendedCode::Unit(_)
             | ExtendedCode::ApertureDefinition(_)
             | ExtendedCode::ApertureMacro(_)
@@ -644,6 +931,7 @@ impl<'a> Machine<'a> {
             self.region_loops.push(std::mem::take(&mut self.cur_loop));
         }
         if !self.region_loops.is_empty() {
+            self.untabled.regions = self.untabled.regions.saturating_add(1);
             // Even-odd fill normalizes winding/holes; result joins the layer set.
             let filled = boolean::fill_even_odd(&self.region_loops);
             for c in filled {
@@ -702,6 +990,7 @@ impl<'a> Machine<'a> {
 
     fn draw_segment(&mut self, to: Pt, offset: &Option<CoordinateOffset>) -> Result<()> {
         let r = self.stroke_radius_nm()?;
+        self.untabled.draws = self.untabled.draws.saturating_add(1);
         if self.is_arc(offset) {
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
             let center = self.arc_center(to, offset, ccw)?;
@@ -803,6 +1092,7 @@ impl<'a> Machine<'a> {
     fn flash(&mut self, at: Pt) -> Result<()> {
         let ap = self.current_aperture()?;
         let (ax, ay) = (at.x as f64, at.y as f64);
+        self.tally_flash(ap)?;
         match ap {
             GtAperture::Circle(c) => {
                 if c.hole_diameter.is_some() {
@@ -851,6 +1141,33 @@ impl<'a> Machine<'a> {
                     .ok_or_else(|| unsupported(&format!("undefined macro {name}")))?;
                 self.flash_macro(am, args.as_deref().unwrap_or(&[]), at)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Count one flash for the drill table (#457): a dark circle flash is a hole
+    /// of its diameter, rounded to whole µm exactly as an Excellon tool is, so
+    /// the two formats key the same size identically. Anything else is counted
+    /// as content a drill table cannot hold.
+    fn tally_flash(&mut self, ap: &GtAperture) -> Result<()> {
+        if self.in_region {
+            self.untabled.region_flashes = self.untabled.region_flashes.saturating_add(1);
+            return Ok(());
+        }
+        if !self.polarity_dark {
+            self.untabled.clear_flashes = self.untabled.clear_flashes.saturating_add(1);
+            return Ok(());
+        }
+        let GtAperture::Circle(c) = ap else {
+            self.untabled.non_circle_flashes = self.untabled.non_circle_flashes.saturating_add(1);
+            return Ok(());
+        };
+        let um = (self.dim(c.diameter)? / 1000.0).round() as i64;
+        if um <= 0 {
+            self.untabled.zero_size_flashes = self.untabled.zero_size_flashes.saturating_add(1);
+        } else {
+            let count = self.flash_counts.entry(um).or_default();
+            count.holes = count.holes.saturating_add(1);
         }
         Ok(())
     }
@@ -1157,23 +1474,66 @@ impl<'a> Machine<'a> {
         // change can touch. A CW ring is a hole of the region fill just emitted.
         if self.x2_seen && is_dark && self.labels != ObjectLabels::default() {
             let doubled = shoelace_2x_nm2(&c);
+            let label = self.current_label_id();
             if doubled > 0 {
-                self.labeled_contours.push(LabeledContour {
-                    shape: vec![c.clone()],
-                    labels: self.labels.clone(),
-                });
-            } else if doubled < 0 {
-                if let Some(last) = self.labeled_contours.last_mut() {
-                    if last.labels == self.labels {
-                        last.shape.push(c.clone());
-                    }
-                }
+                self.labeled_rings
+                    .push((self.drawn, self.labeled_objects.len()));
+                self.labeled_objects.push(label);
+            } else if doubled < 0 && self.labeled_objects.last() == Some(&label) {
+                self.labeled_rings
+                    .push((self.drawn, self.labeled_objects.len() - 1));
             }
         }
+        self.drawn += 1;
         match self.spans.last_mut() {
             Some((d, run)) if *d == is_dark => run.push(c),
             _ => self.spans.push((is_dark, vec![c])),
         }
+    }
+
+    /// Index of the active label set, storing it the first time it is seen.
+    /// Equal sets share an index, so comparing indices compares labels.
+    fn current_label_id(&mut self) -> u32 {
+        if let Some(id) = self.label_id {
+            return id;
+        }
+        let id = match self.label_ids.get(&self.labels) {
+            Some(&id) => id,
+            None => {
+                let id = self.label_sets.len() as u32;
+                self.label_sets.push(self.labels.clone());
+                self.label_ids.insert(self.labels.clone(), id);
+                id
+            }
+        };
+        self.label_id = Some(id);
+        id
+    }
+
+    /// Move the labelled rings out of the resolved spans into a compact store.
+    /// Rings are recorded in drawing order, so one forward pass finds them all.
+    fn take_labeled(self) -> LabeledObjects {
+        let mut out = LabeledObjects {
+            labels: self.label_sets,
+            ..Default::default()
+        };
+        out.objects.reserve_exact(self.labeled_objects.len());
+        out.rings.reserve_exact(self.labeled_rings.len());
+        let mut wanted = self.labeled_rings.iter().peekable();
+        let drawn = self.spans.into_iter().flat_map(|(_, run)| run);
+        for (number, ring) in drawn.enumerate() {
+            let Some(&&(want, object)) = wanted.peek() else {
+                break;
+            };
+            if want == number {
+                out.push_ring(object, self.labeled_objects[object], &ring);
+                wanted.next();
+            }
+        }
+        debug_assert!(wanted.peek().is_none(), "every labelled ring was drawn");
+        out.narrow.shrink_to_fit();
+        out.wide.shrink_to_fit();
+        out
     }
 }
 
@@ -1378,6 +1738,76 @@ mod tests {
         resolve_layer(g.as_bytes()).unwrap().area_mm2()
     }
 
+    fn flash_table(g: &str) -> FlashTable {
+        resolve_layer_detailed(g.as_bytes()).unwrap().flashes
+    }
+
+    #[test]
+    fn flash_table_counts_circle_flashes_by_whole_micrometre() {
+        // Two 0.3 mm holes and one 0.8 mm, in inches: 0.0118 in = 299.72 µm
+        // and 0.0315 in = 800.1 µm round onto the same keys as Excellon tools.
+        let t = flash_table(
+            "%FSLAX26Y26*%\n%MOIN*%\n%ADD10C,0.0118*%\n%ADD11C,0.0315*%\n\
+             D10*\nX100000Y100000D03*\nX200000Y200000D03*\nD11*\nX300000Y300000D03*\nM02*\n",
+        );
+        assert!(t.untabled.is_empty(), "{:?}", t.untabled);
+        let tools = t.into_drill_tools().unwrap();
+        let rows: Vec<_> = tools
+            .by_diameter_um
+            .iter()
+            .map(|(d, c)| (*d, c.holes, c.slots))
+            .collect();
+        assert_eq!(rows, [(300, 2, 0), (800, 1, 0)]);
+    }
+
+    #[test]
+    fn flash_table_counts_what_it_cannot_hold() {
+        let t = flash_table(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\n%ADD11R,1X1*%\n%ADD12C,0.0001*%\n\
+             D10*\nX0Y0D03*\nX1000000Y0D02*\nX2000000Y0D01*\nX3000000Y0D01*\n\
+             D11*\nX5000000Y5000000D03*\nD12*\nX6000000Y6000000D03*\n\
+             %LPC*%\nD10*\nX0Y0D03*\n%LPD*%\n\
+             G36*\nX0Y0D02*\nX1000000Y0D01*\nX1000000Y1000000D01*\nX0Y0D01*\nG37*\nM02*\n",
+        );
+        assert_eq!(
+            t.untabled,
+            UntabledContent {
+                non_circle_flashes: 1,
+                zero_size_flashes: 1,
+                draws: 2,
+                regions: 1,
+                region_flashes: 0,
+                clear_flashes: 1,
+            }
+        );
+        assert_eq!(t.tools.by_diameter_um[&500].holes, 1);
+        let why = t.into_drill_tools().unwrap_err();
+        assert_eq!(
+            why,
+            "2 draws (slots or routes), 1 region fill, 1 non-circle aperture flash, \
+             1 zero-diameter flash, 1 clear-polarity flash"
+        );
+    }
+
+    #[test]
+    fn flash_table_does_not_count_a_flash_inside_a_region() {
+        let t = flash_table(
+            "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\nG36*\nX0Y0D03*\nG37*\nM02*\n",
+        );
+        assert_eq!(t.untabled.region_flashes, 1);
+        assert!(t.tools.by_diameter_um.is_empty());
+        assert_eq!(t.into_drill_tools().unwrap_err(), "1 flash inside a region");
+    }
+
+    #[test]
+    fn flash_table_counts_macro_flashes_as_non_circle() {
+        let t = flash_table(
+            "%FSLAX46Y46*%\n%MOMM*%\n%AMDOT*1,1,0.5,0,0*%\n%ADD10DOT*%\nD10*\nX0Y0D03*\nM02*\n",
+        );
+        assert_eq!(t.untabled.non_circle_flashes, 1);
+        assert!(t.tools.by_diameter_um.is_empty());
+    }
+
     #[test]
     fn x2_attributes_follow_objects_and_td_deletes_them() {
         let g = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n\
@@ -1386,12 +1816,12 @@ mod tests {
         let (_, objects) = resolve_layer_with_labels(g).unwrap();
         let objects = objects.expect("X2 attributes were present");
         assert_eq!(objects.len(), 2);
-        assert_eq!(objects[0].labels.refdes.as_deref(), Some("U1"));
-        assert_eq!(objects[0].labels.pin.as_deref(), Some("U1:1"));
-        assert_eq!(objects[0].labels.nets, ["GND"]);
-        assert_eq!(objects[1].labels.refdes.as_deref(), Some("U1"));
-        assert_eq!(objects[1].labels.pin, None);
-        assert_eq!(objects[1].labels.nets, ["GND"]);
+        assert_eq!(objects.object(0).labels.refdes.as_deref(), Some("U1"));
+        assert_eq!(objects.object(0).labels.pin.as_deref(), Some("U1:1"));
+        assert_eq!(objects.object(0).labels.nets, ["GND"]);
+        assert_eq!(objects.object(1).labels.refdes.as_deref(), Some("U1"));
+        assert_eq!(objects.object(1).labels.pin, None);
+        assert_eq!(objects.object(1).labels.nets, ["GND"]);
     }
 
     #[test]
@@ -1402,7 +1832,7 @@ mod tests {
         let (_, objects) = resolve_layer_with_labels(g).unwrap();
         let objects = objects.unwrap();
         assert_eq!(objects.len(), 1);
-        assert_eq!(objects[0].labels.nets, ["GND"]);
+        assert_eq!(objects.object(0).labels.nets, ["GND"]);
     }
 
     #[test]
@@ -1416,21 +1846,113 @@ G37*\nM02*\n";
         let (_, objects) = resolve_layer_with_labels(g).unwrap();
         let objects = objects.unwrap();
         assert_eq!(objects.len(), 1);
-        assert_eq!(objects[0].shape.len(), 2, "outline plus its hole");
+        assert_eq!(objects.object(0).ring_count(), 2, "outline plus its hole");
         let inside_hole = vec![vec![
             Pt::new(4_500_000, 4_500_000),
             Pt::new(5_500_000, 4_500_000),
             Pt::new(5_500_000, 5_500_000),
             Pt::new(4_500_000, 5_500_000),
         ]];
-        assert!(!boolean::overlaps(&inside_hole, &objects[0].shape));
+        assert!(!boolean::overlaps(&inside_hole, &objects.object(0).shape()));
+    }
+
+    /// Every drawn contour (polarity, points) in paint order, and the labelled
+    /// objects taken from those same spans.
+    fn drawn_and_labeled(g: &[u8]) -> (Vec<(bool, Contour)>, LabeledObjects) {
+        let normalized = normalize(g).unwrap();
+        let doc = parse(BufReader::new(Cursor::new(normalized.as_bytes()))).unwrap();
+        let macros = HashMap::new();
+        let mut m = Machine::new(&doc.apertures, &macros, 1.0, 1.0e6, 0.0);
+        for cmd in doc.commands() {
+            m.step(cmd).unwrap();
+        }
+        let drawn = m
+            .spans
+            .iter()
+            .flat_map(|(dark, run)| run.iter().map(move |c| (*dark, c.clone())))
+            .collect();
+        (drawn, m.take_labeled())
+    }
+
+    #[test]
+    fn labeled_objects_are_the_drawn_rings_exactly() {
+        // #443: the store moves the drawn rings instead of cloning them. Every
+        // object must still be exactly the contours that were drawn, with the
+        // labels active at the time, and nothing unlabelled or clear may leak in.
+        let g = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.6*%\n%ADD11R,2X1*%\nD10*\n\
+%TO.C,U1*%\n%TO.N,VCC*%\nX10000000Y10000000D03*\n\
+%TD*%\nX12000000Y10000000D03*\n\
+%TO.N,CUT*%\n%LPC*%\nX12000000Y10000000D03*\n%LPD*%\n\
+%TO.N,SIG*%\nX0Y0D02*\nX5000000Y-3000000D01*\n\
+%TD*%\n%TO.N,GND*%\nG36*\n\
+X0Y0D02*\nX10000000Y0D01*\nX10000000Y10000000D01*\nX0Y10000000D01*\nX0Y0D01*\n\
+X4000000Y4000000D02*\nX6000000Y4000000D01*\nX6000000Y6000000D01*\nX4000000Y6000000D01*\nX4000000Y4000000D01*\n\
+G37*\n%TD*%\n%TO.C,U1*%\n%TO.N,VCC*%\nD11*\nX-20000000Y30000000D03*\nM02*\n";
+        let (drawn, objects) = drawn_and_labeled(g);
+        // circle U1, unlabelled circle, clear cut, SIG track, GND outline + hole, rect U1.
+        assert_eq!(drawn.len(), 7);
+        assert!(!drawn[2].0, "the cut is clear");
+        let expected: [&[usize]; 4] = [&[0], &[3], &[4, 5], &[6]];
+        assert_eq!(objects.len(), expected.len());
+        for (i, rings) in expected.iter().enumerate() {
+            let want: Shape = rings.iter().map(|&r| drawn[r].1.clone()).collect();
+            assert_eq!(objects.object(i).shape(), want, "object {i}");
+        }
+        assert_eq!(objects.object(0).labels.refdes.as_deref(), Some("U1"));
+        assert_eq!(objects.object(1).labels.nets, ["SIG"]);
+        assert_eq!(objects.object(1).labels.refdes, None);
+        assert_eq!(objects.object(2).labels.nets, ["GND"]);
+        // Equal label sets are stored once.
+        assert!(std::ptr::eq(
+            objects.object(0).labels,
+            objects.object(3).labels
+        ));
+        assert_eq!(objects.labels.len(), 3);
+    }
+
+    #[test]
+    fn labeled_objects_round_trip_rings_too_wide_for_offsets() {
+        // A ring spanning more than i32 nm (about 2.1 m) is kept as exact i64
+        // points; a normal ring uses offsets, negative ones included.
+        let wide = vec![
+            Pt::new(-3_000_000_000, 5),
+            Pt::new(3_000_000_000, 5),
+            Pt::new(0, 4_000_000_000),
+        ];
+        let narrow = vec![
+            Pt::new(7_000_000, 7_000_000),
+            Pt::new(9_000_000, -2_000_000),
+            Pt::new(-1, 8_000_000),
+        ];
+        let hole = vec![Pt::new(1, 2), Pt::new(-3, -4), Pt::new(5, -6)];
+        let label = ObjectLabels {
+            refdes: Some("R1".into()),
+            ..Default::default()
+        };
+        let objects = LabeledObjects::from_objects([
+            (vec![wide.clone(), hole.clone()], label.clone()),
+            (vec![narrow.clone()], label.clone()),
+        ]);
+        assert_eq!(objects.object(0).shape(), vec![wide, hole]);
+        assert_eq!(objects.object(1).shape(), vec![narrow]);
+        assert_eq!(
+            objects.object(0).outline_bbox(),
+            Some([-3_000_000_000, 5, 3_000_000_000, 4_000_000_000])
+        );
+        assert_eq!(
+            objects.object(1).outline_bbox(),
+            Some([-1, -2_000_000, 9_000_000, 8_000_000])
+        );
+        assert_eq!(objects.wide.len(), 3);
+        assert_eq!(objects.narrow.len(), 6);
     }
 
     #[test]
     fn pin_attribute_retains_its_own_refdes() {
         let g = b"%FSLAX46Y46*%\n%MOMM*%\n%ADD10R,1X1*%\nD10*\n%TO.P,J3,2*%\nX10000000Y10000000D03*\nM02*\n";
         let (_, objects) = resolve_layer_with_labels(g).unwrap();
-        let labels = &objects.unwrap()[0].labels;
+        let objects = objects.unwrap();
+        let labels = objects.object(0).labels;
         assert_eq!(labels.refdes, None);
         assert_eq!(labels.pin_refdes.as_deref(), Some("J3"));
         assert_eq!(labels.pin.as_deref(), Some("J3:2"));

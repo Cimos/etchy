@@ -15,7 +15,7 @@ use crate::geo::{shape_area_nm2, PolygonSet, Shape};
 /// found the raw count moved ~40% purely with tessellation). ~1e-4 mm² is far below
 /// any real PCB feature and far above the slivers. Change-detection still uses raw
 /// presence (`has_added`/`has_removed`), so a sub-floor sliver is never a silent miss.
-const REGION_NOISE_FLOOR_NM2: i128 = 100_000_000; // 1e-4 mm²
+pub(crate) const REGION_NOISE_FLOOR_NM2: i128 = 100_000_000; // 1e-4 mm²
 
 /// Magnitudes for one layer's change. Areas are exact integer nm² (`i128` avoids
 /// overflow on big pours); mm² is derived for humans / CI thresholds.

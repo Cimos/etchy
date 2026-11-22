@@ -29,6 +29,7 @@ pub mod pagealign;
 pub mod placement;
 pub mod report;
 pub mod view;
+pub mod waiver;
 
 pub use board_input::{board_from_bytes, BoardBuilder};
 pub use diff::{diff_layer, nm2_to_mm2, LayerChange, LayerDiff};
@@ -38,8 +39,8 @@ pub use excellon::{
     DrillTools, ResolvedDrill, ToolCount,
 };
 pub use export::{
-    board_areas_csv, board_report_html, board_report_html_with_limit, layer_svg,
-    layer_svg_with_colors,
+    board_areas_csv, board_report_html, board_report_html_with_limit,
+    board_report_html_with_waivers, layer_svg, layer_svg_with_colors,
 };
 pub use geo::{
     quantize_mm, simplify_contour, triangulate_shape, Aperture, Contour, Polarity, PolygonSet,
@@ -47,8 +48,8 @@ pub use geo::{
 };
 pub use geom::CIRCLE_SEGMENTS;
 pub use gerber::{
-    coordinate_mismatch_warning, gerber_format, resolve_layer, resolve_layer_with_labels,
-    GerberFormat, Units,
+    coordinate_mismatch_warning, gerber_format, resolve_layer, resolve_layer_detailed,
+    resolve_layer_with_labels, FlashTable, GerberFormat, ResolvedGerber, Units, UntabledContent,
 };
 pub use imagediff::{
     classify_pair_size, crop_top_left, diff_images, Image, ImageDiffOptions, ImageDiffResult,
@@ -73,6 +74,10 @@ pub use report::{
     ObjectSummary, Totals, NATIVE_SCHEMA_VERSION, SCHEMA_VERSION,
 };
 pub use view::{BoardDiff, LayerView};
+pub use waiver::{
+    apply_waivers, LayerWaiverTotals, PartialOverlap, WaivedRegion, Waiver, WaiverError,
+    WaiverMatch, WaiverReport, WAIVER_LAYER_NAMES,
+};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -136,6 +141,51 @@ pub fn compare_detailed(old: &Board, new: &Board) -> Result<BoardDiff> {
     })
 }
 
+/// One revision on its own, with no second revision to compare (#466): every
+/// layer becomes an unchanged [`LayerView`] whose old and new sides both share
+/// the layer's geometry and whose added/removed sets are empty, in the board
+/// stack order [`compare_detailed`] uses. This is the shape the viewer draws for
+/// either side of a diff, built without running the boolean diff of a board
+/// against itself. A board with no layers fails like an empty compare.
+pub fn view_single(board: &Board) -> Result<BoardDiff> {
+    if board.layers.is_empty() {
+        return Err(EngineError::NoLayers);
+    }
+    let mut layers: Vec<&Layer> = board.layers.iter().collect();
+    layers.sort_by_key(|l| l.kind.sort_key());
+    let change = LayerChange::default();
+    let (reports, views): (Vec<LayerReport>, Vec<LayerView>) = layers
+        .into_iter()
+        .map(|l| {
+            let label = Some(l.label.clone());
+            let mut report = LayerReport::new(
+                l.kind,
+                label.clone(),
+                label.clone(),
+                LayerStatus::Unchanged,
+                &change,
+            );
+            report.labels_available = l.x2_objects.is_some();
+            let view = LayerView {
+                kind: l.kind,
+                label_old: label.clone(),
+                label_new: label,
+                status: LayerStatus::Unchanged,
+                old: Arc::clone(&l.geometry),
+                new: Arc::clone(&l.geometry),
+                added: PolygonSet::default(),
+                removed: PolygonSet::default(),
+                change,
+            };
+            (report, view)
+        })
+        .unzip();
+    Ok(BoardDiff {
+        report: DiffReport::new(reports, Vec::new()),
+        layers: views,
+    })
+}
+
 /// Diff a single layer pairing into its (report, view). Pure and independent across
 /// layers, so `compare_detailed` can run it in parallel (perf) without affecting
 /// output order or determinism.
@@ -149,9 +199,10 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     // fan-out doesn't multiply peak memory (#81). `empty` is the shared placeholder
     // for a one-sided layer's absent side.
     let empty: Arc<PolygonSet> = Arc::new(PolygonSet::default());
-    // The tool table compares only when every present side has one: an Excellon
-    // file paired with a Gerber-format drill file would otherwise read as every
-    // size added or removed.
+    // The tool table compares only when every present side has one: a drill
+    // layer whose Gerber export drew more than circle flashes has no table
+    // (#457), and pairing it with a tabled side would read as every size added
+    // or removed. Excellon and Gerber tables key sizes alike, so they compare.
     let drill_table = match &pairing {
         LayerPairing::Both { old, new, .. } => match (&old.drill_tools, &new.drill_tools) {
             (Some(o), Some(n)) => report::DrillTableReport::compare(Some(o), Some(n)),
@@ -219,7 +270,13 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
     }
     let (added, removed) = d.reported_regions();
     let change = d.measure_regions(&added, &removed);
-    let status = if change.is_unchanged() {
+    // A hole-count change is a change even when the geometry is identical (a
+    // hole drilled twice at one spot, #456). The table keys sizes by diameter,
+    // so renumbering tools of one size with the same counts is not one.
+    let drill_counts_changed = drill_table
+        .as_ref()
+        .is_some_and(report::DrillTableReport::has_changes);
+    let status = if change.is_unchanged() && !drill_counts_changed {
         LayerStatus::Unchanged
     } else {
         default_status
@@ -231,11 +288,11 @@ fn diff_one_layer(pairing: LayerPairing) -> Result<(LayerReport, LayerView)> {
         (&new_x2, &old_x2)
     };
     report.labels_available = old_x2.is_some() || new_x2.is_some();
-    report.drill_table = drill_table;
+    report.set_drill_table(drill_table);
     // Index each side's labelled objects once per layer, not once per region:
     // a scan of every object for every region is quadratic on big changes.
-    let added_index = added_x2.as_deref().map(|o| LabelIndex::new(o));
-    let removed_index = removed_x2.as_deref().map(|o| LabelIndex::new(o));
+    let added_index = added_x2.as_deref().map(LabelIndex::new);
+    let removed_index = removed_x2.as_deref().map(LabelIndex::new);
     report.regions = added
         .iter()
         .map(|r| region_report(r, report::RegionChange::Added, added_index.as_ref()))
@@ -275,7 +332,7 @@ const LABEL_GRID_LARGE: usize = 64;
 /// box. It only narrows the candidates: every hit is still confirmed by the
 /// bounding-box test and the exact boolean overlap, so labels match a full scan.
 struct LabelIndex<'a> {
-    objects: &'a [gerber::LabeledContour],
+    objects: &'a gerber::LabeledObjects,
     /// `[min_x, min_y, max_x, max_y]` of each object's outline (first ring).
     boxes: Vec<[i64; 4]>,
     origin: [i64; 2],
@@ -287,16 +344,13 @@ struct LabelIndex<'a> {
 }
 
 impl<'a> LabelIndex<'a> {
-    fn new(objects: &'a [gerber::LabeledContour]) -> Self {
+    fn new(objects: &'a gerber::LabeledObjects) -> Self {
         // The outline bounds the object; holes lie inside it.
         let boxes: Vec<[i64; 4]> = objects
             .iter()
             .map(|o| {
-                let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
-                for p in o.shape.first().into_iter().flatten() {
-                    b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
-                }
-                b
+                o.outline_bbox()
+                    .unwrap_or([i64::MAX, i64::MAX, i64::MIN, i64::MIN])
             })
             .collect();
         let mut ext = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
@@ -390,8 +444,8 @@ fn region_report(
     let mut pins = BTreeSet::new();
     let mut nets = BTreeSet::new();
     for i in index.candidates(&region.bbox_nm) {
-        let object = &index.objects[i as usize];
-        if !boolean::overlaps(region.shape, &object.shape) {
+        let object = index.objects.object(i as usize);
+        if !boolean::overlaps(region.shape, &object.shape()) {
             continue;
         }
         if let Some(name) = &object.labels.refdes {
@@ -523,15 +577,15 @@ mod tests {
             centroid_nm: [500_000, 500_000],
             shape: &shape,
         };
-        let objects: Vec<_> = (0..25)
-            .map(|i| gerber::LabeledContour {
-                shape: vec![contour.clone()],
-                labels: gerber::ObjectLabels {
+        let objects = gerber::LabeledObjects::from_objects((0..25).map(|i| {
+            (
+                vec![contour.clone()],
+                gerber::ObjectLabels {
                     refdes: Some(format!("U{i}")),
                     ..Default::default()
                 },
-            })
-            .collect();
+            )
+        }));
         let index = LabelIndex::new(&objects);
         let report = region_report(&region, report::RegionChange::Added, Some(&index));
         let labels = report.labels.unwrap();
@@ -552,17 +606,13 @@ mod tests {
                 Pt::new(x, y + s),
             ]
         };
-        let mut objects: Vec<_> = (0..30)
-            .flat_map(|i| (0..30).map(move |j| (i, j)))
-            .map(|(i, j)| gerber::LabeledContour {
-                shape: vec![sq(i * 2_000_000, j * 2_000_000, 1_000_000)],
-                labels: gerber::ObjectLabels::default(),
-            })
-            .collect();
-        objects.push(gerber::LabeledContour {
-            shape: vec![sq(-5_000_000, -5_000_000, 70_000_000)],
-            labels: gerber::ObjectLabels::default(),
-        });
+        let objects = gerber::LabeledObjects::from_objects(
+            (0..30)
+                .flat_map(|i| (0..30).map(move |j| (i, j)))
+                .map(|(i, j)| sq(i * 2_000_000, j * 2_000_000, 1_000_000))
+                .chain([sq(-5_000_000, -5_000_000, 70_000_000)])
+                .map(|ring| (vec![ring], gerber::ObjectLabels::default())),
+        );
         let index = LabelIndex::new(&objects);
         assert_eq!(index.large, [900]);
         for bb in [
@@ -843,9 +893,116 @@ mod tests {
     }
 
     #[test]
+    fn excellon_and_gerber_drill_layers_compare_by_diameter() {
+        // #457: old is Excellon (metric), new is the same drill as Gerber
+        // flashes in inches plus one more 0.8 mm hole. 0.0118 in rounds to the
+        // 0.3 mm key and 0.0315 in to the 0.8 mm key.
+        let old = drill_layer(
+            "M48\nMETRIC,TZ\nT1C0.300\nT2C0.800\n%\nT1\nX5.0Y5.0\nT2\nX50.0Y50.0\nM30\n",
+        );
+        let resolved = resolve_layer_detailed(
+            b"%FSLAX26Y26*%\n%MOIN*%\n%ADD10C,0.0118*%\n%ADD11C,0.0315*%\n\
+D10*\nX196850Y196850D03*\nD11*\nX1968504Y1968504D03*\nX787402Y787402D03*\nM02*\n",
+        )
+        .unwrap();
+        let new = Layer {
+            geometry: Arc::new(resolved.geometry),
+            drill_tools: Some(resolved.flashes.into_drill_tools().unwrap()),
+            ..old.clone()
+        };
+        let report = compare(&Board { layers: vec![old] }, &Board { layers: vec![new] }).unwrap();
+        let table = report.layers[0].drill_table.as_ref().unwrap();
+        let rows: Vec<_> = table
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r.diameter_um,
+                    r.change,
+                    r.counts.old_holes,
+                    r.counts.new_holes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (300, DrillRowChange::Unchanged, 1, 1),
+                (800, DrillRowChange::Changed, 1, 2),
+            ]
+        );
+    }
+
+    fn drill_status(old: Layer, new: Layer) -> (LayerStatus, bool, bool) {
+        let report = compare(&Board { layers: vec![old] }, &Board { layers: vec![new] }).unwrap();
+        let l = &report.layers[0];
+        (l.status, l.drill_counts_changed, report.any_changes())
+    }
+
+    #[test]
+    fn hole_drilled_twice_changes_the_layer() {
+        // #456: identical geometry, one more hit at the same spot.
+        let old = drill_layer("M48\nMETRIC,TZ\nT1C0.300\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nM30\n");
+        let new =
+            drill_layer("M48\nMETRIC,TZ\nT1C0.300\n%\nT1\nX5.0Y5.0\nX5.0Y5.0\nX50.0Y50.0\nM30\n");
+        assert_eq!(
+            drill_status(old.clone(), new),
+            (LayerStatus::Changed, true, true)
+        );
+        let report = compare(
+            &Board {
+                layers: vec![old.clone()],
+            },
+            &Board { layers: vec![old] },
+        )
+        .unwrap();
+        assert_eq!(report.layers[0].status, LayerStatus::Unchanged);
+    }
+
+    #[test]
+    fn same_size_tool_renumbering_is_not_a_change() {
+        // #456: T1 and T2 are both 0.3 mm and swap holes; every size keeps its
+        // count, so nothing changed.
+        let old = drill_layer(
+            "M48\nMETRIC,TZ\nT1C0.300\nT2C0.300\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nT2\nX20.0Y20.0\nM30\n",
+        );
+        let new = drill_layer(
+            "M48\nMETRIC,TZ\nT1C0.300\nT2C0.300\n%\nT1\nX20.0Y20.0\nT2\nX5.0Y5.0\nX50.0Y50.0\nM30\n",
+        );
+        assert_eq!(
+            drill_status(old, new),
+            (LayerStatus::Unchanged, false, false)
+        );
+    }
+
+    #[test]
+    fn gerber_drill_flash_twice_changes_the_layer() {
+        // #456 applies to the tables built from Gerber drill layers (#457).
+        let gerber = |body: &str| {
+            let resolved = resolve_layer_detailed(
+                format!("%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.3*%\nD10*\n{body}M02*\n").as_bytes(),
+            )
+            .unwrap();
+            Layer {
+                kind: LayerKind::Drill(DrillKind::Plated),
+                label: "PTH-drl.gbr".into(),
+                geometry: Arc::new(resolved.geometry),
+                negative: false,
+                x2_objects: None,
+                drill_tools: Some(resolved.flashes.into_drill_tools().unwrap()),
+            }
+        };
+        let corners = "X5000000Y5000000D03*\nX50000000Y50000000D03*\n";
+        let old = gerber(corners);
+        let new = gerber(&format!("{corners}X5000000Y5000000D03*\n"));
+        assert_eq!(drill_status(old, new), (LayerStatus::Changed, true, true));
+    }
+
+    #[test]
     fn drill_table_needs_a_tool_table_on_every_present_side() {
-        // An Excellon file paired with a Gerber-format drill file: no table,
-        // rather than every size reading as added or removed.
+        // An Excellon file paired with a drill layer that has no table (a
+        // Gerber export with slots, #457): no table, rather than every size
+        // reading as added or removed.
         let excellon = drill_layer("M48\nMETRIC,TZ\nT1C0.300\n%\nT1\nX5.0Y5.0\nX50.0Y50.0\nM30\n");
         let mut gerber = excellon.clone();
         gerber.drill_tools = None;
@@ -922,5 +1079,50 @@ mod tests {
         // Same allocation, not a copy: the view points at the board's geometry.
         assert!(Arc::ptr_eq(&diff.layers[0].old, &ga));
         assert!(Arc::ptr_eq(&diff.layers[0].new, &gb));
+    }
+
+    #[test]
+    fn view_single_shows_every_layer_unchanged_in_stack_order() {
+        // #466: one revision on its own is a view with nothing added or removed,
+        // in the same stack order a compare would use, sharing the geometry.
+        let hdr = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nD10*\n";
+        let g = Arc::new(
+            polygonize_gerber(format!("{hdr}X5000000Y5000000D03*\nM02*\n").as_bytes()).unwrap(),
+        );
+        let layer = |kind, label: &str| Layer {
+            kind,
+            label: label.into(),
+            geometry: Arc::clone(&g),
+            negative: false,
+            x2_objects: None,
+            drill_tools: None,
+        };
+        let board = Board {
+            layers: vec![
+                layer(LayerKind::BottomCopper, "B_Cu"),
+                layer(LayerKind::TopCopper, "F_Cu"),
+            ],
+        };
+        let single = view_single(&board).unwrap();
+        let paired = compare_detailed(&board, &board).unwrap();
+        let kinds = |d: &BoardDiff| d.layers.iter().map(|l| l.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&single), kinds(&paired));
+        assert!(!single.report.any_changes());
+        assert_eq!(single.report.totals.layers_total, 2);
+        for l in &single.layers {
+            assert_eq!(l.status, LayerStatus::Unchanged);
+            assert!(l.added.is_empty() && l.removed.is_empty());
+            assert!(Arc::ptr_eq(&l.old, &g) && Arc::ptr_eq(&l.new, &g));
+            assert_eq!(l.label_old, l.label_new);
+        }
+        assert!(single.report.layers.iter().all(|r| r.regions.is_empty()));
+    }
+
+    #[test]
+    fn view_single_of_an_empty_board_errors() {
+        assert!(matches!(
+            view_single(&Board::default()),
+            Err(EngineError::NoLayers)
+        ));
     }
 }

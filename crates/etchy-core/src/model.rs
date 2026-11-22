@@ -92,7 +92,7 @@ impl LayerKind {
     }
 
     /// A total order for stable, human-sensible report ordering (stack top→bottom).
-    fn sort_key(&self) -> (u8, u8) {
+    pub(crate) fn sort_key(&self) -> (u8, u8) {
         match self {
             LayerKind::TopCopper => (0, 0),
             LayerKind::InnerCopper(n) => (1, *n),
@@ -148,7 +148,7 @@ pub struct Layer {
     /// (#317). Always `false` for Excellon and placement layers.
     pub negative: bool,
     /// X2 object labels and their source contours; None when unavailable.
-    pub x2_objects: Option<Arc<Vec<crate::gerber::LabeledContour>>>,
+    pub x2_objects: Option<Arc<crate::gerber::LabeledObjects>>,
     /// Hole and slot counts per tool size for an Excellon drill file; None for
     /// every other layer, Gerber-format drill files included (#422).
     pub drill_tools: Option<crate::excellon::DrillTools>,

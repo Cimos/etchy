@@ -97,6 +97,8 @@ web-sys = { version = "0.3", features = [
     "DataTransferItemList",
     "DataTransferItem",
     "FileSystemEntry",
+    # Counting a drop's files so they load as one set (#453).
+    "FileList",
 ] }
 js-sys = "0.3"
 include_dir = "0.7"

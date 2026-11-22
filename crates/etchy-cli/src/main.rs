@@ -11,11 +11,12 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::Parser;
 use etchy_core::{
-    compare_detailed, coordinate_mismatch_warning, layer_svg, Board, DiffReport, GerberFormat,
-    LayerStatus,
+    apply_waivers, compare_detailed, coordinate_mismatch_warning, layer_svg, Board, DiffReport,
+    GerberFormat, LayerStatus, Waiver, WaiverReport,
 };
 use serde::Serialize;
 
+mod log;
 #[cfg(feature = "pdf")]
 mod pdf;
 
@@ -51,7 +52,13 @@ impl From<Exit> for ExitCode {
 /// Fast, trustworthy PCB visual + geometric diff. Point it at two revisions of a
 /// board's Gerber output and it shows — and measures — exactly what changed.
 #[derive(Parser, Debug)]
-#[command(name = "etchy", version, about)]
+#[command(
+    name = "etchy",
+    version,
+    about,
+    after_help = "Per-commit history: `etchy log <RANGE> [SUBDIR]` lists the layer changes of \
+                  every commit in a git range (see `etchy log --help`)."
+)]
 struct Cli {
     /// Old revision: a directory of Gerber/Excellon files, or a git ref (see
     /// `--git` / the optional [SUBDIR] argument).
@@ -89,6 +96,8 @@ struct Cli {
 
     /// CI gate: fail (exit 1) only when the changed area on the gated layers
     /// exceeds this many mm². Omitted ⇒ any change on the gated layers fails.
+    /// A drill hole or slot count change on a gated layer (the drill table)
+    /// fails whatever the thresholds: it has no area to measure.
     #[arg(long, value_name = "MM2")]
     fail_on_area: Option<f64>,
     /// CI gate: fail (exit 1) only when the changed region count on the gated
@@ -104,6 +113,17 @@ struct Cli {
     /// changes and ignores silkscreen.
     #[arg(long, value_name = "SPEC", default_value = "all")]
     gate_layers: String,
+    /// Accept known changes listed in this TOML file: `[[waiver]]` entries, each
+    /// with a `layer`, a `box = [x_min, y_min, x_max, y_max]` in board mm and a
+    /// `reason`. A changed region is waived only when it lies entirely inside a
+    /// box. Gates count only unwaived changes; waived regions are still listed
+    /// in every output, and a waiver that matched nothing is reported as stale.
+    #[arg(long, value_name = "FILE")]
+    waivers: Option<PathBuf>,
+    /// With --waivers: fail the gate (exit 1) when any waiver matched nothing,
+    /// so stale waivers can't pile up.
+    #[arg(long, requires = "waivers")]
+    fail_on_stale_waivers: bool,
 
     /// PDF inputs only: rasterization resolution in DPI (default 150). One DPI
     /// for all sheet sizes — larger sheets produce more pixels, text stays
@@ -234,23 +254,50 @@ fn check_area_threshold(flag: &str, value: Option<f64>) -> Result<Option<f64>> {
 /// The CI gate (#M2): decides whether a diff should fail (exit 1). Thresholds are
 /// opt-in — with none set, any change on the gated layers fails (so
 /// `--gate-layers copper` alone means "fail on copper, ignore silkscreen").
+/// With `--waivers` (#425) the gate counts only unwaived changes.
 struct Gate {
     fail_on_area: Option<f64>,
     fail_on_regions: Option<u32>,
     filter: LayerFilter,
+    /// The parsed waiver file, when `--waivers` was given.
+    waivers: Option<Vec<Waiver>>,
+    fail_on_stale_waivers: bool,
 }
 
 impl Gate {
     fn from_cli(cli: &Cli) -> Result<Self> {
+        let waivers = match &cli.waivers {
+            Some(path) => {
+                let w = load_waivers(path)
+                    .with_context(|| format!("reading waivers from {}", path.display()))?;
+                // Never apply a waiver file without saying so.
+                eprintln!("etchy: using {} waiver(s) from {}", w.len(), path.display());
+                Some(w)
+            }
+            None => None,
+        };
         Ok(Self {
             fail_on_area: check_area_threshold("--fail-on-area", cli.fail_on_area)?,
             fail_on_regions: cli.fail_on_regions,
             filter: LayerFilter::parse(&cli.gate_layers)?,
+            waivers,
+            fail_on_stale_waivers: cli.fail_on_stale_waivers,
         })
     }
 
     /// (changed area mm², changed region count) summed over the gated layers.
-    fn totals(&self, report: &DiffReport) -> (f64, u32) {
+    /// With waivers, only the unwaived part counts.
+    fn totals(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> (f64, u32) {
+        if let Some(w) = waived {
+            let (nm2, regions) = w
+                .layers
+                .iter()
+                .filter(|l| self.filter.includes(l.kind))
+                .fold((0i128, 0u32), |(a, r), l| {
+                    (a + l.unwaived_nm2, r + l.unwaived_regions)
+                });
+            return (etchy_core::nm2_to_mm2(nm2), regions);
+        }
         report
             .layers
             .iter()
@@ -263,9 +310,19 @@ impl Gate {
             })
     }
 
-    /// Should this diff fail the gate (exit 1)?
-    fn fails(&self, report: &DiffReport) -> bool {
-        let (area, regions) = self.totals(report);
+    /// Gated layers whose drill table counts changed (#456), by display name.
+    fn drill_count_layers(&self, report: &DiffReport) -> Vec<String> {
+        report
+            .layers
+            .iter()
+            .filter(|l| l.drill_counts_changed && self.filter.includes(l.kind))
+            .map(|l| l.name())
+            .collect()
+    }
+
+    /// Is the (unwaived) geometry change on the gated layers over the gate?
+    fn over(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> bool {
+        let (area, regions) = self.totals(report, waived);
         match (self.fail_on_area, self.fail_on_regions) {
             // No threshold set → any change on the gated layers fails.
             (None, None) => area > 0.0 || regions > 0,
@@ -273,27 +330,36 @@ impl Gate {
         }
     }
 
-    /// True when the gate is non-default (a threshold or a layer scope), so the
-    /// verdict is worth surfacing in the output.
-    fn configured(&self) -> bool {
-        self.fail_on_area.is_some() || self.fail_on_regions.is_some() || !self.filter.all
+    /// Does `--fail-on-stale-waivers` fail this run?
+    fn stale_fails(&self, waived: Option<&WaiverReport>) -> bool {
+        self.fail_on_stale_waivers && waived.is_some_and(|w| w.stale_waivers > 0)
     }
 
-    /// A one-line human verdict for stderr.
-    fn describe(&self, report: &DiffReport, fails: bool) -> String {
-        let (area, regions) = self.totals(report);
-        let scope = if self.filter.all {
+    /// Should this diff fail the gate (exit 1)? A hole-count change on a gated
+    /// layer always fails (#456), whatever the thresholds and the waivers: the
+    /// thresholds measure geometry, a hole drilled twice has none to measure,
+    /// and waivers cover geometry boxes, not hole counts.
+    fn fails(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> bool {
+        !self.drill_count_layers(report).is_empty()
+            || self.over(report, waived)
+            || self.stale_fails(waived)
+    }
+
+    /// True when the gate is non-default (a threshold, a layer scope or
+    /// waivers), so the verdict is worth surfacing in the output.
+    fn configured(&self) -> bool {
+        self.fail_on_area.is_some()
+            || self.fail_on_regions.is_some()
+            || !self.filter.all
+            || self.waivers.is_some()
+    }
+
+    fn scope(&self) -> String {
+        if self.filter.all {
             "all layers".to_string()
         } else {
             self.tokens_desc()
-        };
-        format!(
-            "etchy: gate {} — {}: changed {:.4} mm², {} regions",
-            if fails { "FAIL" } else { "PASS" },
-            scope,
-            area,
-            regions,
-        )
+        }
     }
 
     fn tokens_desc(&self) -> String {
@@ -302,23 +368,40 @@ impl Gate {
 
     /// Resolve this gate against a report into the verdict that drives both the
     /// exit code and the printed output — computed once so they cannot disagree.
-    fn verdict(&self, report: &DiffReport) -> GateVerdict {
-        let (area, regions) = self.totals(report);
+    fn verdict(&self, report: &DiffReport, waived: Option<&WaiverReport>) -> GateVerdict {
+        let (area, regions) = self.totals(report, waived);
         GateVerdict {
             configured: self.configured(),
-            passed: !self.fails(report),
+            passed: !self.fails(report, waived),
+            stale_only: self.stale_fails(waived)
+                && !self.over(report, waived)
+                && self.drill_count_layers(report).is_empty(),
             differs: report.any_changes(),
-            scope: if self.filter.all {
-                "all layers".to_string()
-            } else {
-                self.tokens_desc()
-            },
+            scope: self.scope(),
             changed_area_mm2: area,
             changed_regions: regions,
+            drill_count_layers: self.drill_count_layers(report),
             fail_on_area: self.fail_on_area,
             fail_on_regions: self.fail_on_regions,
+            waivers: waived.map(|w| GateWaivers {
+                waived_regions: w.waived_regions,
+                waived_area_mm2: w.waived_area_mm2,
+                stale_waivers: w.stale_waivers,
+                partial_overlaps: w.partial_overlaps.len() as u32,
+                fail_on_stale_waivers: self.fail_on_stale_waivers,
+            }),
         }
     }
+}
+
+/// The waiver part of the gate verdict (#425).
+#[derive(Serialize)]
+struct GateWaivers {
+    waived_regions: u32,
+    waived_area_mm2: f64,
+    stale_waivers: u32,
+    partial_overlaps: u32,
+    fail_on_stale_waivers: bool,
 }
 
 /// The gate outcome, resolved against a report: the single source both the exit
@@ -326,42 +409,118 @@ impl Gate {
 /// object in JSON; `differs` is skipped there (it duplicates `any_changes`).
 #[derive(Serialize)]
 struct GateVerdict {
-    /// True when the gate is non-default (a threshold or a layer scope).
+    /// True when the gate is non-default (a threshold, a layer scope or waivers).
     configured: bool,
     /// True ⇔ the process exits 0. With a configured gate this can be true even
-    /// when geometry differs (the change was within the gate).
+    /// when geometry differs (the change was within the gate, or waived).
     passed: bool,
-    /// Whether any geometry changed at all, regardless of the gate.
+    /// True when the gate fails only because of `--fail-on-stale-waivers`: the
+    /// unwaived change alone is within the gate and no hole counts changed.
+    #[serde(skip)]
+    stale_only: bool,
+    /// Whether anything changed at all (geometry or drill counts), regardless
+    /// of the gate.
     #[serde(skip)]
     differs: bool,
     /// Human description of the gated layer scope (`all layers`, `copper`, …).
     scope: String,
-    /// Changed area / region count summed over the gated layers.
+    /// Changed area / region count summed over the gated layers (unwaived only
+    /// when waivers are in use).
     changed_area_mm2: f64,
     changed_regions: u32,
+    /// Gated layers whose drill table hole or slot counts changed (#456).
+    /// Any entry fails the gate, whatever the thresholds. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    drill_count_layers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fail_on_area: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fail_on_regions: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waivers: Option<GateWaivers>,
 }
 
 impl GateVerdict {
+    /// What the gate measured, e.g. `copper: 0.1234 mm², 2 regions`, with the
+    /// waiver tally when waivers are in use.
+    fn measured(&self, decimals: usize) -> String {
+        let mut s = format!(
+            "{}: {}{:.*} mm², {} regions",
+            self.scope,
+            if self.waivers.is_some() {
+                "unwaived "
+            } else {
+                ""
+            },
+            decimals,
+            self.changed_area_mm2,
+            self.changed_regions
+        );
+        if !self.drill_count_layers.is_empty() {
+            s.push_str(&format!(
+                "; hole counts changed on {}",
+                self.drill_count_layers.join(", ")
+            ));
+        }
+        if let Some(w) = &self.waivers {
+            s.push_str(&format!(
+                "; waived {} regions, {:.*} mm²; {} stale waiver(s)",
+                w.waived_regions, decimals, w.waived_area_mm2, w.stale_waivers
+            ));
+            if w.fail_on_stale_waivers && w.stale_waivers > 0 {
+                s.push_str(" (--fail-on-stale-waivers)");
+            }
+        }
+        s
+    }
+
+    /// A one-line human verdict for stderr.
+    fn describe(&self) -> String {
+        format!(
+            "etchy: gate {} — {}",
+            if self.passed { "PASS" } else { "FAIL" },
+            self.measured(4)
+        )
+    }
+
     /// The `result:` line for the terminal summary, reconciled with the exit code
     /// (#258). The confusing case is a *configured* gate that passes while
     /// geometry differs: say so plainly rather than a bare "differences found"
     /// next to an exit 0. Never hides that geometry differs.
     fn summary_result_line(&self) -> String {
-        if !self.differs {
+        if self.stale_only {
+            // Nothing over the gate, but a stale waiver fails the run.
+            let stale = self.waivers.as_ref().map_or(0, |w| w.stale_waivers);
+            format!(
+                "result: {}, but {stale} stale waiver(s) — gate FAIL, exit 1 (--fail-on-stale-waivers)",
+                if !self.differs {
+                    "no differences"
+                } else if self.waivers.is_some() {
+                    "differences found, waived or within the CI gate"
+                } else {
+                    "differences found, within the CI gate"
+                },
+            )
+        } else if !self.differs {
             "result: no differences".to_string()
         } else if self.passed {
             // Geometry differs, but the gate downgraded the exit code to 0.
             format!(
-                "result: differences found, but within the CI gate — gate PASS, exit 0 \
-                 ({}: {:.5} mm², {} regions)",
-                self.scope, self.changed_area_mm2, self.changed_regions
+                "result: differences found, but {} — gate PASS, exit 0 ({})",
+                if self.waivers.is_some() {
+                    "waived or within the CI gate"
+                } else {
+                    "within the CI gate"
+                },
+                self.measured(5)
             )
-        } else {
+        } else if self.drill_count_layers.is_empty() {
             "result: differences found".to_string()
+        } else {
+            format!(
+                "result: differences found — hole counts changed on {} (drill table)",
+                self.drill_count_layers.join(", ")
+            )
         }
     }
 
@@ -372,17 +531,67 @@ impl GateVerdict {
             return;
         }
         s.push_str(&format!(
-            "\n> **Gate {}** (exit {}) — {}: {:.4} mm², {} regions.\n",
+            "\n> **Gate {}** (exit {}) — {}.\n",
             if self.passed { "PASS" } else { "FAIL" },
             if self.passed { 0 } else { 1 },
-            self.scope,
-            self.changed_area_mm2,
-            self.changed_regions,
+            self.measured(4),
         ));
     }
 }
 
+/// The `--waivers` file (#425). Unknown keys anywhere are an error, so a typo
+/// (`[[waivers]]`, `reson = …`) can't quietly drop a waiver or a field.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaiverFile {
+    #[serde(default)]
+    waiver: Vec<WaiverEntry>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaiverEntry {
+    layer: String,
+    #[serde(rename = "box")]
+    bbox: Vec<f64>,
+    reason: String,
+}
+
+/// Read and validate a waiver file. Any problem — unreadable, bad TOML, an
+/// unknown key, layer or box shape, no entries — is an error (exit 2).
+fn load_waivers(path: &Path) -> Result<Vec<Waiver>> {
+    let text = std::fs::read_to_string(path)?;
+    parse_waivers(&text)
+}
+
+fn parse_waivers(text: &str) -> Result<Vec<Waiver>> {
+    let file: WaiverFile = toml::from_str(text).context("invalid waiver file")?;
+    if file.waiver.is_empty() {
+        anyhow::bail!("the waiver file has no [[waiver]] entries");
+    }
+    file.waiver
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let bbox: [f64; 4] = e.bbox.as_slice().try_into().map_err(|_| {
+                anyhow::anyhow!(
+                    "waiver #{}: `box` must be [x_min, y_min, x_max, y_max] in mm, got {} value(s)",
+                    i + 1,
+                    e.bbox.len()
+                )
+            })?;
+            Waiver::new(&e.layer, bbox, &e.reason)
+                .with_context(|| format!("waiver #{} ({})", i + 1, e.layer))
+        })
+        .collect()
+}
+
 fn main() -> ExitCode {
+    // `etchy log …` is the one subcommand. It is dispatched by hand because the
+    // two-revision form takes bare positional paths.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "log") {
+        return log::main();
+    }
     let cli = Cli::parse();
     // Validate the gate BEFORE the (expensive) diff, so a bad --gate-layers is a
     // loud, fast exit 2 — never a silently disarmed gate.
@@ -493,6 +702,12 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
             );
         }
         if old_pdf && new_pdf {
+            // Waiver boxes are board mm on a named layer; a pixel diff has neither.
+            if cli.waivers.is_some() {
+                anyhow::bail!(
+                    "--waivers is not valid for PDF inputs (waiver boxes are board mm on a layer)"
+                );
+            }
             return run_pdf(cli).map(|any_changes| RunOutcome::Pdf { any_changes });
         }
     }
@@ -502,14 +717,7 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     }
 
     let (old, of, ow, new, nf, nw) = if git_mode {
-        // A non-UTF-8 subdir can't be passed to git as a pathspec here; fail loud
-        // rather than silently widening the scan to the whole tree (#299).
-        let subdir = match cli.subdir.as_deref() {
-            None => ".",
-            Some(p) => p
-                .to_str()
-                .with_context(|| format!("[SUBDIR] {} is not valid UTF-8", p.display()))?,
-        };
+        let subdir = git_subdir(cli.subdir.as_deref())?;
         if cli.subdir.is_none() {
             // Whole-repo scans flatten every Gerber/Excellon blob at the ref into
             // one board — fine for a single-board repo, garbage when the tree
@@ -535,19 +743,14 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     };
 
     let diff = compare_detailed(&old, &new).context("comparing revisions")?;
-    let mut report = diff.report.clone();
-    // Layer-classification cross-check warnings (#239), old rev then new. A
-    // conflict repeated on both revisions is reported once per side, tagged by
-    // revision so it's clear which pack the mismatch is in.
-    for (rev, ws) in [("old", ow), ("new", nw)] {
-        for w in ws {
-            report.warnings.push(format!("{rev} {w}"));
-        }
-    }
-    if let (Some(o), Some(n)) = (of, nf) {
-        if let Some(w) = coordinate_mismatch_warning(&o, &n) {
-            report.warnings.push(w);
-        }
+    let mut report = report_with_load_warnings(&diff, ow, nw, of, nf);
+
+    // Waivers (#425) apply to the same diff every output reads. Their warnings
+    // (stale waivers, partial overlaps) join the report's warnings so no output
+    // can drop them.
+    let waived: Option<WaiverReport> = gate.waivers.as_deref().map(|w| apply_waivers(&diff, w));
+    if let Some(w) = &waived {
+        report.warnings.extend(w.warnings());
     }
 
     // Optional SVG export: one file per changed layer (headless render).
@@ -557,11 +760,12 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
 
     // Optional self-contained HTML report (M1 output).
     if let Some(path) = &cli.html {
-        let html = etchy_core::board_report_html_with_limit(
+        let html = etchy_core::board_report_html_with_waivers(
             &diff,
             &cli.old.to_string_lossy(),
             &cli.new.to_string_lossy(),
             cli.top_regions as usize,
+            waived.as_ref(),
         );
         std::fs::write(path, html)
             .with_context(|| format!("writing HTML report to {}", path.display()))?;
@@ -570,17 +774,21 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
     // Apply the CI gate once, here, so the printed verdict and the exit code are
     // derived from the same computation (#258): stdout can no longer say
     // "differences found" while the process exits 0 unqualified.
-    let verdict = gate.verdict(&report);
+    let verdict = gate.verdict(&report, waived.as_ref());
     if verdict.configured {
-        eprintln!("{}", gate.describe(&report, !verdict.passed));
+        eprintln!("{}", verdict.describe());
     }
 
     // `--json` is the deprecated alias for `--format json`.
     let format = if cli.json { Format::Json } else { cli.format };
+    let limit = cli.top_regions as usize;
     let out = match format {
-        Format::Json => board_json(&report, &verdict),
+        Format::Json => board_json(&report, &verdict, waived.as_ref()),
         Format::Md => {
-            let mut s = report.to_markdown_summary_with_limit(cli.top_regions as usize);
+            let mut s = report.to_markdown_summary_with_limit(limit);
+            if let Some(w) = &waived {
+                s.push_str(&w.to_markdown(limit));
+            }
             verdict.append_markdown_note(&mut s);
             s
         }
@@ -592,13 +800,50 @@ fn run(cli: &Cli, gate: &Gate) -> Result<RunOutcome> {
                     eprintln!("  - {w}");
                 }
             }
-            format_summary(&report, &verdict)
+            format_summary(&report, &verdict, waived.as_ref())
         }
     };
     write_stdout(&out, Exit::from_passed(verdict.passed))?;
     Ok(RunOutcome::Board {
         passed: verdict.passed,
     })
+}
+
+/// The `[SUBDIR]` of a git-refs run as a pathspec (`.` when omitted). A non-UTF-8
+/// subdir can't be passed to git as a pathspec here; fail loud rather than
+/// silently widening the scan to the whole tree (#299).
+fn git_subdir(subdir: Option<&Path>) -> Result<&str> {
+    match subdir {
+        None => Ok("."),
+        Some(p) => p
+            .to_str()
+            .with_context(|| format!("[SUBDIR] {} is not valid UTF-8", p.display())),
+    }
+}
+
+/// The diff's report plus the loaders' warnings: layer-classification
+/// cross-checks (#239), old rev then new, and the coordinate-format check. A
+/// conflict repeated on both revisions is reported once per side, tagged by
+/// revision so it's clear which pack the mismatch is in.
+fn report_with_load_warnings(
+    diff: &etchy_core::BoardDiff,
+    old_warnings: Vec<String>,
+    new_warnings: Vec<String>,
+    old_format: Option<GerberFormat>,
+    new_format: Option<GerberFormat>,
+) -> DiffReport {
+    let mut report = diff.report.clone();
+    for (rev, ws) in [("old", old_warnings), ("new", new_warnings)] {
+        for w in ws {
+            report.warnings.push(format!("{rev} {w}"));
+        }
+    }
+    if let (Some(o), Some(n)) = (old_format, new_format) {
+        if let Some(w) = coordinate_mismatch_warning(&o, &n) {
+            report.warnings.push(w);
+        }
+    }
+    report
 }
 
 /// Write a finished report to stdout, treating a downstream pipe that closed
@@ -633,16 +878,23 @@ fn write_stdout(s: &str, on_broken_pipe: Exit) -> Result<()> {
 /// consumers); the added `gate` object lets a JSON consumer read the exit
 /// outcome directly — `gate.passed == true` ⇔ exit 0 — instead of inferring it
 /// from `any_changes`, which ignores the gate.
-fn board_json(report: &DiffReport, verdict: &GateVerdict) -> String {
+fn board_json(
+    report: &DiffReport,
+    verdict: &GateVerdict,
+    waivers: Option<&WaiverReport>,
+) -> String {
     #[derive(Serialize)]
     struct BoardJson<'a> {
         #[serde(flatten)]
         report: &'a DiffReport,
         gate: &'a GateVerdict,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        waivers: Option<&'a WaiverReport>,
     }
     serde_json::to_string_pretty(&BoardJson {
         report,
         gate: verdict,
+        waivers,
     })
     .expect("BoardJson serializes")
 }
@@ -784,7 +1036,11 @@ fn write_svgs(diff: &etchy_core::BoardDiff, dir: &Path) -> Result<usize> {
 /// it can flow through the broken-pipe-safe `write_stdout` (#261). Warnings are
 /// printed to stderr by the caller. The final `result:` line is reconciled with
 /// the gate/exit outcome (#258).
-fn format_summary(report: &DiffReport, verdict: &GateVerdict) -> String {
+fn format_summary(
+    report: &DiffReport,
+    verdict: &GateVerdict,
+    waivers: Option<&WaiverReport>,
+) -> String {
     use std::fmt::Write;
     let mut s = String::new();
     let _ = writeln!(
@@ -833,6 +1089,12 @@ fn format_summary(report: &DiffReport, verdict: &GateVerdict) -> String {
             text
         };
         let name = l.name();
+        if l.drill_counts_only() {
+            let _ = writeln!(
+                s,
+                "{name}: changed in the drill table only (hole or slot counts); geometry identical"
+            );
+        }
         for r in table
             .rows
             .iter()
@@ -847,6 +1109,9 @@ fn format_summary(report: &DiffReport, verdict: &GateVerdict) -> String {
             );
         }
         let _ = writeln!(s, "{name} total: {}", counts(&table.total));
+    }
+    if let Some(w) = waivers {
+        s.push_str(&w.to_text());
     }
     s.push_str(&verdict.summary_result_line());
     s
@@ -919,6 +1184,8 @@ mod tests {
             regions: Vec::new(),
             labels_available: false,
             drill_table: None,
+            drill_counts_changed: false,
+            geometry_changed: area_mm2 > 0.0 || regions > 0,
         }
     }
 
@@ -939,6 +1206,8 @@ mod tests {
             fail_on_area: area,
             fail_on_regions: regions,
             filter: LayerFilter::parse(layers).unwrap(),
+            waivers: None,
+            fail_on_stale_waivers: false,
         }
     }
 
@@ -1208,31 +1477,120 @@ mod tests {
     #[test]
     fn default_gate_fails_on_any_change() {
         // No thresholds, all layers → any change fails (the 0/1 contract).
-        assert!(gate(None, None, "all").fails(&report()));
+        assert!(gate(None, None, "all").fails(&report(), None));
+    }
+
+    /// A drill layer with identical geometry whose hole counts changed (#456).
+    fn drill_counts_only_report() -> DiffReport {
+        let mut drill = layer("drill-pth", 0.0, 0);
+        drill.status = LayerStatus::Changed;
+        drill.drill_counts_changed = true;
+        DiffReport::new(vec![drill, layer("top-silk", 0.02, 1)], Vec::new())
+    }
+
+    #[test]
+    fn hole_count_change_fails_every_gate_that_includes_the_layer() {
+        let r = drill_counts_only_report();
+        assert!(gate(None, None, "all").fails(&r, None));
+        assert!(gate(None, None, "drill").fails(&r, None));
+        assert!(gate(None, None, "pth").fails(&r, None));
+        // Thresholds measure geometry; a count change has none and still fails.
+        assert!(gate(Some(100.0), None, "all").fails(&r, None));
+        assert!(gate(None, Some(100), "drill").fails(&r, None));
+        // Out of scope: the gate ignores it like any other ungated layer.
+        assert!(!gate(None, None, "copper").fails(&r, None));
+        assert!(!gate(None, None, "npth").fails(&r, None));
+        assert!(!gate(Some(1.0), None, "all").fails(
+            &DiffReport::new(vec![layer("top-silk", 0.02, 1)], Vec::new()),
+            None
+        ));
+    }
+
+    #[test]
+    fn hole_count_change_is_named_in_every_output() {
+        let r = drill_counts_only_report();
+        let v = gate(None, None, "drill").verdict(&r, None);
+        assert!(!v.passed);
+        assert_eq!(v.drill_count_layers, ["drill-pth"]);
+        let summary = format_summary(&r, &v, None);
+        assert!(
+            summary.ends_with(
+                "result: differences found — hole counts changed on drill-pth (drill table)"
+            ),
+            "{summary}"
+        );
+        let json = board_json(&r, &v, None);
+        assert!(json.contains("\"drill_count_layers\""), "{json}");
+        assert!(json.contains("\"drill_counts_changed\": true"), "{json}");
+        let mut md = String::new();
+        v.append_markdown_note(&mut md);
+        assert!(md.contains("hole counts changed on drill-pth"), "{md}");
+        assert!(v.describe().ends_with("; hole counts changed on drill-pth"));
+        // No count change: the JSON gate object stays as before.
+        let plain = gate(None, None, "all").verdict(&report(), None);
+        assert!(!board_json(&report(), &plain, None).contains("drill_count_layers"));
+    }
+
+    /// A waiver report with nothing waived and `stale` stale waivers.
+    fn empty_waiver_report(stale: u32) -> WaiverReport {
+        WaiverReport {
+            waived_regions: 0,
+            waived_area_mm2: 0.0,
+            waived_area_nm2: "0".to_string(),
+            stale_waivers: stale,
+            partial_overlaps: Vec::new(),
+            waivers: Vec::new(),
+            layers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn hole_count_change_fails_even_with_waivers() {
+        // Waivers cover geometry boxes, not hole counts: a count change on a
+        // gated layer still fails, and is not reported as a stale-waiver failure.
+        let r = drill_counts_only_report();
+        let w = empty_waiver_report(1);
+        let mut g = gate(None, None, "drill");
+        g.waivers = Some(Vec::new());
+        assert!(g.fails(&r, Some(&w)));
+        g.fail_on_stale_waivers = true;
+        let v = g.verdict(&r, Some(&w));
+        assert!(!v.passed);
+        assert!(
+            !v.stale_only,
+            "drill counts fail too, not stale waivers only"
+        );
+        let summary = format_summary(&r, &v, Some(&w));
+        assert!(
+            summary.ends_with(
+                "result: differences found — hole counts changed on drill-pth (drill table)"
+            ),
+            "{summary}"
+        );
     }
 
     #[test]
     fn area_threshold_ignores_small_changes() {
         // Total changed area is 0.52 mm²; a 1.0 mm² threshold passes it.
-        assert!(!gate(Some(1.0), None, "all").fails(&report()));
+        assert!(!gate(Some(1.0), None, "all").fails(&report(), None));
         // …but 0.1 mm² fails.
-        assert!(gate(Some(0.1), None, "all").fails(&report()));
+        assert!(gate(Some(0.1), None, "all").fails(&report(), None));
     }
 
     #[test]
     fn scope_to_copper_ignores_silk() {
         // Only copper counts; a copper-clean board with silk churn passes.
         let silk_only = DiffReport::new(vec![layer("top-silk", 0.3, 2)], Vec::new());
-        assert!(!gate(None, None, "copper").fails(&silk_only));
+        assert!(!gate(None, None, "copper").fails(&silk_only, None));
         // Copper changed → fails when scoped to copper.
-        assert!(gate(None, None, "copper").fails(&report()));
+        assert!(gate(None, None, "copper").fails(&report(), None));
     }
 
     #[test]
     fn region_threshold_gates_on_count() {
         // Copper has 3 changed regions; threshold 5 passes, 2 fails.
-        assert!(!gate(None, Some(5), "copper").fails(&report()));
-        assert!(gate(None, Some(2), "copper").fails(&report()));
+        assert!(!gate(None, Some(5), "copper").fails(&report(), None));
+        assert!(gate(None, Some(2), "copper").fails(&report(), None));
     }
 
     #[test]
@@ -1242,9 +1600,9 @@ mod tests {
         // found" beside that exit 0 — it must say the change was within the gate,
         // while still admitting geometry differs.
         let r = report();
-        let v = gate(Some(1.0), None, "all").verdict(&r);
+        let v = gate(Some(1.0), None, "all").verdict(&r, None);
         assert!(v.passed, "the change is within the 1.0 mm² gate");
-        let summary = format_summary(&r, &v);
+        let summary = format_summary(&r, &v, None);
         assert!(summary.contains("differences found"), "still admits a diff");
         assert!(
             summary.contains("gate PASS") && summary.contains("exit 0"),
@@ -1257,9 +1615,9 @@ mod tests {
         // A gate that fails (or the default gate) keeps the plain wording — it
         // matches exit 1, so there is nothing to reconcile.
         let r = report();
-        let v = gate(None, None, "all").verdict(&r);
+        let v = gate(None, None, "all").verdict(&r, None);
         assert!(!v.passed);
-        let summary = format_summary(&r, &v);
+        let summary = format_summary(&r, &v, None);
         assert!(summary.contains("result: differences found"));
         assert!(
             !summary.contains("gate PASS"),
@@ -1270,17 +1628,17 @@ mod tests {
     #[test]
     fn no_change_summary_reads_no_differences() {
         let r = DiffReport::new(vec![layer("top-copper", 0.0, 0)], Vec::new());
-        let v = gate(None, None, "all").verdict(&r);
+        let v = gate(None, None, "all").verdict(&r, None);
         assert!(v.passed);
-        assert!(format_summary(&r, &v).contains("result: no differences"));
+        assert!(format_summary(&r, &v, None).contains("result: no differences"));
     }
 
     #[test]
     fn json_carries_the_gate_verdict() {
         // #258: a JSON consumer must be able to read the exit outcome directly.
         let r = report();
-        let v = gate(Some(1.0), None, "all").verdict(&r);
-        let json = board_json(&r, &v);
+        let v = gate(Some(1.0), None, "all").verdict(&r, None);
+        let json = board_json(&r, &v, None);
         // The report's own contract is untouched (flattened in).
         assert!(json.contains("\"schema_version\": 1"), "json: {json}");
         assert!(json.contains("\"any_changes\": true"));
@@ -1301,7 +1659,7 @@ mod tests {
         let (board, _, _) = load_board(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let objects = board.layers[0].x2_objects.as_ref().unwrap();
-        assert_eq!(objects[0].labels.refdes.as_deref(), Some("U7"));
+        assert_eq!(objects.object(0).labels.refdes.as_deref(), Some("U7"));
     }
 
     #[test]
@@ -1323,5 +1681,53 @@ mod tests {
 
         let labels: Vec<&str> = board.layers.iter().map(|l| l.label.as_str()).collect();
         assert_eq!(labels, ["a-F_Cu.gtl", "b-F_Mask.gts", "c-B_Cu.gbl"]);
+    }
+
+    #[test]
+    fn parse_waivers_accepts_a_valid_file_with_integer_boxes() {
+        let w = parse_waivers(
+            "[[waiver]]\nlayer = \"top-silk\"\nbox = [10, 5, 30.5, 9]\nreason = \"date code\"\n\n\
+             [[waiver]]\nlayer = \"inner-copper2\"\nbox = [0.0, 0.0, 1.0, 1.0]\nreason = \"rev text\"\n",
+        )
+        .unwrap();
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].layer, "top-silk");
+        assert_eq!(w[0].box_mm, [10.0, 5.0, 30.5, 9.0]);
+        assert_eq!(w[1].reason, "rev text");
+    }
+
+    #[test]
+    fn parse_waivers_rejects_bad_files() {
+        let ok = "layer = \"top-silk\"\nbox = [0, 0, 1, 1]\nreason = \"r\"\n";
+        for (text, needle) in [
+            // A typo'd key must not silently drop a field.
+            (format!("[[waiver]]\n{ok}reson = \"x\"\n"), "reson"),
+            // A typo'd table name must not silently drop every waiver.
+            (format!("[[waivers]]\n{ok}"), "waivers"),
+            (
+                "[[waiver]]\nlayer = \"top-slik\"\nbox = [0, 0, 1, 1]\nreason = \"r\"\n".into(),
+                "top-slik",
+            ),
+            (
+                "[[waiver]]\nlayer = \"top-silk\"\nbox = [0, 0, 1]\nreason = \"r\"\n".into(),
+                "3 value",
+            ),
+            (
+                "[[waiver]]\nlayer = \"top-silk\"\nbox = [5, 0, 1, 1]\nreason = \"r\"\n".into(),
+                "waiver #1",
+            ),
+            (
+                "[[waiver]]\nlayer = \"top-silk\"\nbox = [0, 0, 1, 1]\nreason = \"  \"\n".into(),
+                "waiver #1",
+            ),
+            (
+                "[[waiver]]\nlayer = \"top-silk\"\nbox = [0, 0, 1, 1]\n".into(),
+                "reason",
+            ),
+            (String::new(), "no [[waiver]] entries"),
+        ] {
+            let err = format!("{:#}", parse_waivers(&text).unwrap_err());
+            assert!(err.contains(needle), "{text:?} -> {err}");
+        }
     }
 }
