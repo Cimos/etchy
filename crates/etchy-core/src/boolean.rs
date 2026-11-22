@@ -40,11 +40,13 @@ fn from_int(shapes: IntShapes<i64>) -> PolygonSet {
 /// winding) — which is how a layer's `dark` set is unioned and `clear` subtracted
 /// in one pass.
 pub(crate) fn difference(subj: &[Contour], clip: &[Contour]) -> PolygonSet {
-    let s = to_int(subj);
-    let c = to_int(clip);
-    from_int(
-        Overlay::<i64>::with_contours(&s, &c).overlay(OverlayRule::Difference, FillRule::NonZero),
-    )
+    overlay(subj, clip, OverlayRule::Difference)
+}
+
+/// [`difference`] in passes over groups that cannot touch ([`by_groups`]):
+/// the same shapes, for sets of many separate objects such as drill hits.
+pub(crate) fn difference_grouped(subj: &[Contour], clip: &[Contour]) -> PolygonSet {
+    by_groups(subj, clip, OverlayRule::Difference)
 }
 
 /// True when two filled contour sets share positive area (boundary contact alone
@@ -90,9 +92,141 @@ pub(crate) fn triangulate_shape(shape: &[Contour]) -> Vec<[Pt; 3]> {
 /// NonZero union of `a` and `b` — accumulates copper across a dark polarity span
 /// (self-overlapping flashes/traces merge; the running result is fed back in).
 pub(crate) fn union(a: &[Contour], b: &[Contour]) -> PolygonSet {
-    let s = to_int(a);
-    let c = to_int(b);
-    from_int(Overlay::<i64>::with_contours(&s, &c).overlay(OverlayRule::Union, FillRule::NonZero))
+    overlay(a, b, OverlayRule::Union)
+}
+
+/// [`union`] in passes over groups that cannot touch ([`by_groups`]).
+pub(crate) fn union_grouped(a: &[Contour], b: &[Contour]) -> PolygonSet {
+    by_groups(a, b, OverlayRule::Union)
+}
+
+/// One NonZero overlay pass of `subj` against `clip`.
+fn overlay(subj: &[Contour], clip: &[Contour], rule: OverlayRule) -> PolygonSet {
+    let s = to_int(subj);
+    let c = to_int(clip);
+    from_int(Overlay::<i64>::with_contours(&s, &c).overlay(rule, FillRule::NonZero))
+}
+
+/// Contours per overlay pass in [`by_groups`]. Small enough that a pass stays
+/// cheap whatever the layout, large enough that the pass count stays low.
+const GROUP_BATCH: usize = 256;
+
+/// [`overlay`], run separately on groups of contours that cannot touch.
+///
+/// Contours (from both sides) whose bounding boxes overlap or touch share a
+/// group. Groups are packed, in sweep order, into batches of about
+/// [`GROUP_BATCH`] contours, and each batch gets its own pass. Batches share no
+/// point, so for union and difference the shapes are those of one pass over
+/// everything. i_overlay's cost grows much faster than linearly when many
+/// segments share an x range: 50,000 separate drill hits in one column took over
+/// five minutes and 13 GB in one pass (a fuzz find). A layer that is one
+/// connected group still gets a single pass, as before.
+fn by_groups(subj: &[Contour], clip: &[Contour], rule: OverlayRule) -> PolygonSet {
+    let n = subj.len() + clip.len();
+    if n <= GROUP_BATCH {
+        return overlay(subj, clip, rule);
+    }
+    let contour = |i: usize| {
+        if i < subj.len() {
+            &subj[i]
+        } else {
+            &clip[i - subj.len()]
+        }
+    };
+    let boxes: Vec<[i64; 4]> = (0..n).map(|i| bbox(contour(i))).collect();
+    // Sweep along the axis the boxes spread over most, so a column or a row
+    // keeps the active set small.
+    let spread = |lo: usize, hi: usize| {
+        let min = boxes.iter().map(|b| b[lo]).min().unwrap_or(0);
+        let max = boxes.iter().map(|b| b[hi]).max().unwrap_or(0);
+        i128::from(max) - i128::from(min)
+    };
+    let (lo, hi, olo, ohi) = if spread(0, 2) >= spread(1, 3) {
+        (0, 2, 1, 3)
+    } else {
+        (1, 3, 0, 2)
+    };
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| (boxes[i][lo], i));
+
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    // The sweep compares each box with every box still open along the sweep
+    // axis. Long boxes stacked across it (rows of long traces) keep that set
+    // large; past this budget the grouping costs more than it saves, so fall
+    // back to a single pass.
+    let mut budget = n.saturating_mul(64).saturating_add(1_000_000);
+    let mut active: Vec<usize> = Vec::new();
+    for &i in &order {
+        let b = boxes[i];
+        active.retain(|&a| boxes[a][hi] >= b[lo]);
+        budget = match budget.checked_sub(active.len()) {
+            Some(left) => left,
+            None => return overlay(subj, clip, rule),
+        };
+        for &a in &active {
+            if boxes[a][olo] <= b[ohi] && b[olo] <= boxes[a][ohi] {
+                let (ra, rb) = (find(&mut parent, a), find(&mut parent, i));
+                if ra != rb {
+                    parent[ra.max(rb)] = ra.min(rb);
+                }
+            }
+        }
+        active.push(i);
+    }
+    if (0..n).all(|i| find(&mut parent, i) == 0) {
+        return overlay(subj, clip, rule);
+    }
+
+    // Members of each group, groups in the sweep order of their first member.
+    let mut slot: Vec<Option<usize>> = vec![None; n];
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for &i in &order {
+        let root = find(&mut parent, i);
+        let g = *slot[root].get_or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[g].push(i);
+    }
+
+    let mut shapes = Vec::new();
+    let (mut bs, mut bc): (Vec<Contour>, Vec<Contour>) = (Vec::new(), Vec::new());
+    for group in groups {
+        if bs.len() + bc.len() + group.len() > GROUP_BATCH && bs.len() + bc.len() > 0 {
+            shapes.extend(overlay(&bs, &bc, rule).shapes);
+            bs.clear();
+            bc.clear();
+        }
+        for i in group {
+            if i < subj.len() {
+                bs.push(subj[i].clone());
+            } else {
+                bc.push(clip[i - subj.len()].clone());
+            }
+        }
+    }
+    if bs.len() + bc.len() > 0 {
+        shapes.extend(overlay(&bs, &bc, rule).shapes);
+    }
+    PolygonSet::new(shapes)
+}
+
+/// `[min_x, min_y, max_x, max_y]` of a contour (an empty one is a point at 0).
+fn bbox(c: &[Pt]) -> [i64; 4] {
+    if c.is_empty() {
+        return [0; 4];
+    }
+    c.iter()
+        .fold([i64::MAX, i64::MAX, i64::MIN, i64::MIN], |b, p| {
+            [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)]
+        })
 }
 
 /// Flatten a [`PolygonSet`] back to a flat contour list (outer + holes), e.g. to
@@ -140,6 +274,44 @@ mod tests {
             })
             .sum();
         doubled / 2
+    }
+
+    /// Fuzz find: drill repeat codes laid tens of thousands of separate hits in
+    /// one column, well apart, and one pass over a column costs far more than
+    /// linear time (50,000 hits: over five minutes, 13 GB). Such a column splits
+    /// into many small passes with the same result as one.
+    #[test]
+    fn a_long_column_of_separate_disks_splits_into_passes() {
+        let disks: Vec<Contour> = (0..2_000)
+            .map(|k| crate::geom::ngon(0.0, -655_000_000.0 * k as f64, 125_000.0))
+            .collect();
+        let ps = union_grouped(&disks, &[]);
+        assert_eq!(ps.shapes.len(), 2_000);
+        let one = overlay(&disks, &[], OverlayRule::Union);
+        assert_eq!(ps.area_nm2(), one.area_nm2());
+    }
+
+    /// Union and difference in groups give the same area and shape count as one
+    /// pass over everything, for clusters that touch, overlap or stand apart.
+    #[test]
+    fn grouped_passes_match_a_single_pass() {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for k in 0..400i64 {
+            // Pairs of overlapping squares along a column, every 7th touching
+            // the next, plus a long thin bar joining a stretch of them.
+            let y = k * 1_000 - if k % 7 == 0 { 400 } else { 0 };
+            a.push(sq(0, y, 600, y + 600));
+            b.push(sq(300, y + 300, 900, y + 900));
+        }
+        a.push(sq(-50, 10_000, 1_000, 10_050));
+        let single = |s: &[Contour], c: &[Contour], rule| overlay(s, c, rule);
+        for rule in [OverlayRule::Union, OverlayRule::Difference] {
+            let want = single(&a, &b, rule);
+            let got = by_groups(&a, &b, rule);
+            assert_eq!(got.area_nm2(), want.area_nm2());
+            assert_eq!(got.shapes.len(), want.shapes.len());
+        }
     }
 
     #[test]

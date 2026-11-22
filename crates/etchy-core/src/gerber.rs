@@ -510,9 +510,18 @@ fn normalize(bytes: &[u8]) -> Result<String> {
         if in_ext {
             buf.push(ch);
             if ch == '%' {
-                let block = buf.trim();
+                // One block per line: the parser reads lines, so a line inside a
+                // multi-line block would be parsed as a command of its own. The
+                // parser trims and concatenates a multi-line `%AM` the same way.
+                let joined: String = buf.split(['\n', '\r']).map(str::trim).collect();
+                let block = joined.trim();
+                check_block(block)?;
                 // `%LN` only names the layer; it carries no geometry (#316).
-                if !block.starts_with("%LN") || !block.ends_with("*%") {
+                // Nor do `%TF` file attributes, which the parser can panic on
+                // (a short argument list is indexed unchecked); file metadata
+                // is read from the raw bytes elsewhere.
+                let metadata = block.starts_with("%LN") || block.starts_with("%TF");
+                if !metadata || !block.ends_with("*%") {
                     if identity_repeat(block) {
                         out.push_str("%SRX1Y1I0J0*%");
                     } else {
@@ -551,6 +560,38 @@ fn normalize(bytes: &[u8]) -> Result<String> {
     }
     check_terminated(&buf, "at end of file")?;
     Ok(out)
+}
+
+/// Reject an extended block the parser cannot read safely. The parser trusts
+/// some fields and panics or overflows on bad values, so they are checked here
+/// first and reported as a parse error.
+fn check_block(block: &str) -> Result<()> {
+    if let Some(spec) = block.strip_prefix("%FS") {
+        // The parser scales coordinates by 10^(6 - decimals): more than six
+        // decimal digits underflows that.
+        for axis in ['X', 'Y'] {
+            let digits = spec.split_once(axis).map(|(_, rest)| rest.chars().nth(1));
+            if let Some(Some(d)) = digits {
+                if d.to_digit(10).is_some_and(|d| d > 6) {
+                    return Err(EngineError::Parse(format!(
+                        "%FS declares {d} decimal digits for {axis}; at most 6 are allowed: {}",
+                        excerpt(block)
+                    )));
+                }
+            }
+        }
+    }
+    if let Some(body) = block.strip_prefix("%TO").and_then(|b| b.strip_suffix("*%")) {
+        // `.P` is `refdes,pin[,function]`; the parser reads both fields unchecked.
+        let args: Vec<&str> = body.split(',').map(str::trim).collect();
+        if args[0] == ".P" && args.len() < 3 {
+            return Err(EngineError::Parse(format!(
+                "%TO.P needs a component and a pin: {}",
+                excerpt(block)
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// True for a `%SR` that repeats once with zero step, in any spelling that
@@ -611,6 +652,19 @@ fn emit_command(tok: &str, out: &mut String) -> Result<()> {
         }
         _ => {}
     }
+    // Comments carry no geometry. The parser reads `G04 #@! TF…` comments as
+    // file attributes, with the same unchecked indexing as `%TF`, so drop them.
+    if tok.starts_with("G04") {
+        return Ok(());
+    }
+    // Commands are ASCII. The parser slices them by byte offset and panics
+    // inside a multi-byte character.
+    if !tok.is_ascii() {
+        return Err(EngineError::Parse(format!(
+            "non-ASCII character in command: {}",
+            excerpt(tok)
+        )));
+    }
     // Deprecated combined select, e.g. "G54D10" → "D10".
     if let Some(rest) = tok.strip_prefix("G54").filter(|r| r.starts_with('D')) {
         return emit_command(rest, out);
@@ -628,8 +682,42 @@ fn emit_command(tok: &str, out: &mut String) -> Result<()> {
             }
         }
     }
+    check_coordinate_digits(tok)?;
     out.push_str(tok);
     out.push_str("*\n");
+    Ok(())
+}
+
+/// Most significant digits a coordinate may carry. The `%FS` format allows at
+/// most 6 integer and 6 decimal digits, and the parser multiplies each value by
+/// up to 10^6, so a longer number overflows an `i64` there.
+const MAX_COORD_DIGITS: usize = 12;
+
+/// Fail loud on an `X`/`Y`/`I`/`J` number longer than any `%FS` format allows.
+fn check_coordinate_digits(tok: &str) -> Result<()> {
+    let mut chars = tok.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !matches!(c, 'X' | 'Y' | 'I' | 'J') {
+            continue;
+        }
+        if matches!(chars.peek(), Some('+' | '-')) {
+            chars.next();
+        }
+        let mut significant = 0usize;
+        while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+            if significant > 0 || d != '0' {
+                significant += 1;
+            }
+            chars.next();
+        }
+        if significant > MAX_COORD_DIGITS {
+            return Err(EngineError::Parse(format!(
+                "coordinate {c} has {significant} digits; a Gerber format allows at most \
+                 {MAX_COORD_DIGITS}: {}",
+                excerpt(tok)
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -994,7 +1082,7 @@ impl<'a> Machine<'a> {
         if self.is_arc(offset) {
             let ccw = matches!(self.interp, InterpolationMode::CounterclockwiseCircular);
             let center = self.arc_center(to, offset, ccw)?;
-            let pts = geom::arc_points(
+            let pts = geom::stroke_arc_points(
                 self.cur.x as f64,
                 self.cur.y as f64,
                 to.x as f64,
@@ -1002,6 +1090,7 @@ impl<'a> Machine<'a> {
                 center.0,
                 center.1,
                 ccw,
+                r,
             );
             for w in pts.windows(2) {
                 let c = geom::stadium(
@@ -1736,6 +1825,134 @@ mod tests {
 
     fn area_mm2(g: &str) -> f64 {
         resolve_layer(g.as_bytes()).unwrap().area_mm2()
+    }
+
+    /// Fuzz find: `%FSLAX57…` (7 decimals) underflowed the parser's scale
+    /// factor. It must be a parse error.
+    #[test]
+    fn format_with_more_than_six_decimals_is_a_parse_error() {
+        for fs in ["%FSLAX57Y46*%", "%FSLAX46Y47*%"] {
+            let g = format!("{fs}\n%MOMM*%\n%ADD10C,0.5*%\nD10*\nX0Y0D03*\nM02*\n");
+            let err = resolve_layer(g.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("decimal digits"), "{err}");
+        }
+        let fuzz = b"%FSLAX57Y46*%\n%MOMM*%\n%AMRoundRect*\n0 Recta,$9,0*\n\
+                     20,1,$1+$1,$8,$9,$2,$X-0.30X01140*%\nD10*\nX0Y0D03*\nM02*\n";
+        assert_parse_error_no_panic(fuzz);
+    }
+
+    /// Fuzz find: a 19-digit coordinate overflowed the parser's scaling to
+    /// nanometres. It must be a parse error.
+    #[test]
+    fn overlong_coordinate_is_a_parse_error() {
+        for op in [
+            "X1736352590011845787D01",
+            "X0Y-12345678901234D02",
+            "I1234567890123J0D01",
+        ] {
+            let g = format!("{HDR}G01*\nG75*\nX0Y0D02*\n{op}*\nM02*\n");
+            let err = resolve_layer(g.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("digits"), "{op}: {err}");
+        }
+        // Leading zeros are not significant.
+        assert!(
+            resolve_layer(format!("{HDR}X0000000000000001000000Y0D03*\nM02*\n").as_bytes()).is_ok()
+        );
+    }
+
+    /// Fuzz find: `G0` followed by a non-ASCII byte made the parser slice
+    /// inside a multi-byte character. It must be a parse error.
+    #[test]
+    fn non_ascii_in_a_command_is_a_parse_error() {
+        for op in [&b"G0\xC0"[..], b"X0\xE2\x82\xACY0D03", "G0µ".as_bytes()] {
+            let mut g = HDR.as_bytes().to_vec();
+            g.extend_from_slice(op);
+            g.extend_from_slice(b"*\nM02*\n");
+            let err = resolve_layer(&g).unwrap_err();
+            assert!(err.to_string().contains("non-ASCII"), "{err}");
+        }
+        assert_parse_error_no_panic(b"G0\xC0*");
+        // Comments and attribute values may hold UTF-8.
+        let ok = format!("G04 µ-via 0.2 mm*\n{HDR}%TO.N,Net-(µ1)*%\nX0Y0D03*\nM02*\n");
+        assert!(resolve_layer(ok.as_bytes()).is_ok());
+    }
+
+    /// Fuzz find: a line inside a multi-line extended block was parsed as a
+    /// command of its own, so a bare `G0` line sliced past its end.
+    #[test]
+    fn lines_inside_an_extended_block_are_not_commands() {
+        // Joined, this is one (user-defined) file attribute with no geometry.
+        let g = format!("{HDR}%TF.Project10-03*\nG0\nX*1*%\nX0Y0D03*\nM02*\n");
+        assert!(resolve_layer(g.as_bytes()).is_ok());
+        // A multi-line macro still reads as one block.
+        let am = "%FSLAX46Y46*%\n%MOMM*%\n%AMBOX*\n21,1,1.0,1.0,\n0,0,0*\n%\n%ADD10BOX*%\nD10*\nX0Y0D03*\nM02*\n";
+        assert!((area_mm2(am) - 1.0).abs() < 1e-6, "{}", area_mm2(am));
+    }
+
+    /// Attribute values and comments are free text and may hold UTF-8 (X2
+    /// spec): only commands are ASCII. These must resolve with their geometry
+    /// unchanged, X2 labels included.
+    #[test]
+    fn utf8_in_attributes_and_comments_resolves() {
+        let g = "%TF.ProjectId,Pröjekt-Ω,4d61645f,A*%\n%TF.Ersteller,Jürgen*%\n\
+                 %FSLAX46Y46*%\n%MOMM*%\n\
+                 %AMBOX*\n0 Größe µm*\n21,1,1.0,1.0,0,0,0*%\n\
+                 %TA.Größe,µm*%\n%ADD10BOX*%\n%TD*%\n\
+                 G04 Kommentar äöü*\nG04 #@! TO.N,Net-(µ2)*\n\
+                 %TO.N,Net-(µ1)*%\n%TO.C,Ω1*%\n%TO.P,Ω1,1,Fünktion*%\n\
+                 D10*\nX0Y0D03*\nM02*\n";
+        assert!((area_mm2(g) - 1.0).abs() < 1e-6, "{}", area_mm2(g));
+    }
+
+    /// Fuzz find: a `%TF` attribute with too few arguments (for example
+    /// `.GenerationSoftware` with one) was indexed past its end by the parser.
+    /// File attributes carry no geometry, so these layers resolve.
+    #[test]
+    fn short_file_attributes_do_not_panic() {
+        for attr in [
+            "%TF.GenerationSoftware*%",
+            "%TF.GenerationSoftware,KiCadD*%",
+            "%TF.FileFunction,Soldermask*%",
+            "G04 #@! TF.GenerationSoftware*",
+        ] {
+            let g = format!("{attr}\n{HDR}X0Y0D03*\nM02*\n");
+            assert!(resolve_layer(g.as_bytes()).is_ok(), "{attr}");
+        }
+    }
+
+    /// Fuzz find: `%TO.P` with fewer than two values was indexed past its end
+    /// by the parser. It must be a parse error.
+    #[test]
+    fn pin_attribute_without_a_pin_is_a_parse_error() {
+        for attr in ["%TO.P*%", "%TO.P,J*%"] {
+            let g = format!("{HDR}{attr}\nX0Y0D03*\nM02*\n");
+            let err = resolve_layer(g.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("%TO.P"), "{attr}: {err}");
+        }
+        assert_parse_error_no_panic(b"%TO.P,J*%");
+        let ok = format!("{HDR}%TO.P,U1,3*%\nX0Y0D03*\nM02*\n");
+        assert!(resolve_layer(ok.as_bytes()).is_ok());
+    }
+
+    /// Fuzz find: a full circle of radius 50 nm stroked 0.5 mm wide became 64
+    /// near-coincident stadiums, and the union took about a minute. The stroke
+    /// covers such an arc, so it needs only the sagitta's few segments.
+    #[test]
+    fn tiny_arc_under_a_wide_stroke_is_fast_and_a_disk() {
+        let g = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.500000*%\nD10*\nG75*\n\
+                 X15000000Y-10000000D02*\nG03*\nX15000000Y-10000000I-50J0D01*\nM02*\n";
+        let t = std::time::Instant::now();
+        let area = area_mm2(g);
+        assert!(t.elapsed().as_secs() < 5, "took {:?}", t.elapsed());
+        let disk = std::f64::consts::PI * 0.25 * 0.25;
+        assert!((area - disk).abs() < 0.01 * disk, "{area} vs {disk}");
+    }
+
+    /// A fuzz input must give a typed error, and not by way of the catch_unwind
+    /// net around the parser.
+    fn assert_parse_error_no_panic(bytes: &[u8]) {
+        let err = resolve_layer(bytes).unwrap_err().to_string();
+        assert!(!err.contains("panicked"), "parser panicked: {err}");
     }
 
     fn flash_table(g: &str) -> FlashTable {
