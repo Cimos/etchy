@@ -117,19 +117,33 @@ mod imp {
     /// raster (a large sheet at high DPI is a DoS-sized allocation otherwise).
     /// Mirrors the sizing in [`rasterize`] (`render_dimensions` × scale, floored).
     pub fn page_pixel_dims(bytes: &[u8], dpi: f32) -> Result<Vec<(u32, u32)>, PdfError> {
+        Ok(page_point_dims(bytes)?
+            .into_iter()
+            .map(|pt| pixel_dims_at(pt, dpi))
+            .collect())
+    }
+
+    /// Each page's render size in PDF points (1/72 inch), **without rendering**.
+    /// One parse; the caller can then size the pages at any DPI with
+    /// [`pixel_dims_at`]. The viewer uses this to find the highest DPI that fits
+    /// its raster caps (#223) without re-reading the document per guess.
+    pub fn page_point_dims(bytes: &[u8]) -> Result<Vec<(f32, f32)>, PdfError> {
         let pdf = Pdf::new(bytes.to_vec()).map_err(|e| PdfError::Load(format!("{e:?}")))?;
-        let scale = dpi / PDF_POINTS_PER_INCH;
         let pages = pdf.pages();
         if pages.is_empty() {
             return Err(PdfError::NoPages);
         }
-        Ok(pages
-            .iter()
-            .map(|p| {
-                let (w, h) = p.render_dimensions();
-                ((w * scale).floor() as u32, (h * scale).floor() as u32)
-            })
-            .collect())
+        Ok(pages.iter().map(|p| p.render_dimensions()).collect())
+    }
+
+    /// Pixel dimensions of a page of `points` size at `dpi`: the exact sizing
+    /// [`rasterize`] uses (points × dpi / 72, floored).
+    pub fn pixel_dims_at(points: (f32, f32), dpi: f32) -> (u32, u32) {
+        let scale = dpi / PDF_POINTS_PER_INCH;
+        (
+            (points.0 * scale).floor() as u32,
+            (points.1 * scale).floor() as u32,
+        )
     }
 
     /// A paired sheet whose two sides rasterized to genuinely different pixel
@@ -364,8 +378,8 @@ mod imp {
 
 #[cfg(feature = "pdf")]
 pub use imp::{
-    diff_pdfs, encode_png, page_pixel_dims, rasterize, PageDiff, PdfDiff, PdfError, RoundingCrop,
-    SizeChange, DEFAULT_DPI,
+    diff_pdfs, encode_png, page_pixel_dims, page_point_dims, pixel_dims_at, rasterize, PageDiff,
+    PdfDiff, PdfError, RoundingCrop, SizeChange, DEFAULT_DPI,
 };
 
 #[cfg(test)]
@@ -756,6 +770,11 @@ mod pdf_tests {
         assert_eq!((imgs[0].width, imgs[0].height), (200, 200));
         // Junk bytes fail loud, same as rasterize.
         assert!(page_pixel_dims(b"not a pdf", 72.0).is_err());
+        // The points query agrees, and sizes at any DPI the same way.
+        let pts = page_point_dims(&pdf).unwrap();
+        assert_eq!(pts, vec![(100.0, 100.0)]);
+        assert_eq!(pixel_dims_at(pts[0], 144.0), (200, 200));
+        assert!(page_point_dims(b"not a pdf").is_err());
     }
 
     #[test]

@@ -169,18 +169,11 @@ mod native {
         let new = load_source_any(new_path, label(new_path))?;
         // Persisted settings aren't restored yet at this point — seed a PDF pair
         // at the default DPI; `build_app` re-rasterizes if the restored setting
-        // differs (#223). The raster caps scale with DPI, so a pair that only
-        // fits at a lower DPI falls back to the CLI default rather than
-        // refusing to open at all (#223 review) — the DPI actually used is
-        // returned so build_app can keep the setting honest.
-        let (diff, dpi) = match compute_diff(&old, &new, PDF_DPI_DEFAULT) {
-            Ok(d) => (d, PDF_DPI_DEFAULT),
-            Err(first) => match compute_diff(&old, &new, PDF_DPI_FALLBACK) {
-                Ok(d) => (d, PDF_DPI_FALLBACK),
-                Err(_) => return Err(first),
-            },
-        };
-        Ok(Seed::Pair(old, new, diff, dpi))
+        // differs (#223). A pair that breaches the raster caps at the default
+        // is rendered at the highest DPI that fits, with a warning (the view
+        // records the DPI it was actually built at).
+        let diff = compute_diff(&old, &new, PDF_DPI_DEFAULT)?;
+        Ok(Seed::Pair(old, new, diff, PDF_DPI_DEFAULT))
     }
 
     /// Construct the app, restoring persisted settings. With a pair seed, both
@@ -202,17 +195,17 @@ mod native {
                     ComputedDiff::Board(diff) => ViewApp::from_cc(cc, diff, ol, nl),
                     ComputedDiff::Pdf(view) => {
                         let mut app = ViewApp::from_cc(cc, empty_diff(), ol, nl);
-                        app.pdf = Some(view);
+                        app.set_pdf_view(view);
                         app
                     }
                 };
                 app.src_old = Some(old);
                 app.src_new = Some(new);
                 // The seed was rasterized before settings restore; honour a
-                // different persisted DPI now (#223). If that re-rasterize
-                // fails (caps), the setting must fall back to the DPI the
-                // on-screen view was actually built at — the chip may never
-                // claim a DPI the view isn't (#223 review).
+                // different persisted DPI now (#223). A DPI over the caps is
+                // lowered to fit (with a warning); if the rebuild still fails,
+                // the setting falls back to the DPI the seed was requested at,
+                // so the setting matches the view on screen (#223 review).
                 if app.pdf.is_some() && app.pdf_dpi != seed_dpi {
                     app.rebuild_diff();
                     if app.load_error.is_some() {
@@ -1494,7 +1487,7 @@ fn compute_diff(
             Ok(ComputedDiff::Board(diff_from_sources(o, n)?))
         }
         (LoadedSource::Pdf(o), LoadedSource::Pdf(n)) => Ok(ComputedDiff::Pdf(
-            pdfview::build_pdf_view(&o.bytes, &n.bytes, pdf_dpi)?,
+            pdfview::build_pdf_view_fitted(&o.bytes, &n.bytes, pdf_dpi)?,
         )),
         _ => anyhow::bail!(
             "cannot compare a PDF with Gerber input — load two schematic PDFs \
@@ -1529,15 +1522,10 @@ const FOCUS_DEFAULT: f32 = 0.25;
 /// their `--dpi` flag for anything else.
 const PDF_DPI_DEFAULT: f32 = 200.0;
 
-/// Fallback for the CLI-args seed (#223 review): the raster caps scale with
-/// DPI, so a pair that fit at the old 150 default must still open — it seeds at
-/// 150 when 200 breaches a cap, and the Settings chip reflects the DPI used.
-#[cfg(not(target_arch = "wasm32"))]
-const PDF_DPI_FALLBACK: f32 = 150.0;
-
-/// The Settings > Diff DPI chips (#223). Bounded choices, not a free slider —
-/// each step is checked against the raster caps at load, and a chip that
-/// breaches them fails loud and reverts.
+/// The Settings > Diff DPI chips (#223). Bounded choices, not a free slider.
+/// Each is checked against the raster caps at load: a pair that breaches them
+/// at the chosen DPI is rendered at the highest whole DPI that fits, with a
+/// warning naming the page and the cap.
 const PDF_DPI_CHOICES: [f32; 3] = [150.0, 200.0, 300.0];
 
 /// Floor for the Layers-panel row ghosting (#224): rows mirror the canvas focus
@@ -2837,6 +2825,15 @@ impl ViewApp {
     /// page view takes over the canvas and panels.
     fn adopt_pdf(&mut self, view: PdfView, old_label: String, new_label: String) {
         self.adopt_diff(empty_diff(), old_label, new_label);
+        self.set_pdf_view(view);
+    }
+
+    /// Install a PDF view. A view rendered below the chosen DPI (#223) puts its
+    /// note in the trust-warning chip, so the lower resolution is never silent.
+    fn set_pdf_view(&mut self, view: PdfView) {
+        if let Some(note) = &view.dpi_note {
+            self.diff.report.warnings.push(note.clone());
+        }
         self.pdf = Some(view);
     }
 
@@ -2955,10 +2952,12 @@ impl ViewApp {
     }
 
     /// Change the PDF rasterization DPI (#223). With a PDF pair loaded, the pair
-    /// is re-rasterized from the retained source bytes at the new DPI; a DPI
-    /// that breaches the pixel caps fails loud (`load_error`) and the setting
-    /// reverts, leaving the previous view — still built at the previous DPI —
-    /// on screen. Without a PDF pair it simply takes effect on the next load.
+    /// is re-rasterized from the retained source bytes at the new DPI. A DPI
+    /// that breaches the pixel caps renders at the highest DPI that fits, with
+    /// a warning; the setting keeps the chosen DPI for the next pair. Only a
+    /// pair that fits at no usable DPI fails loud (`load_error`) and reverts,
+    /// leaving the previous view on screen. Without a PDF pair the setting
+    /// simply takes effect on the next load.
     fn set_pdf_dpi(&mut self, dpi: f32) {
         let prev = self.pdf_dpi;
         if dpi == prev {
@@ -5061,8 +5060,9 @@ impl ViewApp {
                 .color(Color32::from_gray(150)),
         );
         // Rasterization DPI for schematic-PDF pairs (#223). A click with a PDF
-        // pair loaded re-rasterizes from the retained bytes; over-cap fails loud
-        // and reverts (see `set_pdf_dpi`). The CLI default stays 150 (--dpi).
+        // pair loaded re-rasterizes from the retained bytes; over the caps it
+        // renders lower and warns (see `set_pdf_dpi`). The CLI default stays
+        // 150 (--dpi).
         let mut pick: Option<f32> = None;
         ui.horizontal(|ui| {
             ui.label("DPI");
@@ -5084,8 +5084,24 @@ impl ViewApp {
         .response
         .on_hover_text(
             "Rasterization DPI for schematic-PDF diffs. Changing it re-renders \
-             the loaded pair; a DPI over the raster caps fails loud and reverts.",
+             the loaded pair; a page too big for the raster caps at this DPI is \
+             rendered at the highest DPI that fits, with a warning.",
         );
+        // The chip shows the setting; when the loaded pair had to be rendered
+        // lower, say so right here too, so the chip never reads as the DPI on
+        // screen when it is not.
+        if let Some(pv) = &self.pdf {
+            if pv.dpi != self.pdf_dpi {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "This pair is rendered at {} DPI (lowered to fit the raster caps)",
+                        pv.dpi
+                    ))
+                    .small()
+                    .color(C_COPPER),
+                );
+            }
+        }
         if let Some(dpi) = pick {
             self.set_pdf_dpi(dpi);
         }
@@ -6215,6 +6231,10 @@ impl ViewApp {
         // The alignment chosen (#249) sits with the page list, in copper, because
         // it changes which sheets each row compares.
         if let Some(note) = &pv.alignment_note {
+            ui.label(egui::RichText::new(note).small().color(C_COPPER));
+        }
+        // A DPI lowered to fit the raster caps (#223) is also a trust note.
+        if let Some(note) = &pv.dpi_note {
             ui.label(egui::RichText::new(note).small().color(C_COPPER));
         }
         ui.separator();
@@ -9221,6 +9241,25 @@ mod tests {
         app3.apply_settings(wild);
         assert_eq!(app3.focus, 1.0);
         assert_eq!(app3.pdf_dpi, 600.0);
+    }
+
+    /// #223: a PDF pair rendered below the chosen DPI puts the reason in the
+    /// trust-warning chip; one rendered as asked adds no warning.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn a_lowered_pdf_dpi_lands_in_the_warnings() {
+        use super::ViewApp;
+        use crate::pdfview::{build_pdf_view_fitted, multi_page_pdf, test_sized_sheet};
+        let strip = multi_page_pdf(&[test_sized_sheet(6000.0, 50.0, 10, 10)]);
+        let pv = build_pdf_view_fitted(&strip, &strip, 150.0).expect("fits lower");
+        let mut app = ViewApp::new(empty_diff(), "old".into(), "new".into());
+        app.adopt_pdf(pv, "old".into(), "new".into());
+        assert_eq!(app.diff.report.warnings.len(), 1);
+        assert!(app.diff.report.warnings[0].contains("98 DPI"));
+        let pdf = crate::pdfview::one_square_pdf(10, 10);
+        let pv = build_pdf_view_fitted(&pdf, &pdf, 150.0).expect("fits");
+        app.adopt_pdf(pv, "old".into(), "new".into());
+        assert!(app.diff.report.warnings.is_empty());
     }
 
     /// #222 regression: a changed PDF pair yields a non-empty export set — the

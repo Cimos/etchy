@@ -18,6 +18,13 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   revision turns it into a normal diff, and the welcome screen can show one
   loaded set alone, including in the web viewer (#466).
 
+### Changed
+- Viewer: a schematic PDF pair too big for the raster caps at the chosen DPI
+  now renders at the highest DPI that fits instead of refusing to load. A
+  warning in the warnings chip and the Pages panel names the DPI used, the
+  page and the cap; Settings › Diff shows the lower DPI next to the chips. A
+  pair that does not fit even at 72 DPI still fails loud (#223).
+
 ### Fixed
 - A drill or placement file that fails to parse is no longer reported as
   "gerber parse failed". The message now reads "parse failed", after the
