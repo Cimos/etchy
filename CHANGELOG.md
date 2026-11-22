@@ -29,6 +29,7 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   pair that does not fit even at 72 DPI still fails loud (#223).
 
 ### Fixed
+- Site download links and release status now point to the published v0.3.0 release (#483).
 - A pick-and-place file with a line holding only a quoted field (such as
   `""`) now fails with a parse error instead of crashing.
 - A Gerber `%FS` format with more than six decimal digits now fails with a
