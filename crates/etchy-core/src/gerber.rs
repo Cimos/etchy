@@ -581,6 +581,16 @@ fn check_block(block: &str) -> Result<()> {
             }
         }
     }
+    if let Some(body) = block.strip_prefix("%TO").and_then(|b| b.strip_suffix("*%")) {
+        // `.P` is `refdes,pin[,function]`; the parser reads both fields unchecked.
+        let args: Vec<&str> = body.split(',').map(str::trim).collect();
+        if args[0] == ".P" && args.len() < 3 {
+            return Err(EngineError::Parse(format!(
+                "%TO.P needs a component and a pin: {}",
+                excerpt(block)
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1892,6 +1902,20 @@ mod tests {
             let g = format!("{attr}\n{HDR}X0Y0D03*\nM02*\n");
             assert!(resolve_layer(g.as_bytes()).is_ok(), "{attr}");
         }
+    }
+
+    /// Fuzz find: `%TO.P` with fewer than two values was indexed past its end
+    /// by the parser. It must be a parse error.
+    #[test]
+    fn pin_attribute_without_a_pin_is_a_parse_error() {
+        for attr in ["%TO.P*%", "%TO.P,J*%"] {
+            let g = format!("{HDR}{attr}\nX0Y0D03*\nM02*\n");
+            let err = resolve_layer(g.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("%TO.P"), "{attr}: {err}");
+        }
+        assert_parse_error_no_panic(b"%TO.P,J*%");
+        let ok = format!("{HDR}%TO.P,U1,3*%\nX0Y0D03*\nM02*\n");
+        assert!(resolve_layer(ok.as_bytes()).is_ok());
     }
 
     /// A fuzz input must give a typed error, and not by way of the catch_unwind

@@ -87,6 +87,8 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
 - A Gerber file attribute (`%TF`, or a `G04 #@! TF` comment) with too few
   values no longer crashes the parser. File attributes and comments carry no
   geometry and are skipped when resolving a layer.
+- A Gerber `%TO.P` pin attribute without both a component and a pin now
+  fails with a parse error instead of crashing the parser.
 
 ## [0.2.0] — 2026-10-26
 
