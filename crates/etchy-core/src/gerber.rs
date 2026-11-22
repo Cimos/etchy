@@ -651,8 +651,42 @@ fn emit_command(tok: &str, out: &mut String) -> Result<()> {
             }
         }
     }
+    check_coordinate_digits(tok)?;
     out.push_str(tok);
     out.push_str("*\n");
+    Ok(())
+}
+
+/// Most significant digits a coordinate may carry. The `%FS` format allows at
+/// most 6 integer and 6 decimal digits, and the parser multiplies each value by
+/// up to 10^6, so a longer number overflows an `i64` there.
+const MAX_COORD_DIGITS: usize = 12;
+
+/// Fail loud on an `X`/`Y`/`I`/`J` number longer than any `%FS` format allows.
+fn check_coordinate_digits(tok: &str) -> Result<()> {
+    let mut chars = tok.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !matches!(c, 'X' | 'Y' | 'I' | 'J') {
+            continue;
+        }
+        if matches!(chars.peek(), Some('+' | '-')) {
+            chars.next();
+        }
+        let mut significant = 0usize;
+        while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+            if significant > 0 || d != '0' {
+                significant += 1;
+            }
+            chars.next();
+        }
+        if significant > MAX_COORD_DIGITS {
+            return Err(EngineError::Parse(format!(
+                "coordinate {c} has {significant} digits; a Gerber format allows at most \
+                 {MAX_COORD_DIGITS}: {}",
+                excerpt(tok)
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1773,6 +1807,25 @@ mod tests {
         let fuzz = b"%FSLAX57Y46*%\n%MOMM*%\n%AMRoundRect*\n0 Recta,$9,0*\n\
                      20,1,$1+$1,$8,$9,$2,$X-0.30X01140*%\nD10*\nX0Y0D03*\nM02*\n";
         assert_parse_error_no_panic(fuzz);
+    }
+
+    /// Fuzz find: a 19-digit coordinate overflowed the parser's scaling to
+    /// nanometres. It must be a parse error.
+    #[test]
+    fn overlong_coordinate_is_a_parse_error() {
+        for op in [
+            "X1736352590011845787D01",
+            "X0Y-12345678901234D02",
+            "I1234567890123J0D01",
+        ] {
+            let g = format!("{HDR}G01*\nG75*\nX0Y0D02*\n{op}*\nM02*\n");
+            let err = resolve_layer(g.as_bytes()).unwrap_err();
+            assert!(err.to_string().contains("digits"), "{op}: {err}");
+        }
+        // Leading zeros are not significant.
+        assert!(
+            resolve_layer(format!("{HDR}X0000000000000001000000Y0D03*\nM02*\n").as_bytes()).is_ok()
+        );
     }
 
     /// A fuzz input must give a typed error, and not by way of the catch_unwind

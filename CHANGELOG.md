@@ -78,6 +78,8 @@ Cut a new section here as part of tagging a release — see "Cutting a release" 
   `""`) now fails with a parse error instead of crashing.
 - A Gerber `%FS` format with more than six decimal digits now fails with a
   parse error instead of crashing the parser.
+- A Gerber coordinate with more digits than any format allows (over 12
+  significant digits) now fails with a parse error instead of overflowing.
 
 ## [0.2.0] — 2026-10-26
 
